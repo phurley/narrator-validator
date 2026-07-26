@@ -1,0 +1,18 @@
+name: Narrator story validation
+description: Validate a complete Narrator story repository
+inputs:
+  path:
+    description: Repository-relative path containing the story
+    required: false
+    default: .
+runs:
+  using: composite
+  steps:
+    - name: Install Rust 1.80
+      uses: dtolnay/rust-toolchain@1.80.0
+    - name: Build and run validator
+      shell: bash
+      run: >-
+        cargo run --quiet --locked
+        --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml"
+        -- --format github "$GITHUB_WORKSPACE/${{ inputs.path }}"
