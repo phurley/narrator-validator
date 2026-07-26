@@ -37,22 +37,49 @@ let report = validate(&[SourceFile {
 
 The core has no filesystem, async-runtime, HTTP, or GitHub dependency.
 
-## Browser / TypeScript
+## Browser / React
 
-Install `wasm-pack`, then build the web package:
+Install the CLI matching the crate's pinned `wasm-bindgen` version, then build
+the browser package:
 
 ```sh
-wasm-pack build --target web --features wasm
+cargo install wasm-bindgen-cli --version 0.2.100 --locked
+node scripts/build-web-package.mjs
 ```
 
-The generated module exports:
+The generated npm package is written to `pkg/`. Install that directory in the
+React application during local development:
+
+```sh
+pnpm add ../narrator-validator/pkg
+```
+
+The package owns WASM initialization and exposes an asynchronous, typed API:
 
 ```ts
-validate_json(JSON.stringify([{ path: "settings.yaml", source: "..." }]))
+import { validateRepository, type SourceFile } from "narrator-validator";
+
+const files: SourceFile[] = [
+  { path: "settings.yaml", source: "settings: []\n" },
+];
+const report = await validateRepository(files);
 ```
 
-It returns a JSON-encoded `ValidationReport`. Run it in a Web Worker and
-validate the debounced, in-memory snapshot of every YAML file.
+`validateRepository` always validates the complete in-memory snapshot and
+returns a typed `ValidationReport`. For live editor feedback, call it from a
+Web Worker so parsing does not block React input:
+
+```ts
+// validator.worker.ts
+import { validateRepository, type SourceFile } from "narrator-validator";
+
+self.onmessage = async (event: MessageEvent<SourceFile[]>) => {
+  self.postMessage(await validateRepository(event.data));
+};
+```
+
+The low-level wasm-bindgen exports remain available from
+`narrator-validator/raw`.
 
 ## GitHub Actions
 

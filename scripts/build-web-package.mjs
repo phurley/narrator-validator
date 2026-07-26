@@ -1,0 +1,112 @@
+#!/usr/bin/env node
+
+import { execFileSync } from 'node:child_process'
+import { copyFile, mkdir, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+const root = dirname(dirname(fileURLToPath(import.meta.url)))
+const output = join(root, 'pkg')
+const wasmBindgen =
+  process.env.NARRATOR_WASM_BINDGEN ?? 'wasm-bindgen'
+
+execFileSync(
+  'cargo',
+  [
+    'build',
+    '--release',
+    '--target',
+    'wasm32-unknown-unknown',
+    '--features',
+    'wasm',
+    '--lib',
+  ],
+  {
+    cwd: root,
+    stdio: 'inherit',
+  },
+)
+
+await mkdir(output, { recursive: true })
+
+execFileSync(
+  wasmBindgen,
+  [
+    '--target',
+    'web',
+    '--out-dir',
+    output,
+    '--out-name',
+    'narrator_validator',
+    join(
+      root,
+      'target',
+      'wasm32-unknown-unknown',
+      'release',
+      'narrator_validator.wasm',
+    ),
+  ],
+  {
+    cwd: root,
+    stdio: 'inherit',
+  },
+)
+
+await Promise.all([
+  copyFile(join(root, 'typescript', 'index.js'), join(output, 'index.js')),
+  copyFile(join(root, 'typescript', 'index.d.ts'), join(output, 'index.d.ts')),
+])
+
+const metadata = JSON.parse(
+  execFileSync(
+    'cargo',
+    ['metadata', '--no-deps', '--format-version', '1'],
+    {
+      cwd: root,
+      encoding: 'utf8',
+    },
+  ),
+)
+const rustPackage = metadata.packages.find(
+  (candidate) => candidate.manifest_path === join(root, 'Cargo.toml'),
+)
+if (rustPackage === undefined) {
+  throw new Error('could not find narrator-validator in cargo metadata')
+}
+
+const manifest = {
+  name: rustPackage.name,
+  version: rustPackage.version,
+  description: rustPackage.description,
+  license: rustPackage.license,
+  repository: rustPackage.repository,
+  type: 'module',
+  main: 'index.js',
+  module: 'index.js',
+  types: 'index.d.ts',
+  sideEffects: false,
+  files: [
+    'index.js',
+    'index.d.ts',
+    'narrator_validator.js',
+    'narrator_validator.d.ts',
+    'narrator_validator_bg.wasm',
+  ],
+  exports: {
+    '.': {
+      types: './index.d.ts',
+      import: './index.js',
+    },
+    './raw': {
+      types: './narrator_validator.d.ts',
+      import: './narrator_validator.js',
+    },
+  },
+}
+
+await writeFile(
+  join(output, 'package.json'),
+  `${JSON.stringify(manifest, null, 2)}\n`,
+)
+
+console.log(`Built browser package at ${output}`)

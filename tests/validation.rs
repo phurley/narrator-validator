@@ -54,6 +54,29 @@ deductions:
 tags:
   - id: tag.evidence
     members: [entity.knife]
+  - id: tag.gameplay
+    members: [route.foyer_study, command.examine, trigger.examine_knife]
+commands:
+  - id: command.examine
+    name: Examine
+    aliases: [inspect]
+    parameters:
+      - name: target
+        accepts: [entity]
+        required: true
+triggers:
+  - id: trigger.examine_knife
+    name: Examine the knife
+    command: command.examine
+    once: true
+    conditions:
+      - left: $target
+        operator: equals
+        right: entity.knife
+    effects:
+      - operation: discover
+        target: clue.weapon
+        value: visible
 "#;
 
 fn report(source: impl Into<String>) -> narrator_validator::ValidationReport {
@@ -202,6 +225,50 @@ fn validates_required_reference_shapes() {
     assert!(result.contains(&"route.missing_endpoint".to_string()));
     assert!(result.contains(&"event.participants_type".to_string()));
     assert!(result.contains(&"tag.members_type".to_string()));
+}
+
+#[test]
+fn validates_command_and_trigger_shapes() {
+    let source = VALID_STORY
+        .replace("aliases: [inspect]", "aliases: inspect")
+        .replace("accepts: [entity]", "accepts: []")
+        .replace("required: true", "required: sometimes")
+        .replace("once: true", "once: sometimes")
+        .replace("operator: equals", "operator: \"\"")
+        .replace("value: visible", "value: 42");
+    let result = codes(source);
+    assert!(result.contains(&"command.aliases_type".to_string()));
+    assert!(result.contains(&"command.parameter_accepts".to_string()));
+    assert!(result.contains(&"command.parameter_required_type".to_string()));
+    assert!(result.contains(&"trigger.once_type".to_string()));
+    assert!(result.contains(&"trigger.condition_field".to_string()));
+    assert!(result.contains(&"trigger.effect_value_type".to_string()));
+}
+
+#[test]
+fn validates_trigger_command_reference_type() {
+    let source = VALID_STORY.replace("command: command.examine", "command: entity.knife");
+    let report = report(source);
+    assert!(!report.valid);
+    assert!(report.diagnostics.iter().any(|item| {
+        item.code == "reference.wrong_type"
+            && item.subject_id.as_deref() == Some("entity.knife")
+            && item.pointer.as_deref() == Some("/triggers/0/command")
+    }));
+}
+
+#[test]
+fn commands_and_triggers_remain_optional() {
+    let without_gameplay_tag = VALID_STORY.replace(
+        "  - id: tag.gameplay\n    members: [route.foyer_study, command.examine, trigger.examine_knife]\n",
+        "",
+    );
+    let source = without_gameplay_tag
+        .split("commands:\n")
+        .next()
+        .expect("story before optional sections");
+    let report = report(source);
+    assert!(report.valid, "{:#?}", report.diagnostics);
 }
 
 #[test]

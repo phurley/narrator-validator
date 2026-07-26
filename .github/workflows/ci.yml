@@ -20,3 +20,9 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-features
       - run: cargo check --release --target wasm32-unknown-unknown --features wasm --lib
+      - name: Install wasm-bindgen CLI
+        run: cargo install wasm-bindgen-cli --version 0.2.100 --locked
+      - name: Build browser package
+        run: node scripts/build-web-package.mjs
+      - name: Smoke-test browser package
+        run: node typescript/smoke-test.mjs

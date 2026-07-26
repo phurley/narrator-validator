@@ -26,6 +26,7 @@ const REQUIRED_SECTIONS: &[&str] = &[
     "deductions",
     "tags",
 ];
+const OPTIONAL_SECTIONS: &[&str] = &["commands", "triggers"];
 
 #[derive(Debug)]
 struct ParsedFile<'a> {
@@ -45,6 +46,8 @@ enum Kind {
     Clue,
     Deduction,
     Tag,
+    Command,
+    Trigger,
 }
 
 impl Kind {
@@ -59,6 +62,8 @@ impl Kind {
             Self::Clue => "clue",
             Self::Deduction => "deduction",
             Self::Tag => "tag",
+            Self::Command => "command",
+            Self::Trigger => "trigger",
         }
     }
 
@@ -160,6 +165,8 @@ impl<'a> Validator<'a> {
         let clues = self.items("clues", Kind::Clue, true);
         let deductions = self.items("deductions", Kind::Deduction, true);
         let tags = self.items("tags", Kind::Tag, true);
+        let commands = self.items("commands", Kind::Command, true);
+        let triggers = self.items("triggers", Kind::Trigger, true);
 
         self.validate_case(&cases);
         self.validate_solution();
@@ -167,6 +174,8 @@ impl<'a> Validator<'a> {
         self.validate_duplicate_lists();
         self.validate_event_values(&events);
         self.validate_route_values(&routes);
+        self.validate_command_values(&commands);
+        self.validate_trigger_values(&triggers);
         self.validate_graphs(&cases, &settings, &routes, &entities, &clues, &deductions);
         self.validate_tags(&tags);
 
@@ -376,6 +385,22 @@ impl<'a> Validator<'a> {
                     }
                 }
                 Some(_) => {}
+            }
+        }
+        for section in OPTIONAL_SECTIONS {
+            if let Some(locations) = self.sections.get(*section).filter(|items| items.len() > 1) {
+                let locations = locations.clone();
+                for (path, pointer) in locations {
+                    self.push(
+                        Severity::Error,
+                        "schema.duplicate_section",
+                        format!("top-level section `{section}` is defined more than once"),
+                        &path,
+                        Some(pointer),
+                        None,
+                        None,
+                    );
+                }
             }
         }
     }
@@ -821,6 +846,218 @@ impl<'a> Validator<'a> {
         }
     }
 
+    fn validate_command_values(&mut self, commands: &[Item]) {
+        for command in commands {
+            if let Some(aliases) = command.mapping.get(Value::String("aliases".to_string())) {
+                if !is_nonempty_string_sequence(aliases, true) {
+                    self.push(
+                        Severity::Error,
+                        "command.aliases_type",
+                        "`aliases` must be a sequence of non-empty strings".to_string(),
+                        &command.path,
+                        Some(format!("{}/aliases", command.pointer)),
+                        None,
+                        Some(command.id.clone()),
+                    );
+                }
+            }
+
+            let Some(parameters) = command.mapping.get(Value::String("parameters".to_string()))
+            else {
+                continue;
+            };
+            let Some(parameters) = parameters.as_sequence() else {
+                self.push(
+                    Severity::Error,
+                    "command.parameters_type",
+                    "`parameters` must be a sequence".to_string(),
+                    &command.path,
+                    Some(format!("{}/parameters", command.pointer)),
+                    None,
+                    Some(command.id.clone()),
+                );
+                continue;
+            };
+
+            for (index, parameter) in parameters.iter().enumerate() {
+                let pointer = format!("{}/parameters/{index}", command.pointer);
+                let Some(parameter) = parameter.as_mapping() else {
+                    self.push(
+                        Severity::Error,
+                        "command.parameter_type",
+                        "command parameters must be mappings".to_string(),
+                        &command.path,
+                        Some(pointer),
+                        None,
+                        Some(command.id.clone()),
+                    );
+                    continue;
+                };
+                if !string_field(parameter, "name").is_some_and(|name| !name.trim().is_empty()) {
+                    self.push(
+                        Severity::Error,
+                        "command.parameter_name",
+                        "command parameter `name` must be a non-empty string".to_string(),
+                        &command.path,
+                        Some(format!("{pointer}/name")),
+                        None,
+                        Some(command.id.clone()),
+                    );
+                }
+                match parameter.get(Value::String("accepts".to_string())) {
+                    Some(accepts) if is_nonempty_string_sequence(accepts, false) => {}
+                    _ => self.push(
+                        Severity::Error,
+                        "command.parameter_accepts",
+                        "command parameter `accepts` must contain at least one ID namespace"
+                            .to_string(),
+                        &command.path,
+                        Some(format!("{pointer}/accepts")),
+                        None,
+                        Some(command.id.clone()),
+                    ),
+                }
+                if parameter
+                    .get(Value::String("required".to_string()))
+                    .is_some_and(|required| required.as_bool().is_none())
+                {
+                    self.push(
+                        Severity::Error,
+                        "command.parameter_required_type",
+                        "command parameter `required` must be a boolean".to_string(),
+                        &command.path,
+                        Some(format!("{pointer}/required")),
+                        None,
+                        Some(command.id.clone()),
+                    );
+                }
+            }
+        }
+    }
+
+    fn validate_trigger_values(&mut self, triggers: &[Item]) {
+        for trigger in triggers {
+            if !string_field(&trigger.mapping, "command")
+                .is_some_and(|command| !command.trim().is_empty())
+            {
+                self.push(
+                    Severity::Error,
+                    "trigger.missing_command",
+                    "trigger `command` must be a command ID".to_string(),
+                    &trigger.path,
+                    Some(format!("{}/command", trigger.pointer)),
+                    None,
+                    Some(trigger.id.clone()),
+                );
+            }
+            if trigger
+                .mapping
+                .get(Value::String("once".to_string()))
+                .is_some_and(|once| once.as_bool().is_none())
+            {
+                self.push(
+                    Severity::Error,
+                    "trigger.once_type",
+                    "trigger `once` must be a boolean".to_string(),
+                    &trigger.path,
+                    Some(format!("{}/once", trigger.pointer)),
+                    None,
+                    Some(trigger.id.clone()),
+                );
+            }
+            self.validate_trigger_mapping_list(
+                trigger,
+                "conditions",
+                &["left", "operator", "right"],
+                "trigger.condition",
+            );
+            self.validate_trigger_mapping_list(
+                trigger,
+                "effects",
+                &["operation", "target"],
+                "trigger.effect",
+            );
+
+            if let Some(effects) = trigger
+                .mapping
+                .get(Value::String("effects".to_string()))
+                .and_then(Value::as_sequence)
+            {
+                for (index, effect) in effects.iter().enumerate() {
+                    if effect.as_mapping().is_some_and(|effect| {
+                        effect
+                            .get(Value::String("value".to_string()))
+                            .is_some_and(|value| value.as_str().is_none())
+                    }) {
+                        self.push(
+                            Severity::Error,
+                            "trigger.effect_value_type",
+                            "trigger effect `value` must be a string when present".to_string(),
+                            &trigger.path,
+                            Some(format!("{}/effects/{index}/value", trigger.pointer)),
+                            None,
+                            Some(trigger.id.clone()),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn validate_trigger_mapping_list(
+        &mut self,
+        trigger: &Item,
+        field: &str,
+        required_fields: &[&str],
+        code_prefix: &str,
+    ) {
+        let Some(values) = trigger.mapping.get(Value::String(field.to_string())) else {
+            return;
+        };
+        let Some(values) = values.as_sequence() else {
+            self.push(
+                Severity::Error,
+                &format!("{code_prefix}s_type"),
+                format!("trigger `{field}` must be a sequence"),
+                &trigger.path,
+                Some(format!("{}/{}", trigger.pointer, escape_pointer(field))),
+                None,
+                Some(trigger.id.clone()),
+            );
+            return;
+        };
+        for (index, value) in values.iter().enumerate() {
+            let pointer = format!("{}/{field}/{index}", trigger.pointer);
+            let Some(mapping) = value.as_mapping() else {
+                self.push(
+                    Severity::Error,
+                    &format!("{code_prefix}_type"),
+                    format!("trigger {field} must be mappings"),
+                    &trigger.path,
+                    Some(pointer),
+                    None,
+                    Some(trigger.id.clone()),
+                );
+                continue;
+            };
+            for required_field in required_fields {
+                if !string_field(mapping, required_field)
+                    .is_some_and(|value| !value.trim().is_empty())
+                {
+                    self.push(
+                        Severity::Error,
+                        &format!("{code_prefix}_field"),
+                        format!("trigger {field} `{required_field}` must be a non-empty string"),
+                        &trigger.path,
+                        Some(format!("{pointer}/{}", escape_pointer(required_field))),
+                        None,
+                        Some(trigger.id.clone()),
+                    );
+                }
+            }
+        }
+    }
+
     fn require_nonnegative_integer(&mut self, item: &Item, field: &str, code: &str) {
         if !matches!(integer_field(&item.mapping, field), Some(value) if value >= 0) {
             self.push(
@@ -1211,6 +1448,7 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
     const ENTITIES: &[Kind] = &[Kind::Entity];
     const CLUES: &[Kind] = &[Kind::Clue];
     const DEDUCTIONS: &[Kind] = &[Kind::Deduction];
+    const COMMANDS: &[Kind] = &[Kind::Command];
     const CONTAINERS: &[Kind] = &[Kind::Setting, Kind::Character, Kind::Entity];
     const CONTENT_SOURCES: &[Kind] = &[Kind::Setting, Kind::Character, Kind::Entity, Kind::Event];
     const TAGGABLE: &[Kind] = &[
@@ -1220,6 +1458,9 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
         Kind::Event,
         Kind::Clue,
         Kind::Deduction,
+        Kind::Route,
+        Kind::Command,
+        Kind::Trigger,
     ];
 
     match field {
@@ -1236,6 +1477,7 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
         _ if field == "source" && pointer.contains("/characters/") => Some(CONTENT_SOURCES),
         _ if field == "target" && pointer.contains("/clues/") => Some(CONTENT_SOURCES),
         _ if parent == "targets" && pointer.contains("/clues/") => Some(CONTENT_SOURCES),
+        _ if field == "command" && pointer.contains("/triggers/") => Some(COMMANDS),
         _ if parent == "members" && pointer.contains("/tags/") => Some(TAGGABLE),
         _ => None,
     }
@@ -1380,6 +1622,15 @@ fn is_string_sequence(value: &Value) -> bool {
     value
         .as_sequence()
         .is_some_and(|values| values.iter().all(Value::is_string))
+}
+
+fn is_nonempty_string_sequence(value: &Value, allow_empty_sequence: bool) -> bool {
+    value.as_sequence().is_some_and(|values| {
+        (allow_empty_sequence || !values.is_empty())
+            && values
+                .iter()
+                .all(|value| value.as_str().is_some_and(|text| !text.trim().is_empty()))
+    })
 }
 
 fn bool_field(mapping: &Mapping, field: &str) -> Option<bool> {
