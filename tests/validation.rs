@@ -79,6 +79,90 @@ triggers:
         value: visible
 "#;
 
+const VALID_FORMAT_2_STORY: &str = r#"
+case:
+  id: case.example
+  format_version: 2
+  entry_settings: [setting.foyer]
+  exit_settings: [setting.foyer]
+solution:
+  victim: character.victim
+  culprit: character.culprit
+  weapon: entity.knife
+  location: setting.study
+  deduction: deduction.solution
+settings:
+  - id: setting.world
+    type: island
+  - id: setting.foyer
+    type: room
+    parent: setting.world
+  - id: setting.study
+    type: room
+    parent: setting.world
+routes:
+  - id: route.foyer_study
+    from: setting.foyer
+    to: setting.study
+    bidirectional: true
+    travel_minutes: 1
+characters:
+  - id: character.victim
+  - id: character.culprit
+facts:
+  - id: fact.knife_is_present
+    statement: The knife is present.
+  - id: fact.knife_has_blood
+    statement: The knife carries the victim's blood.
+    about: [entity.knife, character.victim]
+    requires: tag.knife_analysis_complete
+  - id: fact.knife_connects_to_scene
+    statement: The knife connects the culprit to the study.
+    requires: [fact.knife_is_present, entity.knife]
+entities:
+  - id: entity.knife
+    initial:
+      container: setting.study
+events:
+  - id: event.murder
+    day: 0
+    time: "21:18"
+    duration_minutes: 0
+    location: setting.study
+    participants: [character.victim, character.culprit]
+deductions:
+  - id: deduction.solution
+    conclusion: The knife was used in the study.
+    inputs: [fact.knife_has_blood, fact.knife_connects_to_scene]
+    truth: true
+tags:
+  - id: tag.evidence
+    members: [entity.knife]
+  - id: tag.knife_analysis_complete
+    state: true
+commands:
+  - id: command.claim
+    name: Claim
+    parameters:
+      - name: fact
+        accepts: [fact]
+        required: true
+  - id: command.investigate
+    name: Investigate
+    parameters:
+      - name: target
+        accepts: [entity]
+        required: true
+triggers:
+  - id: trigger.investigate_knife
+    name: Investigate the knife
+    command: command.investigate
+    effects:
+      - operation: give_after
+        target: tag.knife_analysis_complete
+        value: 20m
+"#;
+
 fn report(source: impl Into<String>) -> narrator_validator::ValidationReport {
     validate(&[SourceFile {
         path: "story.yaml".to_string(),
@@ -94,12 +178,124 @@ fn codes(source: impl Into<String>) -> Vec<String> {
         .collect()
 }
 
+fn story_with_facts() -> String {
+    VALID_STORY
+        .replace(
+            "  location: setting.study\nsettings:",
+            "  location: setting.study\n  deduction: deduction.solution\nsettings:",
+        )
+        .replace(
+            "  - id: character.culprit\nentities:",
+            "  - id: character.culprit\n    knowledge:\n      - fact: fact.knife_has_blood\n        source: entity.knife\nfacts:\n  - id: fact.knife_has_blood\n    statement: The knife carries the victim's blood.\n    about: [entity.knife, character.victim]\n    sources: [entity.knife, clue.weapon, command.examine, trigger.examine_knife]\n    initially_known: false\n  - id: fact.knife_was_at_scene\n    statement: The knife was in the study.\n    about: [entity.knife, setting.study]\n    sources: [entity.knife]\nentities:",
+        )
+        .replace(
+            "    initial:\n      container: setting.study",
+            "    initial:\n      container: setting.study\n    facts:\n      examined: [fact.knife_has_blood, fact.knife_was_at_scene]",
+        )
+        .replace(
+            "    discover_by:\n      target: entity.knife",
+            "    discover_by:\n      target: entity.knife\n    establishes: [fact.knife_has_blood]",
+        )
+        .replace(
+            "  - id: deduction.solution\n    supported_by: [clue.weapon]",
+            "  - id: deduction.solution\n    conclusion: The knife was used in the study.\n    supported_by: [clue.weapon]\n    inputs: [fact.knife_has_blood, fact.knife_was_at_scene]\n    truth: true",
+        )
+        .replace(
+            "      - operation: discover\n        target: clue.weapon\n        value: visible",
+            "      - operation: discover\n        target: clue.weapon\n        value: visible\n      - operation: learn_after\n        target: fact.knife_has_blood\n        value: 20m",
+        )
+}
+
 #[test]
 fn valid_repository_has_no_diagnostics() {
     let report = report(VALID_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
     assert_eq!(report.format_version, Some(1));
     assert!(report.diagnostics.is_empty());
+}
+
+#[test]
+fn valid_format_2_repository_has_no_diagnostics() {
+    let report = report(VALID_FORMAT_2_STORY);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert_eq!(report.format_version, Some(2));
+    assert!(report.diagnostics.is_empty());
+}
+
+#[test]
+fn format_2_requires_facts_and_rejects_clues() {
+    let without_facts = VALID_FORMAT_2_STORY.replace("facts:", "unused_facts:");
+    assert!(codes(without_facts).contains(&"schema.missing_section".to_string()));
+
+    let with_clues =
+        VALID_FORMAT_2_STORY.replace("deductions:", "clues:\n  - id: clue.legacy\ndeductions:");
+    assert!(codes(with_clues).contains(&"format.clues_removed".to_string()));
+}
+
+#[test]
+fn format_2_validates_fact_requirements_and_cycles() {
+    let malformed = VALID_FORMAT_2_STORY
+        .replace("requires: tag.knife_analysis_complete", "requires: []")
+        .replace(
+            "requires: [fact.knife_is_present, entity.knife]",
+            "requires: [fact.knife_is_present, case.example]",
+        );
+    let result = codes(malformed);
+    assert!(result.contains(&"fact.requires_type".to_string()));
+    assert!(result.contains(&"reference.wrong_type".to_string()));
+
+    let cyclic = VALID_FORMAT_2_STORY.replace(
+        "statement: The knife is present.",
+        "statement: The knife is present.\n    requires: fact.knife_connects_to_scene",
+    );
+    assert!(codes(cyclic).contains(&"fact.requirement_cycle".to_string()));
+}
+
+#[test]
+fn format_2_enforces_unclaimed_opening_facts_and_central_requirements() {
+    let source = VALID_FORMAT_2_STORY
+        .replace(
+            "statement: The knife is present.",
+            "statement: The knife is present.\n    initially_known: true",
+        )
+        .replace(
+            "    initial:\n      container: setting.study",
+            "    initial:\n      container: setting.study\n    facts: [fact.knife_is_present]",
+        )
+        .replace(
+            "    inputs: [fact.knife_has_blood, fact.knife_connects_to_scene]",
+            "    inputs: [fact.knife_has_blood, fact.knife_connects_to_scene]\n    supported_by: [clue.legacy]",
+        );
+    let result = codes(source);
+    assert!(result.contains(&"fact.initially_known_removed".to_string()));
+    assert!(result.contains(&"fact.associations_removed".to_string()));
+    assert!(result.contains(&"deduction.supported_by_removed".to_string()));
+}
+
+#[test]
+fn format_2_requires_a_fact_accepting_claim_command() {
+    let missing = VALID_FORMAT_2_STORY.replace("command.claim", "command.accept");
+    assert!(codes(missing).contains(&"fact.claim_command_missing".to_string()));
+
+    let invalid = VALID_FORMAT_2_STORY.replace("accepts: [fact]", "accepts: [entity]");
+    assert!(codes(invalid).contains(&"fact.claim_command_invalid".to_string()));
+}
+
+#[test]
+fn format_2_validates_state_tags_and_delayed_give_effects() {
+    let invalid = VALID_FORMAT_2_STORY
+        .replace("state: true", "state: sometimes")
+        .replace(
+            "target: tag.knife_analysis_complete\n        value: 20m",
+            "target: entity.knife\n        value: 0m",
+        );
+    let result = codes(invalid);
+    assert!(result.contains(&"tag.state_type".to_string()));
+    assert!(result.contains(&"trigger.effect_target_type".to_string()));
+    assert!(result.contains(&"trigger.effect_delay_invalid".to_string()));
+
+    let legacy = VALID_FORMAT_2_STORY.replace("operation: give_after", "operation: learn_after");
+    assert!(codes(legacy).contains(&"trigger.legacy_knowledge_effect".to_string()));
 }
 
 #[test]
@@ -255,6 +451,139 @@ fn validates_trigger_command_reference_type() {
             && item.subject_id.as_deref() == Some("entity.knife")
             && item.pointer.as_deref() == Some("/triggers/0/command")
     }));
+}
+
+#[test]
+fn validates_optional_facts_and_deduction_inputs() {
+    let source = story_with_facts();
+
+    let report = report(source.clone());
+    assert!(report.valid, "{:#?}", report.diagnostics);
+
+    let malformed = source
+        .replace(
+            "statement: The knife carries the victim's blood.",
+            "statement: \"\"",
+        )
+        .replace("initially_known: false", "initially_known: sometimes")
+        .replace(
+            "inputs: [fact.knife_has_blood, fact.knife_was_at_scene]",
+            "inputs: [fact.knife_has_blood]",
+        )
+        .replace("truth: true", "truth: perhaps");
+    let result = codes(malformed);
+    assert!(result.contains(&"fact.missing_statement".to_string()));
+    assert!(result.contains(&"fact.initially_known_type".to_string()));
+    assert!(result.contains(&"deduction.inputs_type".to_string()));
+    assert!(result.contains(&"deduction.truth_type".to_string()));
+}
+
+#[test]
+fn validates_fact_reference_types() {
+    let source = story_with_facts().replace("fact: fact.knife_has_blood", "fact: entity.knife");
+    let report = report(source);
+    assert!(!report.valid);
+    assert!(report.diagnostics.iter().any(|item| {
+        item.code == "reference.wrong_type"
+            && item.subject_id.as_deref() == Some("entity.knife")
+            && item
+                .pointer
+                .as_deref()
+                .is_some_and(|pointer| pointer.ends_with("/knowledge/0/fact"))
+    }));
+}
+
+#[test]
+fn legacy_character_knowledge_and_clue_prose_remain_valid_without_facts() {
+    let source = VALID_STORY
+        .replace(
+            "  - id: character.culprit\nentities:",
+            "  - id: character.culprit\n    knowledge:\n      - fact: The knife was left in the study.\n        source: entity.knife\nentities:",
+        )
+        .replace(
+            "    discover_by:\n      target: entity.knife",
+            "    discover_by:\n      target: entity.knife\n    establishes: [The knife was used in the murder.]",
+        );
+    let report = report(source);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+}
+
+#[test]
+fn validates_fact_associations_and_clue_fact_references() {
+    let source = story_with_facts()
+        .replace(
+            "examined: [fact.knife_has_blood, fact.knife_was_at_scene]",
+            "examined: entity.knife",
+        )
+        .replace(
+            "establishes: [fact.knife_has_blood]",
+            "establishes: [entity.knife]",
+        );
+    let result = codes(source);
+    assert!(result.contains(&"fact.association_type".to_string()));
+    assert!(result.contains(&"reference.wrong_type".to_string()));
+}
+
+#[test]
+fn validates_learning_effect_targets_and_delays() {
+    let source = story_with_facts()
+        .replace(
+            "operation: discover\n        target: clue.weapon",
+            "operation: discover\n        target: fact.knife_has_blood",
+        )
+        .replace(
+            "operation: learn_after\n        target: fact.knife_has_blood\n        value: 20m",
+            "operation: learn_after\n        target: clue.weapon\n        value: 0m",
+        );
+    let result = codes(source);
+    assert!(result.contains(&"trigger.effect_target_type".to_string()));
+    assert!(result.contains(&"trigger.effect_delay_invalid".to_string()));
+
+    let missing_delay = story_with_facts().replace("        value: 20m\n", "");
+    assert!(codes(missing_delay).contains(&"trigger.effect_delay_missing".to_string()));
+}
+
+#[test]
+fn detects_deduction_cycles_through_inputs() {
+    let source = story_with_facts()
+        .replace(
+            "inputs: [fact.knife_has_blood, fact.knife_was_at_scene]",
+            "inputs: [deduction.loop, fact.knife_was_at_scene]",
+        )
+        .replace(
+            "tags:",
+            "  - id: deduction.loop\n    conclusion: The reasoning loops back on itself.\n    inputs: [deduction.solution, fact.knife_has_blood]\n    truth: false\n    contradicted_by: [fact.knife_was_at_scene]\ntags:",
+        );
+    assert!(codes(source).contains(&"deduction.dependency_cycle".to_string()));
+}
+
+#[test]
+fn warns_for_unreachable_facts_and_unrefutable_false_deductions() {
+    let source = story_with_facts()
+        .replace(
+            "entities:",
+            "  - id: fact.orphan\n    statement: This fact cannot be learned.\n    sources: [entity.knife]\nentities:",
+        )
+        .replace("truth: true", "truth: false");
+    let report = report(source);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert!(report
+        .diagnostics
+        .iter()
+        .any(|item| item.code == "fact.unreachable"));
+    assert!(report
+        .diagnostics
+        .iter()
+        .any(|item| item.code == "deduction.false_without_contradiction"));
+}
+
+#[test]
+fn validates_deduction_solution_shape() {
+    let source = story_with_facts().replace(
+        "truth: true",
+        "truth: true\n    solves:\n      culprit: character.culprit\n      weapon: entity.knife\n      location: setting.study\n      time: \"29:00\"",
+    );
+    assert!(codes(source).contains(&"deduction.solves_invalid_time".to_string()));
 }
 
 #[test]

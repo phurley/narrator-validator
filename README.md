@@ -92,6 +92,56 @@ This repository includes a composite action:
 
 It builds the pinned validator revision and emits native GitHub annotations.
 
+## Facts and deductions
+
+Validator 0.4 supports the format-2 notebook and claim model. Format 2 requires
+a `facts` section and removes clues. Every fact has a stable `fact.*` ID and a
+non-empty `statement`. Optional `about` and `sources` fields retain typed
+authoring context.
+
+A fact with no `requires` field becomes available on the opening player turn.
+Otherwise, `requires` is one ID or a non-empty list of IDs, all of which must be
+present:
+
+```yaml
+facts:
+  - id: fact.manual_cutoff
+    statement: The generator was cut off manually.
+    requires: [command.examine, entity.generator_controller]
+
+  - id: fact.blackout_was_staged
+    statement: Someone staged the blackout.
+    requires: fact.manual_cutoff
+```
+
+A `fact.*` requirement means that fact has been claimed, not merely made
+available. Format 2 therefore requires `command.claim` with a parameter that
+accepts fact IDs. The engine evaluates requirements when a player turn begins
+and after an action resolves; the resolved command and arguments participate
+in that check.
+
+Delayed work uses state tags. A state tag needs no static `members`, and
+`give_after` must target a tag with a positive minute, hour, or turn delay:
+
+```yaml
+- operation: give_after
+  target: tag.knife_forensics_complete
+  value: 20m
+```
+
+The resulting fact can require `tag.knife_forensics_complete`. Format 2 rejects
+clue sections, fact associations stored on other elements, `initially_known`,
+clue-based deduction `supported_by`, and the legacy `learn`/`discover` effects.
+Fact requirement cycles are also rejected.
+
+Format 1 remains supported for existing repositories, including its required
+`clues` section and optional 0.3 fact extensions.
+
+Gameplay deductions may define a player-facing `conclusion`, two or three
+fact/deduction `inputs`, hidden boolean `truth`, `contradicted_by` references,
+and an optional structured `solves` answer. Deduction cycle detection follows
+both `requires` and deduction-valued `inputs`.
+
 ## Initial rules
 
 The first pass checks:
@@ -101,19 +151,20 @@ The first pass checks:
 - globally unique, kind-prefixed IDs;
 - known typed and untyped references;
 - duplicate values in reference lists;
-- setting-parent, entity-containment, clue, and deduction cycles;
+- versioned clue or fact knowledge models and two- or three-input deductions;
+- setting-parent, entity-containment, fact/clue, and deduction cycles;
 - route endpoints, travel duration, reachability, and exitability;
 - explicit entry/exit settings when supplied, with a compatibility fallback
   that requires all navigable settings to be strongly connected;
 - solution reference types and basic event time/duration values.
 
-The current format has no explicit version or navigation contract. The
-validator accepts it, emits migration warnings, and treats a setting with
+Repositories without an explicit version or navigation contract remain
+accepted with migration warnings. Compatibility mode treats a setting with
 `type: island` as non-navigable. New repositories should add:
 
 ```yaml
 case:
-  format_version: 1
+  format_version: 2
   entry_settings:
     - setting.main_lodge
   exit_settings:

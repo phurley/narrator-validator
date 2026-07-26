@@ -22,11 +22,10 @@ const REQUIRED_SECTIONS: &[&str] = &[
     "characters",
     "entities",
     "events",
-    "clues",
     "deductions",
     "tags",
 ];
-const OPTIONAL_SECTIONS: &[&str] = &["commands", "triggers"];
+const SINGLE_SECTIONS: &[&str] = &["facts", "clues", "commands", "triggers"];
 
 #[derive(Debug)]
 struct ParsedFile<'a> {
@@ -44,6 +43,7 @@ enum Kind {
     Entity,
     Event,
     Clue,
+    Fact,
     Deduction,
     Tag,
     Command,
@@ -60,6 +60,7 @@ impl Kind {
             Self::Entity => "entity",
             Self::Event => "event",
             Self::Clue => "clue",
+            Self::Fact => "fact",
             Self::Deduction => "deduction",
             Self::Tag => "tag",
             Self::Command => "command",
@@ -154,34 +155,77 @@ impl<'a> Validator<'a> {
         }
         self.parse_files();
         self.index_sections();
-        self.validate_sections();
 
         let cases = self.items("case", Kind::Case, false);
+        self.validate_case(&cases);
+        self.validate_sections();
         let settings = self.items("settings", Kind::Setting, true);
         let routes = self.items("routes", Kind::Route, true);
         let characters = self.items("characters", Kind::Character, true);
         let entities = self.items("entities", Kind::Entity, true);
         let events = self.items("events", Kind::Event, true);
         let clues = self.items("clues", Kind::Clue, true);
+        let facts = self.items("facts", Kind::Fact, true);
         let deductions = self.items("deductions", Kind::Deduction, true);
         let tags = self.items("tags", Kind::Tag, true);
         let commands = self.items("commands", Kind::Command, true);
         let triggers = self.items("triggers", Kind::Trigger, true);
+        let facts_enabled = self.sections.contains_key("facts");
+        let fact_claims_enabled = self.format_version == Some(2);
 
-        self.validate_case(&cases);
         self.validate_solution();
         self.validate_references();
         self.validate_duplicate_lists();
         self.validate_event_values(&events);
         self.validate_route_values(&routes);
+        self.validate_character_values(&characters, facts_enabled);
+        if !fact_claims_enabled {
+            self.validate_clue_values(&clues, facts_enabled);
+        }
+        self.validate_fact_values(&facts, fact_claims_enabled);
+        for items in [
+            settings.as_slice(),
+            routes.as_slice(),
+            characters.as_slice(),
+            entities.as_slice(),
+            events.as_slice(),
+            commands.as_slice(),
+            triggers.as_slice(),
+        ] {
+            self.validate_fact_associations(items, fact_claims_enabled);
+        }
+        self.validate_deduction_values(&deductions, fact_claims_enabled);
         self.validate_command_values(&commands);
-        self.validate_trigger_values(&triggers);
-        self.validate_graphs(&cases, &settings, &routes, &entities, &clues, &deductions);
+        if fact_claims_enabled {
+            self.validate_claim_command(&commands);
+        }
+        self.validate_trigger_values(&triggers, fact_claims_enabled);
+        if !fact_claims_enabled {
+            self.validate_fact_reachability(
+                &facts,
+                &[
+                    settings.as_slice(),
+                    routes.as_slice(),
+                    characters.as_slice(),
+                    entities.as_slice(),
+                    events.as_slice(),
+                    commands.as_slice(),
+                    triggers.as_slice(),
+                ],
+                &clues,
+                &triggers,
+            );
+        }
+        self.validate_graphs(
+            &settings,
+            &entities,
+            &clues,
+            &facts,
+            &deductions,
+            fact_claims_enabled,
+        );
+        self.validate_navigation(&cases, &settings, &routes);
         self.validate_tags(&tags);
-
-        // Keep these collections live as independently indexed definitions;
-        // assigning them here makes that intent explicit.
-        let _ = characters;
     }
 
     fn validate_repository_bounds(&mut self) -> bool {
@@ -387,7 +431,43 @@ impl<'a> Validator<'a> {
                 Some(_) => {}
             }
         }
-        for section in OPTIONAL_SECTIONS {
+        let knowledge_section = if self.format_version == Some(2) {
+            "facts"
+        } else {
+            "clues"
+        };
+        match self.sections.get(knowledge_section) {
+            None => self.push(
+                Severity::Error,
+                "schema.missing_section",
+                format!("required top-level section `{knowledge_section}` is missing"),
+                "",
+                Some(format!("/{}", escape_pointer(knowledge_section))),
+                None,
+                None,
+            ),
+            Some(locations) if locations.len() > 1 => {
+                let locations = locations.clone();
+                for (path, pointer) in locations {
+                    self.push(
+                        Severity::Error,
+                        "schema.duplicate_section",
+                        format!(
+                            "top-level section `{knowledge_section}` is defined more than once"
+                        ),
+                        &path,
+                        Some(pointer),
+                        None,
+                        None,
+                    );
+                }
+            }
+            Some(_) => {}
+        }
+        for section in SINGLE_SECTIONS {
+            if *section == knowledge_section {
+                continue;
+            }
             if let Some(locations) = self.sections.get(*section).filter(|items| items.len() > 1) {
                 let locations = locations.clone();
                 for (path, pointer) in locations {
@@ -395,6 +475,21 @@ impl<'a> Validator<'a> {
                         Severity::Error,
                         "schema.duplicate_section",
                         format!("top-level section `{section}` is defined more than once"),
+                        &path,
+                        Some(pointer),
+                        None,
+                        None,
+                    );
+                }
+            }
+        }
+        if self.format_version == Some(2) {
+            if let Some(locations) = self.sections.get("clues").cloned() {
+                for (path, pointer) in locations {
+                    self.push(
+                        Severity::Error,
+                        "format.clues_removed",
+                        "format 2 removes clues; express player knowledge in `facts`".to_string(),
                         &path,
                         Some(pointer),
                         None,
@@ -561,11 +656,11 @@ impl<'a> Validator<'a> {
             Some(Value::Number(number)) => {
                 if let Some(version) = number.as_u64() {
                     self.format_version = Some(version);
-                    if version != 1 {
+                    if !matches!(version, 1 | 2) {
                         self.push(
                             Severity::Error,
                             "format.unsupported_version",
-                            format!("format version {version} is not supported; expected 1"),
+                            format!("format version {version} is not supported; expected 1 or 2"),
                             &case.path,
                             Some(format!("{}/format_version", case.pointer)),
                             locate_scalar(&case.source, &version.to_string()),
@@ -846,6 +941,462 @@ impl<'a> Validator<'a> {
         }
     }
 
+    fn validate_character_values(&mut self, characters: &[Item], facts_enabled: bool) {
+        for character in characters {
+            let Some(knowledge) = character
+                .mapping
+                .get(Value::String("knowledge".to_string()))
+            else {
+                continue;
+            };
+            let Some(knowledge) = knowledge.as_sequence() else {
+                self.push(
+                    Severity::Error,
+                    "character.knowledge_type",
+                    "character `knowledge` must be a sequence".to_string(),
+                    &character.path,
+                    Some(format!("{}/knowledge", character.pointer)),
+                    None,
+                    Some(character.id.clone()),
+                );
+                continue;
+            };
+            for (index, entry) in knowledge.iter().enumerate() {
+                let pointer = format!("{}/knowledge/{index}", character.pointer);
+                let Some(entry) = entry.as_mapping() else {
+                    self.push(
+                        Severity::Error,
+                        "character.knowledge_entry_type",
+                        "character knowledge entries must be mappings".to_string(),
+                        &character.path,
+                        Some(pointer),
+                        None,
+                        Some(character.id.clone()),
+                    );
+                    continue;
+                };
+                let Some(fact) =
+                    string_field(entry, "fact").filter(|value| !value.trim().is_empty())
+                else {
+                    self.push(
+                        Severity::Error,
+                        "character.knowledge_fact",
+                        "character knowledge `fact` must be a non-empty string".to_string(),
+                        &character.path,
+                        Some(format!("{pointer}/fact")),
+                        None,
+                        Some(character.id.clone()),
+                    );
+                    continue;
+                };
+                if facts_enabled {
+                    if !looks_like_id(fact) {
+                        self.push(
+                            Severity::Error,
+                            "character.knowledge_fact_reference",
+                            "character knowledge `fact` must be a fact ID when facts are authored"
+                                .to_string(),
+                            &character.path,
+                            Some(format!("{pointer}/fact")),
+                            locate_scalar(&character.source, fact),
+                            Some(character.id.clone()),
+                        );
+                    } else if self
+                        .definitions
+                        .get(fact)
+                        .is_some_and(|definition| definition.kind != Kind::Fact)
+                    {
+                        self.push(
+                            Severity::Error,
+                            "reference.wrong_type",
+                            format!("`{fact}` does not refer to a fact"),
+                            &character.path,
+                            Some(format!("{pointer}/fact")),
+                            locate_scalar(&character.source, fact),
+                            Some(fact.to_string()),
+                        );
+                    }
+                }
+                if entry
+                    .get(Value::String("source".to_string()))
+                    .is_some_and(|source| {
+                        !source
+                            .as_str()
+                            .is_some_and(|source| !source.trim().is_empty())
+                    })
+                {
+                    self.push(
+                        Severity::Error,
+                        "character.knowledge_source_type",
+                        "character knowledge `source` must be a non-empty ID when present"
+                            .to_string(),
+                        &character.path,
+                        Some(format!("{pointer}/source")),
+                        None,
+                        Some(character.id.clone()),
+                    );
+                }
+            }
+        }
+    }
+
+    fn validate_clue_values(&mut self, clues: &[Item], facts_enabled: bool) {
+        for clue in clues {
+            let Some(establishes) = clue.mapping.get(Value::String("establishes".to_string()))
+            else {
+                continue;
+            };
+            if !is_nonempty_string_sequence(establishes, true) {
+                self.push(
+                    Severity::Error,
+                    "clue.establishes_type",
+                    "clue `establishes` must be a sequence of non-empty strings".to_string(),
+                    &clue.path,
+                    Some(format!("{}/establishes", clue.pointer)),
+                    None,
+                    Some(clue.id.clone()),
+                );
+                continue;
+            }
+            if !facts_enabled {
+                continue;
+            }
+            for (index, fact) in establishes
+                .as_sequence()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .enumerate()
+            {
+                let pointer = format!("{}/establishes/{index}", clue.pointer);
+                if !looks_like_id(fact) {
+                    self.push(
+                        Severity::Error,
+                        "clue.establishes_reference",
+                        "clue `establishes` entries must be fact IDs when facts are authored"
+                            .to_string(),
+                        &clue.path,
+                        Some(pointer),
+                        locate_scalar(&clue.source, fact),
+                        Some(clue.id.clone()),
+                    );
+                } else if self
+                    .definitions
+                    .get(fact)
+                    .is_some_and(|definition| definition.kind != Kind::Fact)
+                {
+                    self.push(
+                        Severity::Error,
+                        "reference.wrong_type",
+                        format!("`{fact}` does not refer to a fact"),
+                        &clue.path,
+                        Some(pointer),
+                        locate_scalar(&clue.source, fact),
+                        Some(fact.to_string()),
+                    );
+                }
+            }
+        }
+    }
+
+    fn validate_fact_associations(&mut self, items: &[Item], fact_claims_enabled: bool) {
+        for item in items {
+            let Some(facts) = item.mapping.get(Value::String("facts".to_string())) else {
+                continue;
+            };
+            if fact_claims_enabled {
+                self.push(
+                    Severity::Error,
+                    "fact.associations_removed",
+                    "format 2 keeps availability requirements on each fact; remove this `facts` association".to_string(),
+                    &item.path,
+                    Some(format!("{}/facts", item.pointer)),
+                    None,
+                    Some(item.id.clone()),
+                );
+                continue;
+            }
+            if !valid_fact_association(facts) {
+                self.push(
+                    Severity::Error,
+                    "fact.association_type",
+                    "`facts` must be a non-empty sequence of fact IDs or a mapping of observation levels to non-empty fact-ID sequences".to_string(),
+                    &item.path,
+                    Some(format!("{}/facts", item.pointer)),
+                    None,
+                    Some(item.id.clone()),
+                );
+            }
+        }
+    }
+
+    fn validate_fact_values(&mut self, facts: &[Item], fact_claims_enabled: bool) {
+        for fact in facts {
+            if !string_field(&fact.mapping, "statement")
+                .is_some_and(|statement| !statement.trim().is_empty())
+            {
+                self.push(
+                    Severity::Error,
+                    "fact.missing_statement",
+                    "fact `statement` must be a non-empty string".to_string(),
+                    &fact.path,
+                    Some(format!("{}/statement", fact.pointer)),
+                    None,
+                    Some(fact.id.clone()),
+                );
+            }
+            if let Some(initially_known) = fact
+                .mapping
+                .get(Value::String("initially_known".to_string()))
+            {
+                if fact_claims_enabled {
+                    self.push(
+                        Severity::Error,
+                        "fact.initially_known_removed",
+                        "format 2 facts begin unclaimed; omit `requires` to make a fact available on the opening turn".to_string(),
+                        &fact.path,
+                        Some(format!("{}/initially_known", fact.pointer)),
+                        None,
+                        Some(fact.id.clone()),
+                    );
+                } else if initially_known.as_bool().is_none() {
+                    self.push(
+                        Severity::Error,
+                        "fact.initially_known_type",
+                        "fact `initially_known` must be a boolean".to_string(),
+                        &fact.path,
+                        Some(format!("{}/initially_known", fact.pointer)),
+                        None,
+                        Some(fact.id.clone()),
+                    );
+                }
+            }
+            if fact_claims_enabled {
+                if let Some(requires) = fact.mapping.get(Value::String("requires".to_string())) {
+                    if !is_nonempty_string_or_sequence(requires) {
+                        self.push(
+                            Severity::Error,
+                            "fact.requires_type",
+                            "fact `requires` must be one ID or a non-empty sequence of IDs"
+                                .to_string(),
+                            &fact.path,
+                            Some(format!("{}/requires", fact.pointer)),
+                            None,
+                            Some(fact.id.clone()),
+                        );
+                    }
+                }
+            }
+            for field in ["about", "sources"] {
+                if fact
+                    .mapping
+                    .get(Value::String(field.to_string()))
+                    .is_some_and(|value| !is_nonempty_string_sequence(value, false))
+                {
+                    self.push(
+                        Severity::Error,
+                        "fact.reference_list_type",
+                        format!("fact `{field}` must contain at least one ID"),
+                        &fact.path,
+                        Some(format!("{}/{}", fact.pointer, field)),
+                        None,
+                        Some(fact.id.clone()),
+                    );
+                }
+            }
+        }
+    }
+
+    fn validate_fact_reachability(
+        &mut self,
+        facts: &[Item],
+        fact_owners: &[&[Item]],
+        clues: &[Item],
+        triggers: &[Item],
+    ) {
+        let mut reachable = BTreeSet::new();
+        reachable.extend(
+            facts
+                .iter()
+                .filter(|fact| bool_field(&fact.mapping, "initially_known") == Some(true))
+                .map(|fact| fact.id.clone()),
+        );
+        for items in fact_owners {
+            for item in *items {
+                if let Some(value) = item.mapping.get(Value::String("facts".to_string())) {
+                    collect_fact_association_ids(value, &mut reachable);
+                }
+            }
+        }
+        for clue in clues {
+            reachable.extend(string_list_field(&clue.mapping, "establishes"));
+        }
+        for trigger in triggers {
+            for effect in trigger
+                .mapping
+                .get(Value::String("effects".to_string()))
+                .and_then(Value::as_sequence)
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_mapping)
+            {
+                if matches!(
+                    string_field(effect, "operation"),
+                    Some("learn" | "learn_after")
+                ) {
+                    if let Some(target) = string_field(effect, "target") {
+                        reachable.insert(target.to_string());
+                    }
+                }
+            }
+        }
+        for fact in facts.iter().filter(|fact| !reachable.contains(&fact.id)) {
+            self.push(
+                Severity::Warning,
+                "fact.unreachable",
+                format!(
+                    "fact `{}` is neither initially known nor associated with a discoverable element, clue, or learning effect",
+                    fact.id
+                ),
+                &fact.path,
+                Some(fact.pointer.clone()),
+                locate_scalar(&fact.source, &fact.id),
+                Some(fact.id.clone()),
+            );
+        }
+    }
+
+    fn validate_deduction_values(&mut self, deductions: &[Item], fact_claims_enabled: bool) {
+        for deduction in deductions {
+            if fact_claims_enabled
+                && deduction
+                    .mapping
+                    .contains_key(Value::String("supported_by".to_string()))
+            {
+                self.push(
+                    Severity::Error,
+                    "deduction.supported_by_removed",
+                    "format 2 deductions use `inputs`; clue-based `supported_by` was removed"
+                        .to_string(),
+                    &deduction.path,
+                    Some(format!("{}/supported_by", deduction.pointer)),
+                    None,
+                    Some(deduction.id.clone()),
+                );
+            }
+            let expanded = ["inputs", "truth", "contradicted_by", "solves"]
+                .iter()
+                .any(|field| {
+                    deduction
+                        .mapping
+                        .contains_key(Value::String((*field).to_string()))
+                });
+            if expanded
+                && !string_field(&deduction.mapping, "conclusion")
+                    .is_some_and(|conclusion| !conclusion.trim().is_empty())
+            {
+                self.push(
+                    Severity::Error,
+                    "deduction.missing_conclusion",
+                    "an authored gameplay deduction needs a non-empty `conclusion`".to_string(),
+                    &deduction.path,
+                    Some(format!("{}/conclusion", deduction.pointer)),
+                    None,
+                    Some(deduction.id.clone()),
+                );
+            }
+            if let Some(inputs) = deduction.mapping.get(Value::String("inputs".to_string())) {
+                let valid = inputs.as_sequence().is_some_and(|values| {
+                    (2..=3).contains(&values.len()) && values.iter().all(Value::is_string)
+                });
+                if !valid {
+                    self.push(
+                        Severity::Error,
+                        "deduction.inputs_type",
+                        "deduction `inputs` must contain two or three fact or deduction IDs"
+                            .to_string(),
+                        &deduction.path,
+                        Some(format!("{}/inputs", deduction.pointer)),
+                        None,
+                        Some(deduction.id.clone()),
+                    );
+                }
+            }
+            if deduction
+                .mapping
+                .get(Value::String("truth".to_string()))
+                .is_some_and(|value| value.as_bool().is_none())
+            {
+                self.push(
+                    Severity::Error,
+                    "deduction.truth_type",
+                    "deduction `truth` must be a boolean".to_string(),
+                    &deduction.path,
+                    Some(format!("{}/truth", deduction.pointer)),
+                    None,
+                    Some(deduction.id.clone()),
+                );
+            }
+            if deduction
+                .mapping
+                .get(Value::String("contradicted_by".to_string()))
+                .is_some_and(|value| !is_nonempty_string_sequence(value, false))
+            {
+                self.push(
+                    Severity::Error,
+                    "deduction.contradicted_by_type",
+                    "deduction `contradicted_by` must contain at least one fact or deduction ID"
+                        .to_string(),
+                    &deduction.path,
+                    Some(format!("{}/contradicted_by", deduction.pointer)),
+                    None,
+                    Some(deduction.id.clone()),
+                );
+            }
+            if bool_field(&deduction.mapping, "truth") == Some(false)
+                && string_list_field(&deduction.mapping, "contradicted_by").is_empty()
+            {
+                self.push(
+                    Severity::Warning,
+                    "deduction.false_without_contradiction",
+                    "a false deduction should identify at least one fact or deduction that can contradict it".to_string(),
+                    &deduction.path,
+                    Some(format!("{}/contradicted_by", deduction.pointer)),
+                    None,
+                    Some(deduction.id.clone()),
+                );
+            }
+            if let Some(solves) = deduction.mapping.get(Value::String("solves".to_string())) {
+                let Some(solves) = solves.as_mapping() else {
+                    self.push(
+                        Severity::Error,
+                        "deduction.solves_type",
+                        "deduction `solves` must be a mapping".to_string(),
+                        &deduction.path,
+                        Some(format!("{}/solves", deduction.pointer)),
+                        None,
+                        Some(deduction.id.clone()),
+                    );
+                    continue;
+                };
+                if solves
+                    .get(Value::String("time".to_string()))
+                    .is_some_and(|time| !time.as_str().is_some_and(valid_time))
+                {
+                    self.push(
+                        Severity::Error,
+                        "deduction.solves_invalid_time",
+                        "deduction `solves.time` must be a quoted 24-hour HH:MM value".to_string(),
+                        &deduction.path,
+                        Some(format!("{}/solves/time", deduction.pointer)),
+                        None,
+                        Some(deduction.id.clone()),
+                    );
+                }
+            }
+        }
+    }
+
     fn validate_command_values(&mut self, commands: &[Item]) {
         for command in commands {
             if let Some(aliases) = command.mapping.get(Value::String("aliases".to_string())) {
@@ -935,7 +1486,51 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn validate_trigger_values(&mut self, triggers: &[Item]) {
+    fn validate_claim_command(&mut self, commands: &[Item]) {
+        let Some(command) = commands
+            .iter()
+            .find(|command| command.id == "command.claim")
+        else {
+            self.push(
+                Severity::Error,
+                "fact.claim_command_missing",
+                "format 2 requires `command.claim` so players can claim available facts"
+                    .to_string(),
+                "",
+                Some("/commands".to_string()),
+                None,
+                Some("command.claim".to_string()),
+            );
+            return;
+        };
+        let accepts_fact = command
+            .mapping
+            .get(Value::String("parameters".to_string()))
+            .and_then(Value::as_sequence)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_mapping)
+            .filter_map(|parameter| {
+                parameter
+                    .get(Value::String("accepts".to_string()))
+                    .and_then(Value::as_sequence)
+            })
+            .flatten()
+            .any(|accepted| accepted.as_str() == Some("fact"));
+        if !accepts_fact {
+            self.push(
+                Severity::Error,
+                "fact.claim_command_invalid",
+                "`command.claim` needs a parameter that accepts `fact` IDs".to_string(),
+                &command.path,
+                Some(format!("{}/parameters", command.pointer)),
+                None,
+                Some(command.id.clone()),
+            );
+        }
+    }
+
+    fn validate_trigger_values(&mut self, triggers: &[Item], fact_claims_enabled: bool) {
         for trigger in triggers {
             if !string_field(&trigger.mapping, "command")
                 .is_some_and(|command| !command.trim().is_empty())
@@ -984,11 +1579,13 @@ impl<'a> Validator<'a> {
                 .and_then(Value::as_sequence)
             {
                 for (index, effect) in effects.iter().enumerate() {
-                    if effect.as_mapping().is_some_and(|effect| {
-                        effect
-                            .get(Value::String("value".to_string()))
-                            .is_some_and(|value| value.as_str().is_none())
-                    }) {
+                    let Some(effect) = effect.as_mapping() else {
+                        continue;
+                    };
+                    let invalid_value_type = effect
+                        .get(Value::String("value".to_string()))
+                        .is_some_and(|value| value.as_str().is_none());
+                    if invalid_value_type {
                         self.push(
                             Severity::Error,
                             "trigger.effect_value_type",
@@ -999,8 +1596,126 @@ impl<'a> Validator<'a> {
                             Some(trigger.id.clone()),
                         );
                     }
+                    let Some(operation) = string_field(effect, "operation") else {
+                        continue;
+                    };
+                    let Some(target) = string_field(effect, "target") else {
+                        continue;
+                    };
+                    match operation {
+                        "learn" | "learn_after" | "discover" | "discover_after"
+                            if fact_claims_enabled =>
+                        {
+                            self.push(
+                                Severity::Error,
+                                "trigger.legacy_knowledge_effect",
+                                format!(
+                                    "format 2 derives fact availability from `requires`; `{operation}` is no longer used"
+                                ),
+                                &trigger.path,
+                                Some(format!("{}/effects/{index}/operation", trigger.pointer)),
+                                locate_scalar(&trigger.source, operation),
+                                Some(trigger.id.clone()),
+                            );
+                        }
+                        "learn" | "learn_after" => self.validate_trigger_effect_target(
+                            trigger,
+                            index,
+                            operation,
+                            target,
+                            Kind::Fact,
+                        ),
+                        "discover" | "discover_after" => self.validate_trigger_effect_target(
+                            trigger,
+                            index,
+                            operation,
+                            target,
+                            Kind::Clue,
+                        ),
+                        "give" | "give_after" | "remove" => self.validate_trigger_effect_target(
+                            trigger,
+                            index,
+                            operation,
+                            target,
+                            Kind::Tag,
+                        ),
+                        _ => {}
+                    }
+                    if matches!(operation, "learn_after" | "discover_after" | "give_after")
+                        && !invalid_value_type
+                    {
+                        match string_field(effect, "value") {
+                            Some(value) if valid_delay(value) => {}
+                            Some(_) => self.push(
+                                Severity::Error,
+                                "trigger.effect_delay_invalid",
+                                "delayed effects need a positive delay such as `20m`, `1h`, or `2turns`".to_string(),
+                                &trigger.path,
+                                Some(format!("{}/effects/{index}/value", trigger.pointer)),
+                                None,
+                                Some(trigger.id.clone()),
+                            ),
+                            None => self.push(
+                                Severity::Error,
+                                "trigger.effect_delay_missing",
+                                "delayed effects require a `value` delay".to_string(),
+                                &trigger.path,
+                                Some(format!("{}/effects/{index}/value", trigger.pointer)),
+                                None,
+                                Some(trigger.id.clone()),
+                            ),
+                        }
+                    }
                 }
             }
+        }
+    }
+
+    fn validate_trigger_effect_target(
+        &mut self,
+        trigger: &Item,
+        effect_index: usize,
+        operation: &str,
+        target: &str,
+        expected: Kind,
+    ) {
+        if target.starts_with('$') {
+            return;
+        }
+        match self
+            .definitions
+            .get(target)
+            .map(|definition| definition.kind)
+        {
+            Some(kind) if kind == expected => {}
+            Some(kind) => self.push(
+                Severity::Error,
+                "trigger.effect_target_type",
+                format!(
+                    "trigger effect `{operation}` targets a {}; expected a {}",
+                    kind.name(),
+                    expected.name()
+                ),
+                &trigger.path,
+                Some(format!("{}/effects/{effect_index}/target", trigger.pointer)),
+                locate_scalar(&trigger.source, target),
+                Some(target.to_string()),
+            ),
+            None if looks_like_id(target) => {
+                // The generic reference pass reports the unknown ID.
+            }
+            None => self.push(
+                Severity::Error,
+                "trigger.effect_target_type",
+                format!(
+                    "trigger effect `{operation}` must target a {} ID",
+                    expected.name()
+                ),
+                &trigger.path,
+                Some(format!("{}/effects/{effect_index}/target", trigger.pointer)),
+                locate_scalar(&trigger.source, target),
+                Some(trigger.id.clone()),
+            ),
         }
     }
 
@@ -1074,12 +1789,12 @@ impl<'a> Validator<'a> {
 
     fn validate_graphs(
         &mut self,
-        cases: &[Item],
         settings: &[Item],
-        route_items: &[Item],
         entities: &[Item],
         clues: &[Item],
+        facts: &[Item],
         deductions: &[Item],
+        fact_claims_enabled: bool,
     ) {
         let setting_parents = settings
             .iter()
@@ -1112,18 +1827,24 @@ impl<'a> Validator<'a> {
             "entity containment",
         );
 
+        if fact_claims_enabled {
+            self.validate_cycles(
+                fact_dependency_graph(facts),
+                "fact.requirement_cycle",
+                "fact requirement",
+            );
+        } else {
+            self.validate_cycles(
+                dependency_graph(clues, "requires"),
+                "clue.dependency_cycle",
+                "clue dependency",
+            );
+        }
         self.validate_cycles(
-            dependency_graph(clues, "requires"),
-            "clue.dependency_cycle",
-            "clue dependency",
-        );
-        self.validate_cycles(
-            dependency_graph(deductions, "requires"),
+            deduction_dependency_graph(deductions),
             "deduction.dependency_cycle",
             "deduction dependency",
         );
-
-        self.validate_navigation(cases, settings, route_items);
     }
 
     fn validate_cycles(&mut self, graph: BTreeMap<String, Vec<String>>, code: &str, label: &str) {
@@ -1333,8 +2054,24 @@ impl<'a> Validator<'a> {
 
     fn validate_tags(&mut self, tags: &[Item]) {
         for tag in tags {
+            let state = match tag.mapping.get(Value::String("state".to_string())) {
+                Some(Value::Bool(state)) => *state,
+                Some(_) => {
+                    self.push(
+                        Severity::Error,
+                        "tag.state_type",
+                        "tag `state` must be a boolean".to_string(),
+                        &tag.path,
+                        Some(format!("{}/state", tag.pointer)),
+                        None,
+                        Some(tag.id.clone()),
+                    );
+                    false
+                }
+                None => false,
+            };
             match tag.mapping.get(Value::String("members".to_string())) {
-                Some(Value::Sequence(members)) if members.is_empty() => self.push(
+                Some(Value::Sequence(members)) if members.is_empty() && !state => self.push(
                     Severity::Warning,
                     "tag.empty",
                     format!("tag `{}` has no members", tag.id),
@@ -1343,7 +2080,7 @@ impl<'a> Validator<'a> {
                     None,
                     Some(tag.id.clone()),
                 ),
-                None => self.push(
+                None if !state => self.push(
                     Severity::Warning,
                     "tag.empty",
                     format!("tag `{}` has no members", tag.id),
@@ -1361,7 +2098,7 @@ impl<'a> Validator<'a> {
                     None,
                     Some(tag.id.clone()),
                 ),
-                Some(_) => {}
+                Some(_) | None => {}
             }
         }
     }
@@ -1447,16 +2184,50 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
     const CHARACTERS: &[Kind] = &[Kind::Character];
     const ENTITIES: &[Kind] = &[Kind::Entity];
     const CLUES: &[Kind] = &[Kind::Clue];
+    const FACTS: &[Kind] = &[Kind::Fact];
+    const FACT_REQUIREMENTS: &[Kind] = &[
+        Kind::Setting,
+        Kind::Route,
+        Kind::Character,
+        Kind::Entity,
+        Kind::Event,
+        Kind::Fact,
+        Kind::Deduction,
+        Kind::Tag,
+        Kind::Command,
+        Kind::Trigger,
+    ];
     const DEDUCTIONS: &[Kind] = &[Kind::Deduction];
+    const FACT_OR_DEDUCTION: &[Kind] = &[Kind::Fact, Kind::Deduction];
     const COMMANDS: &[Kind] = &[Kind::Command];
     const CONTAINERS: &[Kind] = &[Kind::Setting, Kind::Character, Kind::Entity];
     const CONTENT_SOURCES: &[Kind] = &[Kind::Setting, Kind::Character, Kind::Entity, Kind::Event];
+    const FACT_TOPICS: &[Kind] = &[
+        Kind::Setting,
+        Kind::Route,
+        Kind::Character,
+        Kind::Entity,
+        Kind::Event,
+        Kind::Command,
+        Kind::Trigger,
+    ];
+    const FACT_SOURCES: &[Kind] = &[
+        Kind::Setting,
+        Kind::Route,
+        Kind::Character,
+        Kind::Entity,
+        Kind::Event,
+        Kind::Clue,
+        Kind::Command,
+        Kind::Trigger,
+    ];
     const TAGGABLE: &[Kind] = &[
         Kind::Setting,
         Kind::Character,
         Kind::Entity,
         Kind::Event,
         Kind::Clue,
+        Kind::Fact,
         Kind::Deduction,
         Kind::Route,
         Kind::Command,
@@ -1468,8 +2239,19 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
         "weapon" => Some(ENTITIES),
         "parent" | "from" | "to" | "location" => Some(SETTINGS),
         "container" => Some(CONTAINERS),
+        "deduction" if pointer.contains("/solution/") => Some(DEDUCTIONS),
         _ if parent == "participants" => Some(CHARACTERS),
         _ if parent == "supported_by" => Some(CLUES),
+        _ if parent == "inputs" && pointer.contains("/deductions/") => Some(FACT_OR_DEDUCTION),
+        _ if parent == "contradicted_by" && pointer.contains("/deductions/") => {
+            Some(FACT_OR_DEDUCTION)
+        }
+        _ if parent == "about" && pointer.contains("/facts/") => Some(FACT_TOPICS),
+        _ if parent == "sources" && pointer.contains("/facts/") => Some(FACT_SOURCES),
+        _ if (field == "requires" || parent == "requires") && pointer.contains("/facts/") => {
+            Some(FACT_REQUIREMENTS)
+        }
+        _ if is_fact_association_pointer(pointer) => Some(FACTS),
         _ if parent == "requires" && pointer.contains("/routes/") => Some(ENTITIES),
         _ if parent == "requires" && pointer.contains("/clues/") => Some(CLUES),
         _ if parent == "requires" && pointer.contains("/deductions/") => Some(DEDUCTIONS),
@@ -1480,6 +2262,55 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
         _ if field == "command" && pointer.contains("/triggers/") => Some(COMMANDS),
         _ if parent == "members" && pointer.contains("/tags/") => Some(TAGGABLE),
         _ => None,
+    }
+}
+
+fn is_fact_association_pointer(pointer: &str) -> bool {
+    pointer.contains("/facts/")
+        && [
+            "/settings/",
+            "/routes/",
+            "/characters/",
+            "/entities/",
+            "/events/",
+            "/commands/",
+            "/triggers/",
+        ]
+        .iter()
+        .any(|section| pointer.starts_with(section))
+}
+
+fn valid_fact_association(value: &Value) -> bool {
+    match value {
+        Value::Sequence(_) => is_nonempty_string_sequence(value, false),
+        Value::Mapping(levels) => {
+            !levels.is_empty()
+                && levels.iter().all(|(level, facts)| {
+                    level.as_str().is_some_and(|level| !level.trim().is_empty())
+                        && is_nonempty_string_sequence(facts, false)
+                })
+        }
+        _ => false,
+    }
+}
+
+fn collect_fact_association_ids(value: &Value, result: &mut BTreeSet<String>) {
+    match value {
+        Value::String(id) => {
+            result.insert(id.to_string());
+        }
+        Value::Sequence(values) => {
+            for value in values {
+                collect_fact_association_ids(value, result);
+            }
+        }
+        Value::Mapping(values) => {
+            for value in values.values() {
+                collect_fact_association_ids(value, result);
+            }
+        }
+        Value::Tagged(tagged) => collect_fact_association_ids(&tagged.value, result),
+        _ => {}
     }
 }
 
@@ -1526,6 +2357,36 @@ fn dependency_graph(items: &[Item], field: &str) -> BTreeMap<String, Vec<String>
     items
         .iter()
         .map(|item| (item.id.clone(), string_list_field(&item.mapping, field)))
+        .collect()
+}
+
+fn fact_dependency_graph(items: &[Item]) -> BTreeMap<String, Vec<String>> {
+    items
+        .iter()
+        .map(|item| {
+            let dependencies = string_or_list_field(&item.mapping, "requires")
+                .into_iter()
+                .filter(|id| id_prefix(id) == Some("fact"))
+                .collect();
+            (item.id.clone(), dependencies)
+        })
+        .collect()
+}
+
+fn deduction_dependency_graph(items: &[Item]) -> BTreeMap<String, Vec<String>> {
+    items
+        .iter()
+        .map(|item| {
+            let mut dependencies: BTreeSet<String> = string_list_field(&item.mapping, "requires")
+                .into_iter()
+                .collect();
+            dependencies.extend(
+                string_list_field(&item.mapping, "inputs")
+                    .into_iter()
+                    .filter(|id| id_prefix(id) == Some("deduction")),
+            );
+            (item.id.clone(), dependencies.into_iter().collect())
+        })
         .collect()
 }
 
@@ -1618,10 +2479,30 @@ fn string_list_field(mapping: &Mapping, field: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
+fn string_or_list_field(mapping: &Mapping, field: &str) -> Vec<String> {
+    match mapping.get(Value::String(field.to_string())) {
+        Some(Value::String(value)) => vec![value.clone()],
+        Some(Value::Sequence(values)) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn is_string_sequence(value: &Value) -> bool {
     value
         .as_sequence()
         .is_some_and(|values| values.iter().all(Value::is_string))
+}
+
+fn is_nonempty_string_or_sequence(value: &Value) -> bool {
+    match value {
+        Value::String(value) => !value.trim().is_empty(),
+        Value::Sequence(_) => is_nonempty_string_sequence(value, false),
+        _ => false,
+    }
 }
 
 fn is_nonempty_string_sequence(value: &Value, allow_empty_sequence: bool) -> bool {
@@ -1688,6 +2569,16 @@ fn valid_time(value: &str) -> bool {
     let hour = (bytes[0] - b'0') * 10 + bytes[1] - b'0';
     let minute = (bytes[3] - b'0') * 10 + bytes[4] - b'0';
     hour < 24 && minute < 60
+}
+
+fn valid_delay(value: &str) -> bool {
+    let value = value.trim();
+    for suffix in ["turns", "turn", "m", "h"] {
+        if let Some(number) = value.strip_suffix(suffix) {
+            return number.trim().parse::<u64>().is_ok_and(|number| number > 0);
+        }
+    }
+    false
 }
 
 fn escape_pointer(value: &str) -> String {
