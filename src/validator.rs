@@ -26,6 +26,21 @@ const REQUIRED_SECTIONS: &[&str] = &[
     "tags",
 ];
 const SINGLE_SECTIONS: &[&str] = &["facts", "clues", "commands", "triggers"];
+const CANONICAL_SECTION_FILES: &[(&str, &str)] = &[
+    ("case", "settings.yaml"),
+    ("solution", "settings.yaml"),
+    ("settings", "settings.yaml"),
+    ("routes", "settings.yaml"),
+    ("characters", "characters.yaml"),
+    ("entities", "entities.yaml"),
+    ("events", "events.yaml"),
+    ("clues", "clues.yaml"),
+    ("facts", "facts.yml"),
+    ("deductions", "deductions.yaml"),
+    ("tags", "tags.yaml"),
+    ("commands", "commands.yaml"),
+    ("triggers", "triggers.yaml"),
+];
 
 #[derive(Debug)]
 struct ParsedFile<'a> {
@@ -155,6 +170,7 @@ impl<'a> Validator<'a> {
         }
         self.parse_files();
         self.index_sections();
+        self.validate_section_filenames();
 
         let cases = self.items("case", Kind::Case, false);
         self.validate_case(&cases);
@@ -496,6 +512,30 @@ impl<'a> Validator<'a> {
                         None,
                     );
                 }
+            }
+        }
+    }
+
+    fn validate_section_filenames(&mut self) {
+        for (section, expected_path) in CANONICAL_SECTION_FILES {
+            let Some(locations) = self.sections.get(*section).cloned() else {
+                continue;
+            };
+            for (path, pointer) in locations {
+                if path == *expected_path {
+                    continue;
+                }
+                self.push(
+                    Severity::Error,
+                    "schema.noncanonical_filename",
+                    format!(
+                        "top-level section `{section}` must be defined in `{expected_path}`, not `{path}`"
+                    ),
+                    &path,
+                    Some(pointer),
+                    None,
+                    None,
+                );
             }
         }
     }

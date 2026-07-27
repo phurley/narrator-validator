@@ -13,6 +13,17 @@ have stable rule codes, JSON pointers, and best-effort source ranges so callers
 can render the same result as an API response, an editor marker, or a CI
 annotation.
 
+Known top-level sections use canonical root filenames so the validator, editor,
+and game engine agree on where content lives:
+
+- `settings.yaml`: `case`, `solution`, `settings`, and `routes`
+- `characters.yaml`, `entities.yaml`, `events.yaml`, `deductions.yaml`,
+  `tags.yaml`, `commands.yaml`, and `triggers.yaml`: the matching section
+- `facts.yml`: `facts`
+- `clues.yaml`: legacy format-1 `clues`
+
+Other top-level metadata may remain in additional YAML files.
+
 ## CLI
 
 ```sh

@@ -1,8 +1,10 @@
+use std::collections::BTreeMap;
 use std::fs;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use narrator_validator::{validate, Severity, SourceFile};
+use serde_yaml::{Mapping, Value};
 
 const VALID_STORY: &str = r#"
 case:
@@ -164,10 +166,7 @@ triggers:
 "#;
 
 fn report(source: impl Into<String>) -> narrator_validator::ValidationReport {
-    validate(&[SourceFile {
-        path: "story.yaml".to_string(),
-        source: source.into(),
-    }])
+    validate(&story_files(source.into()))
 }
 
 fn codes(source: impl Into<String>) -> Vec<String> {
@@ -175,6 +174,40 @@ fn codes(source: impl Into<String>) -> Vec<String> {
         .diagnostics
         .into_iter()
         .map(|diagnostic| diagnostic.code)
+        .collect()
+}
+
+fn story_files(source: String) -> Vec<SourceFile> {
+    let Ok(Value::Mapping(root)) = serde_yaml::from_str::<Value>(&source) else {
+        return vec![SourceFile {
+            path: "story.yaml".to_string(),
+            source,
+        }];
+    };
+    let mut documents: BTreeMap<&str, Mapping> = BTreeMap::new();
+    for (key, value) in root {
+        let path = match key.as_str() {
+            Some("case" | "solution" | "settings" | "routes") => "settings.yaml",
+            Some("characters") => "characters.yaml",
+            Some("entities") => "entities.yaml",
+            Some("events") => "events.yaml",
+            Some("clues") => "clues.yaml",
+            Some("facts") => "facts.yml",
+            Some("deductions") => "deductions.yaml",
+            Some("tags") => "tags.yaml",
+            Some("commands") => "commands.yaml",
+            Some("triggers") => "triggers.yaml",
+            _ => "story.yaml",
+        };
+        documents.entry(path).or_default().insert(key, value);
+    }
+    documents
+        .into_iter()
+        .map(|(path, document)| SourceFile {
+            path: path.to_string(),
+            source: serde_yaml::to_string(&Value::Mapping(document))
+                .expect("test story serializes as YAML"),
+        })
         .collect()
 }
 
@@ -220,6 +253,26 @@ fn valid_format_2_repository_has_no_diagnostics() {
     assert!(report.valid, "{:#?}", report.diagnostics);
     assert_eq!(report.format_version, Some(2));
     assert!(report.diagnostics.is_empty());
+}
+
+#[test]
+fn rejects_sections_outside_their_canonical_files() {
+    let mut files = story_files(VALID_STORY.to_string());
+    files
+        .iter_mut()
+        .find(|file| file.path == "characters.yaml")
+        .expect("character document")
+        .path = "cast.yaml".to_string();
+
+    let report = validate(&files);
+
+    assert!(!report.valid);
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "schema.noncanonical_filename"
+            && diagnostic.path == "cast.yaml"
+            && diagnostic.pointer.as_deref() == Some("/characters")
+            && diagnostic.message.contains("`characters.yaml`")
+    }));
 }
 
 #[test]
@@ -602,12 +655,14 @@ fn commands_and_triggers_remain_optional() {
 
 #[test]
 fn rejects_yaml_aliases_in_sequence_items() {
-    let source = VALID_STORY.replace(
-        "  - id: character.victim",
-        "  - &victim\n    id: character.victim",
-    );
-    let result = codes(source);
-    assert!(result.contains(&"yaml.alias_unsupported".to_string()));
+    let report = validate(&[SourceFile {
+        path: "characters.yaml".to_string(),
+        source: "characters:\n  - &victim\n    id: character.victim\n".to_string(),
+    }]);
+    assert!(report
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "yaml.alias_unsupported"));
 }
 
 #[test]
