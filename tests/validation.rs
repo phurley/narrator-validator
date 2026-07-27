@@ -111,20 +111,20 @@ routes:
 characters:
   - id: character.victim
   - id: character.culprit
-facts:
-  - id: fact.knife_is_present
-    statement: The knife is present.
-  - id: fact.knife_has_blood
-    statement: The knife carries the victim's blood.
-    about: [entity.knife, character.victim]
-    requires: tag.knife_analysis_complete
-  - id: fact.knife_connects_to_scene
-    statement: The knife connects the culprit to the study.
-    requires: [fact.knife_is_present, entity.knife]
 entities:
   - id: entity.knife
     initial:
       container: setting.study
+    facts:
+      - id: fact.knife_is_present
+        statement: The knife is present.
+      - id: fact.knife_has_blood
+        statement: The knife carries the victim's blood.
+        about: [entity.knife, character.victim]
+        requires: tag.knife_analysis_complete
+      - id: fact.knife_connects_to_scene
+        statement: The knife connects the culprit to the study.
+        requires: [fact.knife_is_present, entity.knife]
 events:
   - id: event.murder
     day: 0
@@ -192,7 +192,7 @@ fn story_files(source: String) -> Vec<SourceFile> {
             Some("entities") => "entities.yaml",
             Some("events") => "events.yaml",
             Some("clues") => "clues.yaml",
-            Some("facts") => "facts.yml",
+            Some("facts") => "story.yaml",
             Some("deductions") => "deductions.yaml",
             Some("tags") => "tags.yaml",
             Some("commands") => "commands.yaml",
@@ -209,34 +209,6 @@ fn story_files(source: String) -> Vec<SourceFile> {
                 .expect("test story serializes as YAML"),
         })
         .collect()
-}
-
-fn story_with_facts() -> String {
-    VALID_STORY
-        .replace(
-            "  location: setting.study\nsettings:",
-            "  location: setting.study\n  deduction: deduction.solution\nsettings:",
-        )
-        .replace(
-            "  - id: character.culprit\nentities:",
-            "  - id: character.culprit\n    knowledge:\n      - fact: fact.knife_has_blood\n        source: entity.knife\nfacts:\n  - id: fact.knife_has_blood\n    statement: The knife carries the victim's blood.\n    about: [entity.knife, character.victim]\n    sources: [entity.knife, clue.weapon, command.examine, trigger.examine_knife]\n    initially_known: false\n  - id: fact.knife_was_at_scene\n    statement: The knife was in the study.\n    about: [entity.knife, setting.study]\n    sources: [entity.knife]\nentities:",
-        )
-        .replace(
-            "    initial:\n      container: setting.study",
-            "    initial:\n      container: setting.study\n    facts:\n      examined: [fact.knife_has_blood, fact.knife_was_at_scene]",
-        )
-        .replace(
-            "    discover_by:\n      target: entity.knife",
-            "    discover_by:\n      target: entity.knife\n    establishes: [fact.knife_has_blood]",
-        )
-        .replace(
-            "  - id: deduction.solution\n    supported_by: [clue.weapon]",
-            "  - id: deduction.solution\n    conclusion: The knife was used in the study.\n    supported_by: [clue.weapon]\n    inputs: [fact.knife_has_blood, fact.knife_was_at_scene]\n    truth: true",
-        )
-        .replace(
-            "      - operation: discover\n        target: clue.weapon\n        value: visible",
-            "      - operation: discover\n        target: clue.weapon\n        value: visible\n      - operation: learn_after\n        target: fact.knife_has_blood\n        value: 20m",
-        )
 }
 
 #[test]
@@ -276,13 +248,32 @@ fn rejects_sections_outside_their_canonical_files() {
 }
 
 #[test]
-fn format_2_requires_facts_and_rejects_clues() {
-    let without_facts = VALID_FORMAT_2_STORY.replace("facts:", "unused_facts:");
-    assert!(codes(without_facts).contains(&"schema.missing_section".to_string()));
+fn format_2_nests_facts_and_rejects_top_level_facts_and_clues() {
+    let with_top_level_facts = VALID_FORMAT_2_STORY.replace(
+        "entities:",
+        "facts:\n  - id: fact.legacy\n    statement: This no longer belongs at the root.\nentities:",
+    );
+    assert!(codes(with_top_level_facts).contains(&"format.facts_section_removed".to_string()));
 
     let with_clues =
         VALID_FORMAT_2_STORY.replace("deductions:", "clues:\n  - id: clue.legacy\ndeductions:");
     assert!(codes(with_clues).contains(&"format.clues_removed".to_string()));
+}
+
+#[test]
+fn format_2_allows_empty_fact_lists_and_rejects_non_mapping_facts() {
+    let empty = VALID_FORMAT_2_STORY.replace(
+        "  - id: character.culprit",
+        "  - id: character.culprit\n    facts: []",
+    );
+    let report = report(empty);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+
+    let malformed = VALID_FORMAT_2_STORY.replace(
+        "    facts:",
+        "    facts:\n      - fact.legacy_reference\n    ignored_facts:",
+    );
+    assert!(codes(malformed).contains(&"fact.item_type".to_string()));
 }
 
 #[test]
@@ -298,8 +289,8 @@ fn format_2_validates_fact_requirements_and_cycles() {
     assert!(result.contains(&"reference.wrong_type".to_string()));
 
     let cyclic = VALID_FORMAT_2_STORY.replace(
-        "statement: The knife is present.",
-        "statement: The knife is present.\n    requires: fact.knife_connects_to_scene",
+        "        statement: The knife is present.",
+        "        statement: The knife is present.\n        requires: fact.knife_connects_to_scene",
     );
     assert!(codes(cyclic).contains(&"fact.requirement_cycle".to_string()));
 }
@@ -308,12 +299,12 @@ fn format_2_validates_fact_requirements_and_cycles() {
 fn format_2_enforces_unclaimed_opening_facts_and_central_requirements() {
     let source = VALID_FORMAT_2_STORY
         .replace(
-            "statement: The knife is present.",
-            "statement: The knife is present.\n    initially_known: true",
+            "        statement: The knife is present.",
+            "        statement: The knife is present.\n        initially_known: true",
         )
         .replace(
-            "    initial:\n      container: setting.study",
-            "    initial:\n      container: setting.study\n    facts: [fact.knife_is_present]",
+            "    travel_minutes: 1",
+            "    travel_minutes: 1\n    facts: []",
         )
         .replace(
             "    inputs: [fact.knife_has_blood, fact.knife_connects_to_scene]",
@@ -321,7 +312,7 @@ fn format_2_enforces_unclaimed_opening_facts_and_central_requirements() {
         );
     let result = codes(source);
     assert!(result.contains(&"fact.initially_known_removed".to_string()));
-    assert!(result.contains(&"fact.associations_removed".to_string()));
+    assert!(result.contains(&"fact.owner_type".to_string()));
     assert!(result.contains(&"deduction.supported_by_removed".to_string()));
 }
 
@@ -508,7 +499,7 @@ fn validates_trigger_command_reference_type() {
 
 #[test]
 fn validates_optional_facts_and_deduction_inputs() {
-    let source = story_with_facts();
+    let source = VALID_FORMAT_2_STORY.to_string();
 
     let report = report(source.clone());
     assert!(report.valid, "{:#?}", report.diagnostics);
@@ -518,22 +509,23 @@ fn validates_optional_facts_and_deduction_inputs() {
             "statement: The knife carries the victim's blood.",
             "statement: \"\"",
         )
-        .replace("initially_known: false", "initially_known: sometimes")
         .replace(
-            "inputs: [fact.knife_has_blood, fact.knife_was_at_scene]",
+            "inputs: [fact.knife_has_blood, fact.knife_connects_to_scene]",
             "inputs: [fact.knife_has_blood]",
         )
         .replace("truth: true", "truth: perhaps");
     let result = codes(malformed);
     assert!(result.contains(&"fact.missing_statement".to_string()));
-    assert!(result.contains(&"fact.initially_known_type".to_string()));
     assert!(result.contains(&"deduction.inputs_type".to_string()));
     assert!(result.contains(&"deduction.truth_type".to_string()));
 }
 
 #[test]
 fn validates_fact_reference_types() {
-    let source = story_with_facts().replace("fact: fact.knife_has_blood", "fact: entity.knife");
+    let source = VALID_FORMAT_2_STORY.replace(
+        "  - id: character.culprit",
+        "  - id: character.culprit\n    knowledge:\n      - fact: entity.knife\n        source: entity.knife",
+    );
     let report = report(source);
     assert!(!report.valid);
     assert!(report.diagnostics.iter().any(|item| {
@@ -562,68 +554,24 @@ fn legacy_character_knowledge_and_clue_prose_remain_valid_without_facts() {
 }
 
 #[test]
-fn validates_fact_associations_and_clue_fact_references() {
-    let source = story_with_facts()
-        .replace(
-            "examined: [fact.knife_has_blood, fact.knife_was_at_scene]",
-            "examined: entity.knife",
-        )
-        .replace(
-            "establishes: [fact.knife_has_blood]",
-            "establishes: [entity.knife]",
-        );
-    let result = codes(source);
-    assert!(result.contains(&"fact.association_type".to_string()));
-    assert!(result.contains(&"reference.wrong_type".to_string()));
-}
-
-#[test]
-fn validates_learning_effect_targets_and_delays() {
-    let source = story_with_facts()
-        .replace(
-            "operation: discover\n        target: clue.weapon",
-            "operation: discover\n        target: fact.knife_has_blood",
-        )
-        .replace(
-            "operation: learn_after\n        target: fact.knife_has_blood\n        value: 20m",
-            "operation: learn_after\n        target: clue.weapon\n        value: 0m",
-        );
-    let result = codes(source);
-    assert!(result.contains(&"trigger.effect_target_type".to_string()));
-    assert!(result.contains(&"trigger.effect_delay_invalid".to_string()));
-
-    let missing_delay = story_with_facts().replace("        value: 20m\n", "");
-    assert!(codes(missing_delay).contains(&"trigger.effect_delay_missing".to_string()));
-}
-
-#[test]
 fn detects_deduction_cycles_through_inputs() {
-    let source = story_with_facts()
+    let source = VALID_FORMAT_2_STORY
         .replace(
-            "inputs: [fact.knife_has_blood, fact.knife_was_at_scene]",
-            "inputs: [deduction.loop, fact.knife_was_at_scene]",
+            "inputs: [fact.knife_has_blood, fact.knife_connects_to_scene]",
+            "inputs: [deduction.loop, fact.knife_connects_to_scene]",
         )
         .replace(
             "tags:",
-            "  - id: deduction.loop\n    conclusion: The reasoning loops back on itself.\n    inputs: [deduction.solution, fact.knife_has_blood]\n    truth: false\n    contradicted_by: [fact.knife_was_at_scene]\ntags:",
+            "  - id: deduction.loop\n    conclusion: The reasoning loops back on itself.\n    inputs: [deduction.solution, fact.knife_has_blood]\n    truth: false\n    contradicted_by: [fact.knife_connects_to_scene]\ntags:",
         );
     assert!(codes(source).contains(&"deduction.dependency_cycle".to_string()));
 }
 
 #[test]
-fn warns_for_unreachable_facts_and_unrefutable_false_deductions() {
-    let source = story_with_facts()
-        .replace(
-            "entities:",
-            "  - id: fact.orphan\n    statement: This fact cannot be learned.\n    sources: [entity.knife]\nentities:",
-        )
-        .replace("truth: true", "truth: false");
+fn warns_for_unrefutable_false_deductions() {
+    let source = VALID_FORMAT_2_STORY.replace("truth: true", "truth: false");
     let report = report(source);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert!(report
-        .diagnostics
-        .iter()
-        .any(|item| item.code == "fact.unreachable"));
     assert!(report
         .diagnostics
         .iter()
@@ -632,7 +580,7 @@ fn warns_for_unreachable_facts_and_unrefutable_false_deductions() {
 
 #[test]
 fn validates_deduction_solution_shape() {
-    let source = story_with_facts().replace(
+    let source = VALID_FORMAT_2_STORY.replace(
         "truth: true",
         "truth: true\n    solves:\n      culprit: character.culprit\n      weapon: entity.knife\n      location: setting.study\n      time: \"29:00\"",
     );

@@ -25,7 +25,7 @@ const REQUIRED_SECTIONS: &[&str] = &[
     "deductions",
     "tags",
 ];
-const SINGLE_SECTIONS: &[&str] = &["facts", "clues", "commands", "triggers"];
+const SINGLE_SECTIONS: &[&str] = &["clues", "commands", "triggers"];
 const CANONICAL_SECTION_FILES: &[(&str, &str)] = &[
     ("case", "settings.yaml"),
     ("solution", "settings.yaml"),
@@ -35,7 +35,6 @@ const CANONICAL_SECTION_FILES: &[(&str, &str)] = &[
     ("entities", "entities.yaml"),
     ("events", "events.yaml"),
     ("clues", "clues.yaml"),
-    ("facts", "facts.yml"),
     ("deductions", "deductions.yaml"),
     ("tags", "tags.yaml"),
     ("commands", "commands.yaml"),
@@ -181,13 +180,23 @@ impl<'a> Validator<'a> {
         let entities = self.items("entities", Kind::Entity, true);
         let events = self.items("events", Kind::Event, true);
         let clues = self.items("clues", Kind::Clue, true);
-        let facts = self.items("facts", Kind::Fact, true);
         let deductions = self.items("deductions", Kind::Deduction, true);
         let tags = self.items("tags", Kind::Tag, true);
         let commands = self.items("commands", Kind::Command, true);
         let triggers = self.items("triggers", Kind::Trigger, true);
-        let facts_enabled = self.sections.contains_key("facts");
         let fact_claims_enabled = self.format_version == Some(2);
+        let facts = if fact_claims_enabled {
+            self.nested_facts(&[
+                settings.as_slice(),
+                characters.as_slice(),
+                entities.as_slice(),
+                events.as_slice(),
+                triggers.as_slice(),
+            ])
+        } else {
+            Vec::new()
+        };
+        let facts_enabled = !facts.is_empty();
 
         self.validate_solution();
         self.validate_references();
@@ -199,16 +208,21 @@ impl<'a> Validator<'a> {
             self.validate_clue_values(&clues, facts_enabled);
         }
         self.validate_fact_values(&facts, fact_claims_enabled);
-        for items in [
-            settings.as_slice(),
-            routes.as_slice(),
-            characters.as_slice(),
-            entities.as_slice(),
-            events.as_slice(),
-            commands.as_slice(),
-            triggers.as_slice(),
-        ] {
-            self.validate_fact_associations(items, fact_claims_enabled);
+        if fact_claims_enabled {
+            self.validate_disallowed_fact_owners(&routes);
+            self.validate_disallowed_fact_owners(&commands);
+        } else {
+            for items in [
+                settings.as_slice(),
+                routes.as_slice(),
+                characters.as_slice(),
+                entities.as_slice(),
+                events.as_slice(),
+                commands.as_slice(),
+                triggers.as_slice(),
+            ] {
+                self.validate_fact_associations(items);
+            }
         }
         self.validate_deduction_values(&deductions, fact_claims_enabled);
         self.validate_command_values(&commands);
@@ -447,38 +461,36 @@ impl<'a> Validator<'a> {
                 Some(_) => {}
             }
         }
-        let knowledge_section = if self.format_version == Some(2) {
-            "facts"
-        } else {
-            "clues"
-        };
-        match self.sections.get(knowledge_section) {
-            None => self.push(
-                Severity::Error,
-                "schema.missing_section",
-                format!("required top-level section `{knowledge_section}` is missing"),
-                "",
-                Some(format!("/{}", escape_pointer(knowledge_section))),
-                None,
-                None,
-            ),
-            Some(locations) if locations.len() > 1 => {
-                let locations = locations.clone();
-                for (path, pointer) in locations {
-                    self.push(
-                        Severity::Error,
-                        "schema.duplicate_section",
-                        format!(
-                            "top-level section `{knowledge_section}` is defined more than once"
-                        ),
-                        &path,
-                        Some(pointer),
-                        None,
-                        None,
-                    );
+        let knowledge_section = "clues";
+        if self.format_version != Some(2) {
+            match self.sections.get(knowledge_section) {
+                None => self.push(
+                    Severity::Error,
+                    "schema.missing_section",
+                    format!("required top-level section `{knowledge_section}` is missing"),
+                    "",
+                    Some(format!("/{}", escape_pointer(knowledge_section))),
+                    None,
+                    None,
+                ),
+                Some(locations) if locations.len() > 1 => {
+                    let locations = locations.clone();
+                    for (path, pointer) in locations {
+                        self.push(
+                            Severity::Error,
+                            "schema.duplicate_section",
+                            format!(
+                                "top-level section `{knowledge_section}` is defined more than once"
+                            ),
+                            &path,
+                            Some(pointer),
+                            None,
+                            None,
+                        );
+                    }
                 }
+                Some(_) => {}
             }
-            Some(_) => {}
         }
         for section in SINGLE_SECTIONS {
             if *section == knowledge_section {
@@ -512,6 +524,19 @@ impl<'a> Validator<'a> {
                         None,
                     );
                 }
+            }
+        }
+        if let Some(locations) = self.sections.get("facts").cloned() {
+            for (path, pointer) in locations {
+                self.push(
+                    Severity::Error,
+                    "format.facts_section_removed",
+                    "top-level `facts` was removed; nest fact objects beneath characters, entities, settings, events, or triggers".to_string(),
+                    &path,
+                    Some(pointer),
+                    None,
+                    None,
+                );
             }
         }
     }
@@ -679,6 +704,115 @@ impl<'a> Validator<'a> {
                     pointer,
                     mapping,
                 });
+            }
+        }
+        result
+    }
+
+    fn nested_facts(&mut self, owners: &[&[Item]]) -> Vec<Item> {
+        let mut result = Vec::new();
+        for items in owners {
+            for owner in *items {
+                let Some(value) = owner.mapping.get(Value::String("facts".to_string())) else {
+                    continue;
+                };
+                let collection_pointer = format!("{}/facts", owner.pointer);
+                let Some(values) = value.as_sequence() else {
+                    self.push(
+                        Severity::Error,
+                        "fact.collection_type",
+                        "owner `facts` must be a sequence of fact mappings".to_string(),
+                        &owner.path,
+                        Some(collection_pointer),
+                        None,
+                        Some(owner.id.clone()),
+                    );
+                    continue;
+                };
+                for (index, value) in values.iter().enumerate() {
+                    let pointer = format!("{}/facts/{index}", owner.pointer);
+                    let Some(mapping) = value.as_mapping().cloned() else {
+                        self.push(
+                            Severity::Error,
+                            "fact.item_type",
+                            "items in owner `facts` must be mappings".to_string(),
+                            &owner.path,
+                            Some(pointer),
+                            None,
+                            Some(owner.id.clone()),
+                        );
+                        continue;
+                    };
+                    let id_pointer = format!("{pointer}/id");
+                    let Some(id) = string_field(&mapping, "id").map(str::to_string) else {
+                        self.push(
+                            Severity::Error,
+                            "id.missing",
+                            "fact is missing a string `id`".to_string(),
+                            &owner.path,
+                            Some(id_pointer),
+                            None,
+                            None,
+                        );
+                        continue;
+                    };
+                    let range = locate_id(&owner.source, &id);
+                    if !valid_id(&id) {
+                        self.push(
+                            Severity::Error,
+                            "id.invalid",
+                            format!(
+                                "`{id}` must contain a lowercase kind prefix, a dot, and a lowercase snake-case name"
+                            ),
+                            &owner.path,
+                            Some(id_pointer.clone()),
+                            range,
+                            Some(id.clone()),
+                        );
+                    } else if id_prefix(&id) != Some(Kind::Fact.prefix()) {
+                        self.push(
+                            Severity::Error,
+                            "id.wrong_prefix",
+                            format!("fact ID `{id}` must start with `fact.`"),
+                            &owner.path,
+                            Some(id_pointer.clone()),
+                            range,
+                            Some(id.clone()),
+                        );
+                    }
+                    let definition = Definition {
+                        kind: Kind::Fact,
+                        path: owner.path.clone(),
+                        pointer: pointer.clone(),
+                        range,
+                    };
+                    if let Some(first) = self.definitions.get(&id).cloned() {
+                        self.diagnostics.push(Diagnostic {
+                            severity: Severity::Error,
+                            code: "id.duplicate".to_string(),
+                            message: format!("ID `{id}` is defined more than once"),
+                            path: owner.path.clone(),
+                            pointer: Some(id_pointer),
+                            range,
+                            subject_id: Some(id.clone()),
+                            related: vec![RelatedLocation {
+                                message: "first defined here".to_string(),
+                                path: first.path,
+                                pointer: Some(format!("{}/id", first.pointer)),
+                                range: first.range,
+                            }],
+                        });
+                    } else {
+                        self.definitions.insert(id.clone(), definition);
+                    }
+                    result.push(Item {
+                        id,
+                        path: owner.path.clone(),
+                        source: owner.source.clone(),
+                        pointer,
+                        mapping,
+                    });
+                }
             }
         }
         result
@@ -1139,28 +1273,36 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn validate_fact_associations(&mut self, items: &[Item], fact_claims_enabled: bool) {
+    fn validate_fact_associations(&mut self, items: &[Item]) {
         for item in items {
             let Some(facts) = item.mapping.get(Value::String("facts".to_string())) else {
                 continue;
             };
-            if fact_claims_enabled {
-                self.push(
-                    Severity::Error,
-                    "fact.associations_removed",
-                    "format 2 keeps availability requirements on each fact; remove this `facts` association".to_string(),
-                    &item.path,
-                    Some(format!("{}/facts", item.pointer)),
-                    None,
-                    Some(item.id.clone()),
-                );
-                continue;
-            }
             if !valid_fact_association(facts) {
                 self.push(
                     Severity::Error,
                     "fact.association_type",
                     "`facts` must be a non-empty sequence of fact IDs or a mapping of observation levels to non-empty fact-ID sequences".to_string(),
+                    &item.path,
+                    Some(format!("{}/facts", item.pointer)),
+                    None,
+                    Some(item.id.clone()),
+                );
+            }
+        }
+    }
+
+    fn validate_disallowed_fact_owners(&mut self, items: &[Item]) {
+        for item in items {
+            if item
+                .mapping
+                .contains_key(Value::String("facts".to_string()))
+            {
+                self.push(
+                    Severity::Error,
+                    "fact.owner_type",
+                    "facts may be nested only beneath characters, entities, settings, events, or triggers"
+                        .to_string(),
                     &item.path,
                     Some(format!("{}/facts", item.pointer)),
                     None,
@@ -2306,18 +2448,26 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
 }
 
 fn is_fact_association_pointer(pointer: &str) -> bool {
-    pointer.contains("/facts/")
-        && [
-            "/settings/",
-            "/routes/",
-            "/characters/",
-            "/entities/",
-            "/events/",
-            "/commands/",
-            "/triggers/",
-        ]
-        .iter()
-        .any(|section| pointer.starts_with(section))
+    let Some((prefix, suffix)) = pointer.split_once("/facts/") else {
+        return false;
+    };
+    if ![
+        "/settings/",
+        "/routes/",
+        "/characters/",
+        "/entities/",
+        "/events/",
+        "/commands/",
+        "/triggers/",
+    ]
+    .iter()
+    .any(|section| prefix.starts_with(section))
+    {
+        return false;
+    }
+    let parts: Vec<_> = suffix.split('/').collect();
+    matches!(parts.as_slice(), [index] if index.parse::<usize>().is_ok())
+        || matches!(parts.as_slice(), [level, index] if level.parse::<usize>().is_err() && index.parse::<usize>().is_ok())
 }
 
 fn valid_fact_association(value: &Value) -> bool {

@@ -19,7 +19,6 @@ and game engine agree on where content lives:
 - `settings.yaml`: `case`, `solution`, `settings`, and `routes`
 - `characters.yaml`, `entities.yaml`, `events.yaml`, `deductions.yaml`,
   `tags.yaml`, `commands.yaml`, and `triggers.yaml`: the matching section
-- `facts.yml`: `facts`
 - `clues.yaml`: legacy format-1 `clues`
 
 Other top-level metadata may remain in additional YAML files.
@@ -105,24 +104,29 @@ It builds the pinned validator revision and emits native GitHub annotations.
 
 ## Facts and deductions
 
-Validator 0.4 supports the format-2 notebook and claim model. Format 2 requires
-a `facts` section and removes clues. Every fact has a stable `fact.*` ID and a
-non-empty `statement`. Optional `about` and `sources` fields retain typed
-authoring context.
+Validator 0.5 supports the format-2 notebook and claim model. Format 2 removes
+clues and the standalone `facts.yml` section. Facts are nested beneath the
+character, entity, setting, event, or trigger they belong to. Each owner may
+omit `facts`, use an empty list, or contain any number of fact objects. Every
+fact has a stable `fact.*` ID and a non-empty `statement`; optional `about` and
+`sources` fields retain additional typed authoring context.
 
 A fact with no `requires` field becomes available on the opening player turn.
 Otherwise, `requires` is one ID or a non-empty list of IDs, all of which must be
 present:
 
 ```yaml
-facts:
-  - id: fact.manual_cutoff
-    statement: The generator was cut off manually.
-    requires: [command.examine, entity.generator_controller]
+entities:
+  - id: entity.generator_controller
+    name: Generator controller
+    facts:
+      - id: fact.manual_cutoff
+        statement: The generator was cut off manually.
+        requires: [command.examine, entity.generator_controller]
 
-  - id: fact.blackout_was_staged
-    statement: Someone staged the blackout.
-    requires: fact.manual_cutoff
+      - id: fact.blackout_was_staged
+        statement: Someone staged the blackout.
+        requires: fact.manual_cutoff
 ```
 
 A `fact.*` requirement means that fact has been claimed, not merely made
@@ -141,9 +145,9 @@ Delayed work uses state tags. A state tag needs no static `members`, and
 ```
 
 The resulting fact can require `tag.knife_forensics_complete`. Format 2 rejects
-clue sections, fact associations stored on other elements, `initially_known`,
-clue-based deduction `supported_by`, and the legacy `learn`/`discover` effects.
-Fact requirement cycles are also rejected.
+clue sections, top-level fact sections, facts nested beneath unsupported owner
+types, `initially_known`, clue-based deduction `supported_by`, and the legacy
+`learn`/`discover` effects. Fact requirement cycles are also rejected.
 
 Format 1 remains supported for existing repositories, including its required
 `clues` section and optional 0.3 fact extensions.
@@ -162,7 +166,7 @@ The first pass checks:
 - globally unique, kind-prefixed IDs;
 - known typed and untyped references;
 - duplicate values in reference lists;
-- versioned clue or fact knowledge models and two- or three-input deductions;
+- versioned clue or nested-fact knowledge models and two- or three-input deductions;
 - setting-parent, entity-containment, fact/clue, and deduction cycles;
 - route endpoints, travel duration, reachability, and exitability;
 - explicit entry/exit settings when supplied, with a compatibility fallback
