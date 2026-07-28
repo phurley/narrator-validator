@@ -64,6 +64,48 @@ enum Kind {
     Trigger,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandParameterType {
+    Character,
+    Entity,
+    Setting,
+    Deduction,
+    Event,
+}
+
+impl CommandParameterType {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "character" => Some(Self::Character),
+            "entity" => Some(Self::Entity),
+            "setting" => Some(Self::Setting),
+            "deduction" => Some(Self::Deduction),
+            "event" => Some(Self::Event),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Character => "character",
+            Self::Entity => "entity",
+            Self::Setting => "setting",
+            Self::Deduction => "deduction",
+            Self::Event => "event",
+        }
+    }
+
+    fn kind(self) -> Kind {
+        match self {
+            Self::Character => Kind::Character,
+            Self::Entity => Kind::Entity,
+            Self::Setting => Kind::Setting,
+            Self::Deduction => Kind::Deduction,
+            Self::Event => Kind::Event,
+        }
+    }
+}
+
 impl Kind {
     fn prefix(self) -> &'static str {
         match self {
@@ -226,9 +268,6 @@ impl<'a> Validator<'a> {
         }
         self.validate_deduction_values(&deductions, fact_claims_enabled);
         self.validate_command_values(&commands);
-        if fact_claims_enabled {
-            self.validate_claim_command(&commands);
-        }
         self.validate_trigger_values(&triggers, fact_claims_enabled);
         if !fact_claims_enabled {
             self.validate_fact_reachability(
@@ -1581,38 +1620,75 @@ impl<'a> Validator<'a> {
 
     fn validate_command_values(&mut self, commands: &[Item]) {
         for command in commands {
-            if let Some(aliases) = command.mapping.get(Value::String("aliases".to_string())) {
-                if !is_nonempty_string_sequence(aliases, true) {
-                    self.push(
-                        Severity::Error,
-                        "command.aliases_type",
-                        "`aliases` must be a sequence of non-empty strings".to_string(),
-                        &command.path,
-                        Some(format!("{}/aliases", command.pointer)),
-                        None,
-                        Some(command.id.clone()),
-                    );
-                }
-            }
-
-            let Some(parameters) = command.mapping.get(Value::String("parameters".to_string()))
-            else {
-                continue;
-            };
-            let Some(parameters) = parameters.as_sequence() else {
+            if !string_field(&command.mapping, "name").is_some_and(|name| !name.trim().is_empty()) {
                 self.push(
                     Severity::Error,
-                    "command.parameters_type",
-                    "`parameters` must be a sequence".to_string(),
+                    "command.name",
+                    "command `name` must be a non-empty string".to_string(),
                     &command.path,
-                    Some(format!("{}/parameters", command.pointer)),
+                    Some(format!("{}/name", command.pointer)),
                     None,
                     Some(command.id.clone()),
                 );
-                continue;
-            };
+            }
 
-            for (index, parameter) in parameters.iter().enumerate() {
+            if command
+                .mapping
+                .get(Value::String("description".to_string()))
+                .is_some_and(|description| description.as_str().is_none())
+            {
+                self.push(
+                    Severity::Error,
+                    "command.description_type",
+                    "command `description` must be a string".to_string(),
+                    &command.path,
+                    Some(format!("{}/description", command.pointer)),
+                    None,
+                    Some(command.id.clone()),
+                );
+            }
+
+            if command
+                .mapping
+                .contains_key(Value::String("aliases".to_string()))
+            {
+                self.push(
+                    Severity::Error,
+                    "command.aliases_removed",
+                    "command `aliases` has been removed".to_string(),
+                    &command.path,
+                    Some(format!("{}/aliases", command.pointer)),
+                    None,
+                    Some(command.id.clone()),
+                );
+            }
+
+            let parameter_types = self.validate_command_parameters(command);
+            self.validate_command_effects(command, &parameter_types);
+        }
+    }
+
+    fn validate_command_parameters(&mut self, command: &Item) -> Vec<Option<CommandParameterType>> {
+        let Some(parameters) = command.mapping.get(Value::String("parameters".to_string())) else {
+            return Vec::new();
+        };
+        let Some(parameters) = parameters.as_sequence() else {
+            self.push(
+                Severity::Error,
+                "command.parameters_type",
+                "`parameters` must be a sequence".to_string(),
+                &command.path,
+                Some(format!("{}/parameters", command.pointer)),
+                None,
+                Some(command.id.clone()),
+            );
+            return Vec::new();
+        };
+
+        parameters
+            .iter()
+            .enumerate()
+            .map(|(index, parameter)| {
                 let pointer = format!("{}/parameters/{index}", command.pointer);
                 let Some(parameter) = parameter.as_mapping() else {
                     self.push(
@@ -1624,7 +1700,7 @@ impl<'a> Validator<'a> {
                         None,
                         Some(command.id.clone()),
                     );
-                    continue;
+                    return None;
                 };
                 if !string_field(parameter, "name").is_some_and(|name| !name.trim().is_empty()) {
                     self.push(
@@ -1637,18 +1713,46 @@ impl<'a> Validator<'a> {
                         Some(command.id.clone()),
                     );
                 }
-                match parameter.get(Value::String("accepts".to_string())) {
-                    Some(accepts) if is_nonempty_string_sequence(accepts, false) => {}
-                    _ => self.push(
+                if parameter
+                    .get(Value::String("description".to_string()))
+                    .is_some_and(|description| description.as_str().is_none())
+                {
+                    self.push(
                         Severity::Error,
-                        "command.parameter_accepts",
-                        "command parameter `accepts` must contain at least one ID namespace"
+                        "command.parameter_description_type",
+                        "command parameter `description` must be a string".to_string(),
+                        &command.path,
+                        Some(format!("{pointer}/description")),
+                        None,
+                        Some(command.id.clone()),
+                    );
+                }
+                if parameter
+                    .contains_key(Value::String("accepts".to_string()))
+                {
+                    self.push(
+                        Severity::Error,
+                        "command.parameter_accepts_removed",
+                        "command parameter `accepts` has been replaced by singular `type`"
                             .to_string(),
                         &command.path,
                         Some(format!("{pointer}/accepts")),
                         None,
                         Some(command.id.clone()),
-                    ),
+                    );
+                }
+                let parameter_type = string_field(parameter, "type")
+                    .and_then(CommandParameterType::parse);
+                if parameter_type.is_none() {
+                    self.push(
+                        Severity::Error,
+                        "command.parameter_kind",
+                        "command parameter `type` must be `character`, `entity`, `setting`, `deduction`, or `event`".to_string(),
+                        &command.path,
+                        Some(format!("{pointer}/type")),
+                        None,
+                        Some(command.id.clone()),
+                    );
                 }
                 if parameter
                     .get(Value::String("required".to_string()))
@@ -1664,51 +1768,408 @@ impl<'a> Validator<'a> {
                         Some(command.id.clone()),
                     );
                 }
+                parameter_type
+            })
+            .collect()
+    }
+
+    fn validate_command_effects(
+        &mut self,
+        command: &Item,
+        parameter_types: &[Option<CommandParameterType>],
+    ) {
+        let Some(effects) = command.mapping.get(Value::String("effects".to_string())) else {
+            return;
+        };
+        let Some(effects) = effects.as_sequence() else {
+            self.push(
+                Severity::Error,
+                "command.effects_type",
+                "command `effects` must be a sequence".to_string(),
+                &command.path,
+                Some(format!("{}/effects", command.pointer)),
+                None,
+                Some(command.id.clone()),
+            );
+            return;
+        };
+
+        for (index, effect) in effects.iter().enumerate() {
+            let pointer = format!("{}/effects/{index}", command.pointer);
+            let Some(effect) = effect.as_mapping() else {
+                self.push(
+                    Severity::Error,
+                    "command.effect_type",
+                    "command effects must be mappings".to_string(),
+                    &command.path,
+                    Some(pointer),
+                    None,
+                    Some(command.id.clone()),
+                );
+                continue;
+            };
+            let Some(operation) =
+                string_field(effect, "operation").filter(|operation| !operation.trim().is_empty())
+            else {
+                self.push(
+                    Severity::Error,
+                    "command.effect_operation",
+                    "command effect `operation` must be a non-empty string".to_string(),
+                    &command.path,
+                    Some(format!("{pointer}/operation")),
+                    None,
+                    Some(command.id.clone()),
+                );
+                continue;
+            };
+
+            match operation {
+                "advance_time" => {
+                    self.validate_command_effect_fields(
+                        command,
+                        effect,
+                        &pointer,
+                        &["operation", "minutes"],
+                    );
+                    let valid_minutes = effect
+                        .get(Value::String("minutes".to_string()))
+                        .and_then(Value::as_f64)
+                        .is_some_and(|minutes| minutes.is_finite() && minutes > 0.0);
+                    if !valid_minutes {
+                        self.push(
+                            Severity::Error,
+                            "command.effect_minutes",
+                            "`advance_time.minutes` must be a positive number".to_string(),
+                            &command.path,
+                            Some(format!("{pointer}/minutes")),
+                            None,
+                            Some(command.id.clone()),
+                        );
+                    }
+                }
+                "move" => {
+                    self.validate_command_effect_fields(
+                        command,
+                        effect,
+                        &pointer,
+                        &["operation", "subjects", "setting"],
+                    );
+                    match effect
+                        .get(Value::String("subjects".to_string()))
+                        .and_then(Value::as_sequence)
+                    {
+                        Some(subjects) if !subjects.is_empty() => {
+                            for (subject_index, subject) in subjects.iter().enumerate() {
+                                self.validate_command_effect_reference(
+                                    command,
+                                    subject,
+                                    &format!("{pointer}/subjects/{subject_index}"),
+                                    &[Kind::Character, Kind::Entity],
+                                    parameter_types,
+                                    true,
+                                );
+                            }
+                        }
+                        _ => self.push(
+                            Severity::Error,
+                            "command.effect_subjects",
+                            "`move.subjects` must be a non-empty sequence of players, characters, or entities".to_string(),
+                            &command.path,
+                            Some(format!("{pointer}/subjects")),
+                            None,
+                            Some(command.id.clone()),
+                        ),
+                    }
+                    self.validate_command_effect_reference_field(
+                        command,
+                        effect,
+                        &pointer,
+                        "setting",
+                        &[Kind::Setting],
+                        parameter_types,
+                    );
+                }
+                "transform" => {
+                    self.validate_command_effect_fields(
+                        command,
+                        effect,
+                        &pointer,
+                        &["operation", "entity_from", "entity_to"],
+                    );
+                    for field in ["entity_from", "entity_to"] {
+                        self.validate_command_effect_reference_field(
+                            command,
+                            effect,
+                            &pointer,
+                            field,
+                            &[Kind::Entity],
+                            parameter_types,
+                        );
+                    }
+                }
+                "learn_fact" => {
+                    self.validate_command_effect_fields(
+                        command,
+                        effect,
+                        &pointer,
+                        &["operation", "fact_id"],
+                    );
+                    self.validate_command_effect_reference_field(
+                        command,
+                        effect,
+                        &pointer,
+                        "fact_id",
+                        &[Kind::Fact],
+                        parameter_types,
+                    );
+                }
+                "establish_deduction" => {
+                    self.validate_command_effect_fields(
+                        command,
+                        effect,
+                        &pointer,
+                        &["operation", "deduction_id"],
+                    );
+                    self.validate_command_effect_reference_field(
+                        command,
+                        effect,
+                        &pointer,
+                        "deduction_id",
+                        &[Kind::Deduction],
+                        parameter_types,
+                    );
+                }
+                "add_tag" | "remove_tag" => {
+                    self.validate_command_effect_fields(
+                        command,
+                        effect,
+                        &pointer,
+                        &["operation", "tag_id"],
+                    );
+                    self.validate_command_effect_reference_field(
+                        command,
+                        effect,
+                        &pointer,
+                        "tag_id",
+                        &[Kind::Tag],
+                        parameter_types,
+                    );
+                }
+                "describe" | "win" | "lose" => {
+                    self.validate_command_effect_fields(
+                        command,
+                        effect,
+                        &pointer,
+                        &["operation", "text"],
+                    );
+                    if !string_field(effect, "text").is_some_and(|text| !text.trim().is_empty()) {
+                        self.push(
+                            Severity::Error,
+                            "command.effect_text",
+                            format!("`{operation}.text` must be a non-empty string"),
+                            &command.path,
+                            Some(format!("{pointer}/text")),
+                            None,
+                            Some(command.id.clone()),
+                        );
+                    }
+                }
+                "trigger" => {
+                    self.validate_command_effect_fields(
+                        command,
+                        effect,
+                        &pointer,
+                        &["operation", "trigger_id"],
+                    );
+                    self.validate_command_effect_reference_field(
+                        command,
+                        effect,
+                        &pointer,
+                        "trigger_id",
+                        &[Kind::Trigger],
+                        parameter_types,
+                    );
+                }
+                _ => self.push(
+                    Severity::Error,
+                    "command.effect_unknown_operation",
+                    format!("unknown command effect operation `{operation}`"),
+                    &command.path,
+                    Some(format!("{pointer}/operation")),
+                    None,
+                    Some(command.id.clone()),
+                ),
             }
         }
     }
 
-    fn validate_claim_command(&mut self, commands: &[Item]) {
-        let Some(command) = commands
-            .iter()
-            .find(|command| command.id == "command.claim")
+    fn validate_command_effect_fields(
+        &mut self,
+        command: &Item,
+        effect: &Mapping,
+        pointer: &str,
+        allowed: &[&str],
+    ) {
+        for key in effect.keys() {
+            let Some(key) = key.as_str() else {
+                self.push(
+                    Severity::Error,
+                    "command.effect_field",
+                    "command effect field names must be strings".to_string(),
+                    &command.path,
+                    Some(pointer.to_string()),
+                    None,
+                    Some(command.id.clone()),
+                );
+                continue;
+            };
+            if !allowed.contains(&key) {
+                self.push(
+                    Severity::Error,
+                    "command.effect_unknown_field",
+                    format!("`{key}` is not valid for this command effect"),
+                    &command.path,
+                    Some(format!("{pointer}/{}", escape_pointer(key))),
+                    None,
+                    Some(command.id.clone()),
+                );
+            }
+        }
+    }
+
+    fn validate_command_effect_reference_field(
+        &mut self,
+        command: &Item,
+        effect: &Mapping,
+        pointer: &str,
+        field: &str,
+        expected: &[Kind],
+        parameter_types: &[Option<CommandParameterType>],
+    ) {
+        let value = effect
+            .get(Value::String(field.to_string()))
+            .unwrap_or(&Value::Null);
+        self.validate_command_effect_reference(
+            command,
+            value,
+            &format!("{pointer}/{}", escape_pointer(field)),
+            expected,
+            parameter_types,
+            false,
+        );
+    }
+
+    fn validate_command_effect_reference(
+        &mut self,
+        command: &Item,
+        value: &Value,
+        pointer: &str,
+        expected: &[Kind],
+        parameter_types: &[Option<CommandParameterType>],
+        allow_player: bool,
+    ) {
+        let Some(reference) = value
+            .as_str()
+            .filter(|reference| !reference.trim().is_empty())
         else {
             self.push(
                 Severity::Error,
-                "fact.claim_command_missing",
-                "format 2 requires `command.claim` so players can claim available facts"
-                    .to_string(),
-                "",
-                Some("/commands".to_string()),
-                None,
-                Some("command.claim".to_string()),
-            );
-            return;
-        };
-        let accepts_fact = command
-            .mapping
-            .get(Value::String("parameters".to_string()))
-            .and_then(Value::as_sequence)
-            .into_iter()
-            .flatten()
-            .filter_map(Value::as_mapping)
-            .filter_map(|parameter| {
-                parameter
-                    .get(Value::String("accepts".to_string()))
-                    .and_then(Value::as_sequence)
-            })
-            .flatten()
-            .any(|accepted| accepted.as_str() == Some("fact"));
-        if !accepts_fact {
-            self.push(
-                Severity::Error,
-                "fact.claim_command_invalid",
-                "`command.claim` needs a parameter that accepts `fact` IDs".to_string(),
+                "command.effect_reference",
+                format!(
+                    "command effect operand must be {}",
+                    command_effect_expected_names(expected, allow_player)
+                ),
                 &command.path,
-                Some(format!("{}/parameters", command.pointer)),
+                Some(pointer.to_string()),
                 None,
                 Some(command.id.clone()),
             );
+            return;
+        };
+
+        if allow_player && reference == "player" {
+            return;
+        }
+
+        match command_parameter_reference(reference) {
+            Ok(Some(index)) => {
+                let Some(parameter_type) = parameter_types.get(index).copied().flatten() else {
+                    self.push(
+                        Severity::Error,
+                        "command.effect_parameter_unknown",
+                        format!("`{reference}` does not refer to a declared action parameter"),
+                        &command.path,
+                        Some(pointer.to_string()),
+                        None,
+                        Some(command.id.clone()),
+                    );
+                    return;
+                };
+                if !expected.contains(&parameter_type.kind()) {
+                    self.push(
+                        Severity::Error,
+                        "command.effect_parameter_type",
+                        format!(
+                            "`{reference}` is a {} parameter; expected {}",
+                            parameter_type.name(),
+                            command_effect_expected_names(expected, allow_player)
+                        ),
+                        &command.path,
+                        Some(pointer.to_string()),
+                        None,
+                        Some(command.id.clone()),
+                    );
+                }
+                return;
+            }
+            Err(()) => {
+                self.push(
+                    Severity::Error,
+                    "command.effect_parameter_unknown",
+                    format!("`{reference}` is not a valid 1-based `paramN` reference"),
+                    &command.path,
+                    Some(pointer.to_string()),
+                    None,
+                    Some(command.id.clone()),
+                );
+                return;
+            }
+            Ok(None) => {}
+        }
+
+        if !looks_like_id(reference) {
+            self.push(
+                Severity::Error,
+                "command.effect_reference",
+                format!(
+                    "`{reference}` must be {}",
+                    command_effect_expected_names(expected, allow_player)
+                ),
+                &command.path,
+                Some(pointer.to_string()),
+                locate_scalar(&command.source, reference),
+                Some(reference.to_string()),
+            );
+            return;
+        }
+
+        if let Some(definition) = self.definitions.get(reference) {
+            if !expected.contains(&definition.kind) {
+                let actual_kind = definition.kind;
+                self.push(
+                    Severity::Error,
+                    "reference.wrong_type",
+                    format!(
+                        "`{reference}` refers to a {}; expected {}",
+                        actual_kind.name(),
+                        command_effect_expected_names(expected, allow_player)
+                    ),
+                    &command.path,
+                    Some(pointer.to_string()),
+                    locate_scalar(&command.source, reference),
+                    Some(reference.to_string()),
+                );
+            }
         }
     }
 
@@ -2313,6 +2774,35 @@ impl<'a> Validator<'a> {
 struct Reference {
     id: String,
     pointer: String,
+}
+
+fn command_parameter_reference(value: &str) -> Result<Option<usize>, ()> {
+    let Some(suffix) = value.strip_prefix("param") else {
+        return Ok(None);
+    };
+    if suffix.is_empty() || !suffix.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(());
+    }
+    let number = suffix.parse::<usize>().map_err(|_| ())?;
+    number.checked_sub(1).map(Some).ok_or(())
+}
+
+fn command_effect_expected_names(expected: &[Kind], allow_player: bool) -> String {
+    let mut names: Vec<_> = expected.iter().map(|kind| kind.name()).collect();
+    if allow_player {
+        names.insert(0, "player");
+    }
+    match names.as_slice() {
+        [] => "a compatible authored ID".to_string(),
+        [name] => format!("a {name} ID or compatible `paramN` reference"),
+        [first, second] => {
+            format!("a {first} or {second} ID, or compatible `paramN` reference")
+        }
+        _ => format!(
+            "a {} ID, or compatible `paramN` reference",
+            names.join(", ")
+        ),
+    }
 }
 
 fn collect_references(
