@@ -18,7 +18,8 @@ and game engine agree on where content lives:
 
 - `settings.yaml`: `case`, `solution`, `settings`, and `routes`
 - `characters.yaml`, `entities.yaml`, `events.yaml`, `deductions.yaml`,
-  `tags.yaml`, `commands.yaml`, and `triggers.yaml`: the matching section
+  `tags.yaml`, `flags.yaml`, `commands.yaml`, and `triggers.yaml`: the matching
+  section
 - `clues.yaml`: legacy format-1 `clues`
 
 Other top-level metadata may remain in additional YAML files.
@@ -104,12 +105,12 @@ It builds the pinned validator revision and emits native GitHub annotations.
 
 ## Facts and deductions
 
-Validator 0.6 supports the format-2 notebook and action-effect model. Format 2 removes
-clues and the standalone `facts.yml` section. Facts are nested beneath the
-character, entity, setting, event, or trigger they belong to. Each owner may
-omit `facts`, use an empty list, or contain any number of fact objects. Every
-fact has a stable `fact.*` ID and a non-empty `statement`; optional `about` and
-`sources` fields retain additional typed authoring context.
+Validator 0.7 supports the format-2 notebook and action-effect model. Format 2
+removes clues and the standalone `facts.yml` section. Facts are nested beneath
+the character, entity, setting, event, or trigger they belong to. Each owner
+may omit `facts`, use an empty list, or contain any number of fact objects.
+Every fact has a stable `fact.*` ID and a non-empty `statement`; optional
+`about` and `sources` fields retain additional typed authoring context.
 
 A fact with no `requires` field becomes available on the opening player turn.
 Otherwise, `requires` is one ID or a non-empty list of IDs, all of which must be
@@ -200,6 +201,48 @@ effect values because they are not action parameter types. Trigger-file
 effects continue to use their existing, separate `operation`/`target`/`value`
 contract.
 
+## Flags and trigger gates
+
+Authored boolean world state lives in the required `flags` section in
+`flags.yaml`. Every flag has a globally unique `flag.*` ID, a player-facing name
+and description, and an explicit initial state:
+
+```yaml
+flags:
+  - id: flag.storm_started
+    name: Storm started
+    description: The storm has reached the island.
+    initial_state: false
+```
+
+Triggers may restrict when and where they apply and which world subjects make
+them eligible. Omitting `time` means anytime. Omitting `location`, using an
+empty string, or using a blank YAML value means all locations. `any_of` and
+`all_of` accept character, entity, and flag IDs:
+
+```yaml
+triggers:
+  - id: trigger.boathouse_warning
+    name: Boathouse warning
+    description: Warn players once the storm reaches the occupied boathouse.
+    command: command.enter
+    once: true
+    time:
+      relation: after
+      value: "21:00"
+    location: setting.boathouse
+    any_of: [character.guide, entity.weather_radio]
+    all_of: [flag.storm_started]
+    effects:
+      - operation: give
+        target: tag.boathouse_warning_heard
+```
+
+`time.relation` is `before`, `at`, or `after`, and `time.value` is a non-empty
+authored time expression. The legacy free-form `conditions` list is invalid.
+Trigger command, description, `once`, effects, and nested facts retain their
+existing contracts.
+
 Delayed work uses state tags. A state tag needs no static `members`, and
 `give_after` must target a tag with a positive minute, hour, or turn delay:
 
@@ -231,6 +274,7 @@ The first pass checks:
 - globally unique, kind-prefixed IDs;
 - known typed and untyped references;
 - duplicate values in reference lists;
+- required flag metadata and typed trigger time/location/subject gates;
 - versioned clue or nested-fact knowledge models and two- or three-input deductions;
 - setting-parent, entity-containment, fact/clue, and deduction cycles;
 - route endpoints, travel duration, reachability, and exitability;
