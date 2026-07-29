@@ -18,11 +18,11 @@ and game engine agree on where content lives:
 
 - `settings.yaml`: `case`, `solution`, `settings`, and `routes`
 - `characters.yaml`, `entities.yaml`, `events.yaml`, `deductions.yaml`,
-  `tags.yaml`, `flags.yaml`, `commands.yaml`, and `triggers.yaml`: the matching
-  section
+  `flags.yaml`, `commands.yaml`, and `triggers.yaml`: the matching section
 - `clues.yaml`: legacy format-1 `clues`
 
-Other top-level metadata may remain in additional YAML files.
+Other top-level metadata may remain in additional YAML files. The former
+`tags` section is removed; use flags for authored world state.
 
 ## CLI
 
@@ -181,10 +181,6 @@ effects:
     fact_id: fact.letter_contents
   - operation: establish_deduction
     deduction_id: deduction.blackmail
-  - operation: add_tag
-    tag_id: tag.storm_started
-  - operation: remove_tag
-    tag_id: tag.lights_on
   - operation: describe
     text: Thunder rolls across the island.
   - operation: trigger
@@ -196,10 +192,10 @@ effects:
 ```
 
 `move.subjects` accepts `player`, character/entity IDs, and compatible
-parameters. Facts, tags, triggers, narrative text, and durations are authored
-effect values because they are not action parameter types. Trigger-file
-effects continue to use their existing, separate `operation`/`target`/`value`
-contract.
+parameters. Facts, triggers, narrative text, and durations are authored effect
+values because they are not action parameter types. Trigger-file effects
+continue to use their existing, separate `operation`/`target`/`value` contract.
+The former `add_tag` and `remove_tag` action effects are invalid.
 
 ## Flags and trigger gates
 
@@ -235,7 +231,7 @@ triggers:
     all_of: [flag.storm_started]
     effects:
       - operation: give
-        target: tag.boathouse_warning_heard
+        target: flag.boathouse_warning_heard
 ```
 
 `time.relation` is `before`, `at`, or `after`, and `time.value` is a non-empty
@@ -243,16 +239,16 @@ authored time expression. The legacy free-form `conditions` list is invalid.
 Trigger command, description, `once`, effects, and nested facts retain their
 existing contracts.
 
-Delayed work uses state tags. A state tag needs no static `members`, and
-`give_after` must target a tag with a positive minute, hour, or turn delay:
+Delayed work uses flags. `give`, `give_after`, and `remove` target authored
+flags; `give_after` also needs a positive minute, hour, or turn delay:
 
 ```yaml
 - operation: give_after
-  target: tag.knife_forensics_complete
+  target: flag.knife_forensics_complete
   value: 20m
 ```
 
-The resulting fact can require `tag.knife_forensics_complete`. Format 2 rejects
+The resulting fact can require `flag.knife_forensics_complete`. Format 2 rejects
 clue sections, top-level fact sections, facts nested beneath unsupported owner
 types, `initially_known`, clue-based deduction `supported_by`, and the legacy
 `learn`/`discover` effects. Fact requirement cycles are also rejected.
