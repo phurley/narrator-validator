@@ -53,11 +53,6 @@ clues:
 deductions:
   - id: deduction.solution
     supported_by: [clue.weapon]
-tags:
-  - id: tag.evidence
-    members: [entity.knife]
-  - id: tag.gameplay
-    members: [route.foyer_study, command.examine, trigger.examine_knife]
 flags:
   - id: flag.knife_examined
     name: Knife examined
@@ -129,7 +124,7 @@ entities:
       - id: fact.knife_has_blood
         statement: The knife carries the victim's blood.
         about: [entity.knife, character.victim]
-        requires: tag.knife_analysis_complete
+        requires: flag.knife_analysis_complete
       - id: fact.knife_connects_to_scene
         statement: The knife connects the culprit to the study.
         requires: [fact.knife_is_present, entity.knife]
@@ -145,15 +140,14 @@ deductions:
     conclusion: The knife was used in the study.
     inputs: [fact.knife_has_blood, fact.knife_connects_to_scene]
     truth: true
-tags:
-  - id: tag.evidence
-    members: [entity.knife]
-  - id: tag.knife_analysis_complete
-    state: true
 flags:
   - id: flag.knife_examined
     name: Knife examined
     description: Whether the knife has been examined.
+    initial_state: false
+  - id: flag.knife_analysis_complete
+    name: Knife analysis complete
+    description: Whether the delayed knife analysis has completed.
     initial_state: false
 commands:
   - id: command.claim
@@ -194,10 +188,6 @@ commands:
         fact_id: fact.knife_has_blood
       - operation: establish_deduction
         deduction_id: param4
-      - operation: add_tag
-        tag_id: tag.knife_analysis_complete
-      - operation: remove_tag
-        tag_id: tag.knife_analysis_complete
       - operation: describe
         text: The examination reveals a carefully staged scene.
       - operation: trigger
@@ -212,7 +202,7 @@ triggers:
     command: command.investigate
     effects:
       - operation: give_after
-        target: tag.knife_analysis_complete
+        target: flag.knife_analysis_complete
         value: 20m
 "#;
 
@@ -277,6 +267,22 @@ fn valid_format_2_repository_has_no_diagnostics() {
     assert!(report.valid, "{:#?}", report.diagnostics);
     assert_eq!(report.format_version, Some(2));
     assert!(report.diagnostics.is_empty());
+}
+
+#[test]
+fn rejects_removed_tags_section_and_action_effects() {
+    let source = VALID_FORMAT_2_STORY
+        .replace(
+            "flags:",
+            "tags:\n  - id: tag.legacy\n    members: [entity.knife]\nflags:",
+        )
+        .replace(
+            "      - operation: describe",
+            "      - operation: add_tag\n        tag_id: tag.legacy\n      - operation: describe",
+        );
+    let result = codes(source);
+    assert!(result.contains(&"format.tags_removed".to_string()));
+    assert!(result.contains(&"command.effect_unknown_operation".to_string()));
 }
 
 #[test]
@@ -382,7 +388,7 @@ fn format_2_allows_empty_fact_lists_and_rejects_non_mapping_facts() {
 #[test]
 fn format_2_validates_fact_requirements_and_cycles() {
     let malformed = VALID_FORMAT_2_STORY
-        .replace("requires: tag.knife_analysis_complete", "requires: []")
+        .replace("requires: flag.knife_analysis_complete", "requires: []")
         .replace(
             "requires: [fact.knife_is_present, entity.knife]",
             "requires: [fact.knife_is_present, case.example]",
@@ -420,15 +426,18 @@ fn format_2_enforces_unclaimed_opening_facts_and_central_requirements() {
 }
 
 #[test]
-fn format_2_validates_state_tags_and_delayed_give_effects() {
+fn format_2_validates_state_flags_and_delayed_give_effects() {
     let invalid = VALID_FORMAT_2_STORY
-        .replace("state: true", "state: sometimes")
         .replace(
-            "target: tag.knife_analysis_complete\n        value: 20m",
+            "  - id: flag.knife_analysis_complete\n    name: Knife analysis complete\n    description: Whether the delayed knife analysis has completed.\n    initial_state: false",
+            "  - id: flag.knife_analysis_complete\n    name: Knife analysis complete\n    description: Whether the delayed knife analysis has completed.\n    initial_state: sometimes",
+        )
+        .replace(
+            "target: flag.knife_analysis_complete\n        value: 20m",
             "target: entity.knife\n        value: 0m",
         );
     let result = codes(invalid);
-    assert!(result.contains(&"tag.state_type".to_string()));
+    assert!(result.contains(&"flag.initial_state".to_string()));
     assert!(result.contains(&"trigger.effect_target_type".to_string()));
     assert!(result.contains(&"trigger.effect_delay_invalid".to_string()));
 
@@ -452,7 +461,7 @@ fn reports_yaml_errors_with_a_source_position() {
 #[test]
 fn reports_unknown_and_wrong_type_references() {
     let source = VALID_STORY
-        .replace("members: [entity.knife]", "members: [not_an_id]")
+        .replace("all_of: [flag.knife_examined]", "all_of: [not_an_id]")
         .replace("location: setting.study", "location: entity.knife");
     let report = report(source);
     assert!(!report.valid);
@@ -552,13 +561,11 @@ fn validates_required_reference_shapes() {
         .replace(
             "    participants: [character.victim, character.culprit]",
             "    participants: character.victim",
-        )
-        .replace("    members: [entity.knife]", "    members: entity.knife");
+        );
     let result = codes(source);
     assert!(result.contains(&"solution.missing_reference".to_string()));
     assert!(result.contains(&"route.missing_endpoint".to_string()));
     assert!(result.contains(&"event.participants_type".to_string()));
-    assert!(result.contains(&"tag.members_type".to_string()));
 }
 
 #[test]
@@ -666,40 +673,34 @@ fn validates_every_action_effect_payload() {
             "/commands/1/effects/4/deduction_id",
         ),
         (
-            "        tag_id: tag.knife_analysis_complete",
-            "        tag_id: entity.knife",
-            "reference.wrong_type",
-            "/commands/1/effects/5/tag_id",
-        ),
-        (
             "        text: The examination reveals a carefully staged scene.",
             "        text: \"\"",
             "command.effect_text",
-            "/commands/1/effects/7/text",
+            "/commands/1/effects/5/text",
         ),
         (
             "        trigger_id: trigger.investigate_knife",
             "        trigger_id: entity.knife",
             "reference.wrong_type",
-            "/commands/1/effects/8/trigger_id",
+            "/commands/1/effects/6/trigger_id",
         ),
         (
             "        text: The player has solved the mystery.",
             "        text: 42",
             "command.effect_text",
-            "/commands/1/effects/9/text",
+            "/commands/1/effects/7/text",
         ),
         (
             "        text: The trail has gone cold.",
             "        text: \"\"",
             "command.effect_text",
-            "/commands/1/effects/10/text",
+            "/commands/1/effects/8/text",
         ),
         (
             "        text: The examination reveals a carefully staged scene.",
             "        text: The examination reveals a carefully staged scene.\n        target: player",
             "command.effect_unknown_field",
-            "/commands/1/effects/7/target",
+            "/commands/1/effects/5/target",
         ),
     ];
 
@@ -998,8 +999,8 @@ fn detects_deduction_cycles_through_inputs() {
             "inputs: [deduction.loop, fact.knife_connects_to_scene]",
         )
         .replace(
-            "tags:",
-            "  - id: deduction.loop\n    conclusion: The reasoning loops back on itself.\n    inputs: [deduction.solution, fact.knife_has_blood]\n    truth: false\n    contradicted_by: [fact.knife_connects_to_scene]\ntags:",
+            "flags:",
+            "  - id: deduction.loop\n    conclusion: The reasoning loops back on itself.\n    inputs: [deduction.solution, fact.knife_has_blood]\n    truth: false\n    contradicted_by: [fact.knife_connects_to_scene]\nflags:",
         );
     assert!(codes(source).contains(&"deduction.dependency_cycle".to_string()));
 }
@@ -1026,11 +1027,7 @@ fn validates_deduction_solution_shape() {
 
 #[test]
 fn commands_and_triggers_remain_optional() {
-    let without_gameplay_tag = VALID_STORY.replace(
-        "  - id: tag.gameplay\n    members: [route.foyer_study, command.examine, trigger.examine_knife]\n",
-        "",
-    );
-    let source = without_gameplay_tag
+    let source = VALID_STORY
         .split("commands:\n")
         .next()
         .expect("story before optional sections");

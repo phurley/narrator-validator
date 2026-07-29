@@ -23,7 +23,6 @@ const REQUIRED_SECTIONS: &[&str] = &[
     "entities",
     "events",
     "deductions",
-    "tags",
     "flags",
 ];
 const SINGLE_SECTIONS: &[&str] = &["clues", "commands", "triggers"];
@@ -37,7 +36,6 @@ const CANONICAL_SECTION_FILES: &[(&str, &str)] = &[
     ("events", "events.yaml"),
     ("clues", "clues.yaml"),
     ("deductions", "deductions.yaml"),
-    ("tags", "tags.yaml"),
     ("flags", "flags.yaml"),
     ("commands", "commands.yaml"),
     ("triggers", "triggers.yaml"),
@@ -61,7 +59,6 @@ enum Kind {
     Clue,
     Fact,
     Deduction,
-    Tag,
     Flag,
     Command,
     Trigger,
@@ -121,7 +118,6 @@ impl Kind {
             Self::Clue => "clue",
             Self::Fact => "fact",
             Self::Deduction => "deduction",
-            Self::Tag => "tag",
             Self::Flag => "flag",
             Self::Command => "command",
             Self::Trigger => "trigger",
@@ -227,7 +223,6 @@ impl<'a> Validator<'a> {
         let events = self.items("events", Kind::Event, true);
         let clues = self.items("clues", Kind::Clue, true);
         let deductions = self.items("deductions", Kind::Deduction, true);
-        let tags = self.items("tags", Kind::Tag, true);
         let flags = self.items("flags", Kind::Flag, true);
         let commands = self.items("commands", Kind::Command, true);
         let triggers = self.items("triggers", Kind::Trigger, true);
@@ -299,7 +294,6 @@ impl<'a> Validator<'a> {
             fact_claims_enabled,
         );
         self.validate_navigation(&cases, &settings, &routes);
-        self.validate_tags(&tags);
         self.validate_flag_values(&flags);
     }
 
@@ -577,6 +571,20 @@ impl<'a> Validator<'a> {
                     Severity::Error,
                     "format.facts_section_removed",
                     "top-level `facts` was removed; nest fact objects beneath characters, entities, settings, events, or triggers".to_string(),
+                    &path,
+                    Some(pointer),
+                    None,
+                    None,
+                );
+            }
+        }
+        if let Some(locations) = self.sections.get("tags").cloned() {
+            for (path, pointer) in locations {
+                self.push(
+                    Severity::Error,
+                    "format.tags_removed",
+                    "top-level `tags` was removed; use authored boolean flags for world state"
+                        .to_string(),
                     &path,
                     Some(pointer),
                     None,
@@ -1945,22 +1953,6 @@ impl<'a> Validator<'a> {
                         parameter_types,
                     );
                 }
-                "add_tag" | "remove_tag" => {
-                    self.validate_command_effect_fields(
-                        command,
-                        effect,
-                        &pointer,
-                        &["operation", "tag_id"],
-                    );
-                    self.validate_command_effect_reference_field(
-                        command,
-                        effect,
-                        &pointer,
-                        "tag_id",
-                        &[Kind::Tag],
-                        parameter_types,
-                    );
-                }
                 "describe" | "win" | "lose" => {
                     self.validate_command_effect_fields(
                         command,
@@ -2298,7 +2290,7 @@ impl<'a> Validator<'a> {
                             index,
                             operation,
                             target,
-                            Kind::Tag,
+                            Kind::Flag,
                         ),
                         _ => {}
                     }
@@ -2839,57 +2831,6 @@ impl<'a> Validator<'a> {
         );
     }
 
-    fn validate_tags(&mut self, tags: &[Item]) {
-        for tag in tags {
-            let state = match tag.mapping.get(Value::String("state".to_string())) {
-                Some(Value::Bool(state)) => *state,
-                Some(_) => {
-                    self.push(
-                        Severity::Error,
-                        "tag.state_type",
-                        "tag `state` must be a boolean".to_string(),
-                        &tag.path,
-                        Some(format!("{}/state", tag.pointer)),
-                        None,
-                        Some(tag.id.clone()),
-                    );
-                    false
-                }
-                None => false,
-            };
-            match tag.mapping.get(Value::String("members".to_string())) {
-                Some(Value::Sequence(members)) if members.is_empty() && !state => self.push(
-                    Severity::Warning,
-                    "tag.empty",
-                    format!("tag `{}` has no members", tag.id),
-                    &tag.path,
-                    Some(format!("{}/members", tag.pointer)),
-                    None,
-                    Some(tag.id.clone()),
-                ),
-                None if !state => self.push(
-                    Severity::Warning,
-                    "tag.empty",
-                    format!("tag `{}` has no members", tag.id),
-                    &tag.path,
-                    Some(format!("{}/members", tag.pointer)),
-                    None,
-                    Some(tag.id.clone()),
-                ),
-                Some(value) if !is_string_sequence(value) => self.push(
-                    Severity::Error,
-                    "tag.members_type",
-                    "`members` must be a sequence of IDs".to_string(),
-                    &tag.path,
-                    Some(format!("{}/members", tag.pointer)),
-                    None,
-                    Some(tag.id.clone()),
-                ),
-                Some(_) | None => {}
-            }
-        }
-    }
-
     fn validate_flag_values(&mut self, flags: &[Item]) {
         for flag in flags {
             for field in ["name", "description"] {
@@ -3050,7 +2991,7 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
         Kind::Event,
         Kind::Fact,
         Kind::Deduction,
-        Kind::Tag,
+        Kind::Flag,
         Kind::Command,
         Kind::Trigger,
     ];
@@ -3079,19 +3020,6 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
         Kind::Command,
         Kind::Trigger,
     ];
-    const TAGGABLE: &[Kind] = &[
-        Kind::Setting,
-        Kind::Character,
-        Kind::Entity,
-        Kind::Event,
-        Kind::Clue,
-        Kind::Fact,
-        Kind::Deduction,
-        Kind::Route,
-        Kind::Command,
-        Kind::Trigger,
-    ];
-
     match field {
         "victim" | "culprit" | "testimony_source" => Some(CHARACTERS),
         "weapon" => Some(ENTITIES),
@@ -3121,7 +3049,6 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
         _ if matches!(parent, "any_of" | "all_of") && pointer.contains("/triggers/") => {
             Some(TRIGGER_GATES)
         }
-        _ if parent == "members" && pointer.contains("/tags/") => Some(TAGGABLE),
         _ => None,
     }
 }
