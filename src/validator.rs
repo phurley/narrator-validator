@@ -24,6 +24,7 @@ const REQUIRED_SECTIONS: &[&str] = &[
     "events",
     "deductions",
     "tags",
+    "flags",
 ];
 const SINGLE_SECTIONS: &[&str] = &["clues", "commands", "triggers"];
 const CANONICAL_SECTION_FILES: &[(&str, &str)] = &[
@@ -37,6 +38,7 @@ const CANONICAL_SECTION_FILES: &[(&str, &str)] = &[
     ("clues", "clues.yaml"),
     ("deductions", "deductions.yaml"),
     ("tags", "tags.yaml"),
+    ("flags", "flags.yaml"),
     ("commands", "commands.yaml"),
     ("triggers", "triggers.yaml"),
 ];
@@ -60,6 +62,7 @@ enum Kind {
     Fact,
     Deduction,
     Tag,
+    Flag,
     Command,
     Trigger,
 }
@@ -119,6 +122,7 @@ impl Kind {
             Self::Fact => "fact",
             Self::Deduction => "deduction",
             Self::Tag => "tag",
+            Self::Flag => "flag",
             Self::Command => "command",
             Self::Trigger => "trigger",
         }
@@ -224,6 +228,7 @@ impl<'a> Validator<'a> {
         let clues = self.items("clues", Kind::Clue, true);
         let deductions = self.items("deductions", Kind::Deduction, true);
         let tags = self.items("tags", Kind::Tag, true);
+        let flags = self.items("flags", Kind::Flag, true);
         let commands = self.items("commands", Kind::Command, true);
         let triggers = self.items("triggers", Kind::Trigger, true);
         let fact_claims_enabled = self.format_version == Some(2);
@@ -295,6 +300,7 @@ impl<'a> Validator<'a> {
         );
         self.validate_navigation(&cases, &settings, &routes);
         self.validate_tags(&tags);
+        self.validate_flag_values(&flags);
     }
 
     fn validate_repository_bounds(&mut self) -> bool {
@@ -2203,12 +2209,24 @@ impl<'a> Validator<'a> {
                     Some(trigger.id.clone()),
                 );
             }
-            self.validate_trigger_mapping_list(
-                trigger,
-                "conditions",
-                &["left", "operator", "right"],
-                "trigger.condition",
-            );
+            if trigger
+                .mapping
+                .contains_key(Value::String("conditions".to_string()))
+            {
+                self.push(
+                    Severity::Error,
+                    "trigger.conditions_removed",
+                    "trigger `conditions` has been replaced by `time`, `location`, `any_of`, and `all_of`".to_string(),
+                    &trigger.path,
+                    Some(format!("{}/conditions", trigger.pointer)),
+                    None,
+                    Some(trigger.id.clone()),
+                );
+            }
+            self.validate_trigger_time(trigger);
+            self.validate_trigger_location(trigger);
+            self.validate_trigger_gate_list(trigger, "any_of");
+            self.validate_trigger_gate_list(trigger, "all_of");
             self.validate_trigger_mapping_list(
                 trigger,
                 "effects",
@@ -2310,6 +2328,132 @@ impl<'a> Validator<'a> {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    fn validate_trigger_time(&mut self, trigger: &Item) {
+        let Some(time) = trigger.mapping.get(Value::String("time".to_string())) else {
+            return;
+        };
+        let Some(time) = time.as_mapping() else {
+            self.push(
+                Severity::Error,
+                "trigger.time_type",
+                "trigger `time` must be a mapping with `relation` and `value`".to_string(),
+                &trigger.path,
+                Some(format!("{}/time", trigger.pointer)),
+                None,
+                Some(trigger.id.clone()),
+            );
+            return;
+        };
+
+        for key in time.keys() {
+            let Some(key) = key.as_str() else {
+                self.push(
+                    Severity::Error,
+                    "trigger.time_field",
+                    "trigger `time` field names must be strings".to_string(),
+                    &trigger.path,
+                    Some(format!("{}/time", trigger.pointer)),
+                    None,
+                    Some(trigger.id.clone()),
+                );
+                continue;
+            };
+            if !matches!(key, "relation" | "value") {
+                self.push(
+                    Severity::Error,
+                    "trigger.time_unknown_field",
+                    format!("`{key}` is not valid in trigger `time`"),
+                    &trigger.path,
+                    Some(format!("{}/time/{}", trigger.pointer, escape_pointer(key))),
+                    None,
+                    Some(trigger.id.clone()),
+                );
+            }
+        }
+
+        if !string_field(time, "relation")
+            .is_some_and(|relation| matches!(relation, "before" | "at" | "after"))
+        {
+            self.push(
+                Severity::Error,
+                "trigger.time_relation",
+                "trigger `time.relation` must be `before`, `at`, or `after`".to_string(),
+                &trigger.path,
+                Some(format!("{}/time/relation", trigger.pointer)),
+                None,
+                Some(trigger.id.clone()),
+            );
+        }
+        if !string_field(time, "value").is_some_and(|value| !value.trim().is_empty()) {
+            self.push(
+                Severity::Error,
+                "trigger.time_value",
+                "trigger `time.value` must be a non-empty string".to_string(),
+                &trigger.path,
+                Some(format!("{}/time/value", trigger.pointer)),
+                None,
+                Some(trigger.id.clone()),
+            );
+        }
+    }
+
+    fn validate_trigger_location(&mut self, trigger: &Item) {
+        let Some(location) = trigger.mapping.get(Value::String("location".to_string())) else {
+            return;
+        };
+        if location.is_null()
+            || location
+                .as_str()
+                .is_some_and(|location| location.trim().is_empty())
+            || location.as_str().is_some()
+        {
+            return;
+        }
+        self.push(
+            Severity::Error,
+            "trigger.location_type",
+            "trigger `location` must be a setting ID or blank".to_string(),
+            &trigger.path,
+            Some(format!("{}/location", trigger.pointer)),
+            None,
+            Some(trigger.id.clone()),
+        );
+    }
+
+    fn validate_trigger_gate_list(&mut self, trigger: &Item, field: &str) {
+        let Some(values) = trigger.mapping.get(Value::String(field.to_string())) else {
+            return;
+        };
+        let Some(values) = values.as_sequence() else {
+            self.push(
+                Severity::Error,
+                &format!("trigger.{field}_type"),
+                format!("trigger `{field}` must be a sequence of character, entity, or flag IDs"),
+                &trigger.path,
+                Some(format!("{}/{}", trigger.pointer, escape_pointer(field))),
+                None,
+                Some(trigger.id.clone()),
+            );
+            return;
+        };
+        for (index, value) in values.iter().enumerate() {
+            if !value
+                .as_str()
+                .is_some_and(|reference| !reference.trim().is_empty())
+            {
+                self.push(
+                    Severity::Error,
+                    &format!("trigger.{field}_reference"),
+                    format!("trigger `{field}` entries must be character, entity, or flag IDs"),
+                    &trigger.path,
+                    Some(format!("{}/{field}/{index}", trigger.pointer)),
+                    None,
+                    Some(trigger.id.clone()),
+                );
             }
         }
     }
@@ -2746,6 +2890,41 @@ impl<'a> Validator<'a> {
         }
     }
 
+    fn validate_flag_values(&mut self, flags: &[Item]) {
+        for flag in flags {
+            for field in ["name", "description"] {
+                if !string_field(&flag.mapping, field).is_some_and(|value| !value.trim().is_empty())
+                {
+                    self.push(
+                        Severity::Error,
+                        &format!("flag.{field}"),
+                        format!("flag `{field}` must be a non-empty string"),
+                        &flag.path,
+                        Some(format!("{}/{}", flag.pointer, escape_pointer(field))),
+                        None,
+                        Some(flag.id.clone()),
+                    );
+                }
+            }
+            if flag
+                .mapping
+                .get(Value::String("initial_state".to_string()))
+                .and_then(Value::as_bool)
+                .is_none()
+            {
+                self.push(
+                    Severity::Error,
+                    "flag.initial_state",
+                    "flag `initial_state` must be a boolean".to_string(),
+                    &flag.path,
+                    Some(format!("{}/initial_state", flag.pointer)),
+                    None,
+                    Some(flag.id.clone()),
+                );
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn push(
         &mut self,
@@ -2813,7 +2992,9 @@ fn collect_references(
 ) {
     match value {
         Value::String(id)
-            if key != Some("id") && (looks_like_id(id) || is_reference_pointer(pointer)) =>
+            if key != Some("id")
+                && !(id.trim().is_empty() && is_blankable_reference_pointer(pointer))
+                && (looks_like_id(id) || is_reference_pointer(pointer)) =>
         {
             references.push(Reference {
                 id: id.clone(),
@@ -2849,6 +3030,10 @@ fn is_reference_pointer(pointer: &str) -> bool {
     expected_kind(pointer).is_some()
 }
 
+fn is_blankable_reference_pointer(pointer: &str) -> bool {
+    pointer.starts_with("/triggers/") && pointer.ends_with("/location")
+}
+
 fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
     let field = pointer.rsplit('/').next().unwrap_or_default();
     let parent = pointer.rsplit('/').nth(1).unwrap_or_default();
@@ -2870,6 +3055,7 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
         Kind::Trigger,
     ];
     const DEDUCTIONS: &[Kind] = &[Kind::Deduction];
+    const TRIGGER_GATES: &[Kind] = &[Kind::Character, Kind::Entity, Kind::Flag];
     const FACT_OR_DEDUCTION: &[Kind] = &[Kind::Fact, Kind::Deduction];
     const COMMANDS: &[Kind] = &[Kind::Command];
     const CONTAINERS: &[Kind] = &[Kind::Setting, Kind::Character, Kind::Entity];
@@ -2932,6 +3118,9 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
         _ if field == "target" && pointer.contains("/clues/") => Some(CONTENT_SOURCES),
         _ if parent == "targets" && pointer.contains("/clues/") => Some(CONTENT_SOURCES),
         _ if field == "command" && pointer.contains("/triggers/") => Some(COMMANDS),
+        _ if matches!(parent, "any_of" | "all_of") && pointer.contains("/triggers/") => {
+            Some(TRIGGER_GATES)
+        }
         _ if parent == "members" && pointer.contains("/tags/") => Some(TAGGABLE),
         _ => None,
     }

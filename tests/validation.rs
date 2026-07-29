@@ -58,6 +58,11 @@ tags:
     members: [entity.knife]
   - id: tag.gameplay
     members: [route.foyer_study, command.examine, trigger.examine_knife]
+flags:
+  - id: flag.knife_examined
+    name: Knife examined
+    description: Whether the knife has been examined.
+    initial_state: false
 commands:
   - id: command.examine
     name: Examine
@@ -72,10 +77,12 @@ triggers:
     name: Examine the knife
     command: command.examine
     once: true
-    conditions:
-      - left: $target
-        operator: equals
-        right: entity.knife
+    time:
+      relation: at
+      value: "21:18"
+    location: setting.study
+    any_of: [character.culprit, entity.knife]
+    all_of: [flag.knife_examined]
     effects:
       - operation: discover
         target: clue.weapon
@@ -143,6 +150,11 @@ tags:
     members: [entity.knife]
   - id: tag.knife_analysis_complete
     state: true
+flags:
+  - id: flag.knife_examined
+    name: Knife examined
+    description: Whether the knife has been examined.
+    initial_state: false
 commands:
   - id: command.claim
     name: Claim
@@ -234,6 +246,7 @@ fn story_files(source: String) -> Vec<SourceFile> {
             Some("facts") => "story.yaml",
             Some("deductions") => "deductions.yaml",
             Some("tags") => "tags.yaml",
+            Some("flags") => "flags.yaml",
             Some("commands") => "commands.yaml",
             Some("triggers") => "triggers.yaml",
             _ => "story.yaml",
@@ -283,6 +296,57 @@ fn rejects_sections_outside_their_canonical_files() {
             && diagnostic.path == "cast.yaml"
             && diagnostic.pointer.as_deref() == Some("/characters")
             && diagnostic.message.contains("`characters.yaml`")
+    }));
+}
+
+#[test]
+fn rejects_flags_outside_flags_yaml() {
+    let mut files = story_files(VALID_STORY.to_string());
+    files
+        .iter_mut()
+        .find(|file| file.path == "flags.yaml")
+        .expect("flag document")
+        .path = "state.yaml".to_string();
+
+    let report = validate(&files);
+
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "schema.noncanonical_filename"
+            && diagnostic.path == "state.yaml"
+            && diagnostic.pointer.as_deref() == Some("/flags")
+            && diagnostic.message.contains("`flags.yaml`")
+    }));
+}
+
+#[test]
+fn validates_required_flag_fields() {
+    let source = VALID_STORY
+        .replacen("  - id: flag.knife_examined", "  - id: \"\"", 1)
+        .replace("    name: Knife examined", "    name: \"\"")
+        .replace(
+            "    description: Whether the knife has been examined.",
+            "    description: 42",
+        )
+        .replace("    initial_state: false", "    initial_state: disabled");
+    let result = codes(source);
+
+    assert!(result.contains(&"id.invalid".to_string()));
+    assert!(result.contains(&"flag.name".to_string()));
+    assert!(result.contains(&"flag.description".to_string()));
+    assert!(result.contains(&"flag.initial_state".to_string()));
+}
+
+#[test]
+fn flags_section_is_required() {
+    let source = VALID_STORY.replace(
+        "flags:\n  - id: flag.knife_examined\n    name: Knife examined\n    description: Whether the knife has been examined.\n    initial_state: false\n",
+        "",
+    );
+    let report = report(source);
+
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "schema.missing_section"
+            && diagnostic.pointer.as_deref() == Some("/flags")
     }));
 }
 
@@ -504,7 +568,10 @@ fn validates_command_and_trigger_shapes() {
         .replace("type: entity", "accepts: [entity]")
         .replace("required: true", "required: sometimes")
         .replace("once: true", "once: sometimes")
-        .replace("operator: equals", "operator: \"\"")
+        .replace(
+            "    time:\n      relation: at",
+            "    conditions: []\n    time:\n      relation: at",
+        )
         .replace("value: visible", "value: 42");
     let result = codes(source);
     assert!(result.contains(&"command.aliases_removed".to_string()));
@@ -512,7 +579,7 @@ fn validates_command_and_trigger_shapes() {
     assert!(result.contains(&"command.parameter_kind".to_string()));
     assert!(result.contains(&"command.parameter_required_type".to_string()));
     assert!(result.contains(&"trigger.once_type".to_string()));
-    assert!(result.contains(&"trigger.condition_field".to_string()));
+    assert!(result.contains(&"trigger.conditions_removed".to_string()));
     assert!(result.contains(&"trigger.effect_value_type".to_string()));
 }
 
@@ -711,6 +778,159 @@ fn validates_trigger_command_reference_type() {
         item.code == "reference.wrong_type"
             && item.subject_id.as_deref() == Some("entity.knife")
             && item.pointer.as_deref() == Some("/triggers/0/command")
+    }));
+}
+
+#[test]
+fn validates_structured_trigger_time() {
+    let cases = [
+        (
+            "    time:\n      relation: at\n      value: \"21:18\"",
+            "    time: \"21:18\"",
+            "trigger.time_type",
+            "/triggers/0/time",
+        ),
+        (
+            "      relation: at",
+            "      relation: during",
+            "trigger.time_relation",
+            "/triggers/0/time/relation",
+        ),
+        (
+            "      value: \"21:18\"",
+            "      value: \"\"",
+            "trigger.time_value",
+            "/triggers/0/time/value",
+        ),
+        (
+            "      value: \"21:18\"",
+            "      value: \"21:18\"\n      timezone: local",
+            "trigger.time_unknown_field",
+            "/triggers/0/time/timezone",
+        ),
+    ];
+
+    for (before, after, expected_code, expected_pointer) in cases {
+        let report = report(VALID_STORY.replace(before, after));
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == expected_code
+                    && diagnostic.pointer.as_deref() == Some(expected_pointer)
+            }),
+            "missing {expected_code} at {expected_pointer}: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
+fn trigger_time_may_be_omitted() {
+    let source = VALID_STORY.replace(
+        "    time:\n      relation: at\n      value: \"21:18\"\n",
+        "",
+    );
+    let report = report(source);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+}
+
+#[test]
+fn validates_trigger_location_and_allows_blank_for_everywhere() {
+    for replacement in [
+        "    location: \"\"\n    any_of:",
+        "    location:\n    any_of:",
+    ] {
+        let source = VALID_STORY.replace("    location: setting.study\n    any_of:", replacement);
+        let report = report(source);
+        assert!(report.valid, "{:#?}", report.diagnostics);
+    }
+
+    let malformed = report(VALID_STORY.replace(
+        "    location: setting.study\n    any_of:",
+        "    location: 42\n    any_of:",
+    ));
+    assert!(malformed.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "trigger.location_type"
+            && diagnostic.pointer.as_deref() == Some("/triggers/0/location")
+    }));
+
+    let wrong_type = report(VALID_STORY.replace(
+        "    location: setting.study\n    any_of:",
+        "    location: entity.knife\n    any_of:",
+    ));
+    assert!(wrong_type.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "reference.wrong_type"
+            && diagnostic.pointer.as_deref() == Some("/triggers/0/location")
+    }));
+
+    let unknown = report(VALID_STORY.replace(
+        "    location: setting.study\n    any_of:",
+        "    location: setting.not_authored\n    any_of:",
+    ));
+    assert!(unknown.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "reference.unknown"
+            && diagnostic.pointer.as_deref() == Some("/triggers/0/location")
+    }));
+}
+
+#[test]
+fn validates_trigger_any_of_and_all_of_lists() {
+    let cases = [
+        (
+            "    any_of: [character.culprit, entity.knife]",
+            "    any_of: character.culprit",
+            "trigger.any_of_type",
+            "/triggers/0/any_of",
+        ),
+        (
+            "    any_of: [character.culprit, entity.knife]",
+            "    any_of: [character.culprit, 42]",
+            "trigger.any_of_reference",
+            "/triggers/0/any_of/1",
+        ),
+        (
+            "    any_of: [character.culprit, entity.knife]",
+            "    any_of: [character.culprit, setting.study]",
+            "reference.wrong_type",
+            "/triggers/0/any_of/1",
+        ),
+        (
+            "    all_of: [flag.knife_examined]",
+            "    all_of: [flag.not_authored]",
+            "reference.unknown",
+            "/triggers/0/all_of/0",
+        ),
+        (
+            "    all_of: [flag.knife_examined]",
+            "    all_of: [entity.knife, entity.knife]",
+            "list.duplicate_reference",
+            "/triggers/0/all_of/1",
+        ),
+    ];
+
+    for (before, after, expected_code, expected_pointer) in cases {
+        let report = report(VALID_STORY.replace(before, after));
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == expected_code
+                    && diagnostic.pointer.as_deref() == Some(expected_pointer)
+            }),
+            "missing {expected_code} at {expected_pointer}: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
+fn rejects_legacy_trigger_conditions() {
+    let source = VALID_STORY.replace(
+        "    time:\n",
+        "    conditions:\n      - left: $target\n        operator: equals\n        right: entity.knife\n    time:\n",
+    );
+    let report = report(source);
+
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "trigger.conditions_removed"
+            && diagnostic.pointer.as_deref() == Some("/triggers/0/conditions")
     }));
 }
 
