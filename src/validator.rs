@@ -268,7 +268,7 @@ impl<'a> Validator<'a> {
         }
         self.validate_deduction_values(&deductions, fact_claims_enabled);
         self.validate_command_values(&commands);
-        self.validate_trigger_values(&triggers, fact_claims_enabled);
+        self.validate_trigger_values(&triggers, &commands, fact_claims_enabled);
         if !fact_claims_enabled {
             self.validate_fact_reachability(
                 &facts,
@@ -940,6 +940,33 @@ impl<'a> Validator<'a> {
                 }
             }
         }
+        if self.format_version == Some(2) {
+            match case
+                .mapping
+                .get(Value::String("initial_time".to_string()))
+            {
+                Some(Value::String(time)) if valid_time(time) => {}
+                Some(_) => self.push(
+                    Severity::Error,
+                    "case.initial_time",
+                    "`case.initial_time` must be a quoted 24-hour HH:MM value".to_string(),
+                    &case.path,
+                    Some(format!("{}/initial_time", case.pointer)),
+                    None,
+                    Some(case.id.clone()),
+                ),
+                None => self.push(
+                    Severity::Error,
+                    "case.initial_time_missing",
+                    "format 2 games require `case.initial_time` so runtime time effects are deterministic"
+                        .to_string(),
+                    &case.path,
+                    Some(format!("{}/initial_time", case.pointer)),
+                    None,
+                    Some(case.id.clone()),
+                ),
+            }
+        }
     }
 
     fn validate_solution(&mut self) {
@@ -1141,11 +1168,12 @@ impl<'a> Validator<'a> {
                 }
             }
             match integer_field(&route.mapping, "travel_minutes") {
-                Some(value) if value > 0 => {}
+                Some(value) if value > 0 && u32::try_from(value).is_ok() => {}
                 _ => self.push(
                     Severity::Error,
                     "route.invalid_travel_minutes",
-                    "`travel_minutes` must be a positive integer".to_string(),
+                    "`travel_minutes` must be a positive whole number supported by the runtime"
+                        .to_string(),
                     &route.path,
                     Some(format!("{}/travel_minutes", route.pointer)),
                     None,
@@ -1678,6 +1706,9 @@ impl<'a> Validator<'a> {
             }
 
             let parameter_types = self.validate_command_parameters(command);
+            if self.format_version == Some(2) {
+                self.validate_runtime_command_signature(command, &parameter_types);
+            }
             self.validate_command_effects(command, &parameter_types);
         }
     }
@@ -1699,6 +1730,7 @@ impl<'a> Validator<'a> {
             return Vec::new();
         };
 
+        let mut names = HashSet::new();
         parameters
             .iter()
             .enumerate()
@@ -1716,11 +1748,22 @@ impl<'a> Validator<'a> {
                     );
                     return None;
                 };
-                if !string_field(parameter, "name").is_some_and(|name| !name.trim().is_empty()) {
+                let name = string_field(parameter, "name");
+                if !name.is_some_and(|name| !name.trim().is_empty()) {
                     self.push(
                         Severity::Error,
                         "command.parameter_name",
                         "command parameter `name` must be a non-empty string".to_string(),
+                        &command.path,
+                        Some(format!("{pointer}/name")),
+                        None,
+                        Some(command.id.clone()),
+                    );
+                } else if !names.insert(name.expect("validated parameter name")) {
+                    self.push(
+                        Severity::Error,
+                        "command.parameter_name_duplicate",
+                        "command parameter names must be unique".to_string(),
                         &command.path,
                         Some(format!("{pointer}/name")),
                         None,
@@ -1787,6 +1830,57 @@ impl<'a> Validator<'a> {
             .collect()
     }
 
+    fn validate_runtime_command_signature(
+        &mut self,
+        command: &Item,
+        parameter_types: &[Option<CommandParameterType>],
+    ) {
+        let known = parameter_types
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        let valid = match command.id.as_str() {
+            "command.claim" | "command.deduce" => known.is_empty(),
+            "command.move" => known == [CommandParameterType::Setting],
+            "command.take" => known == [CommandParameterType::Entity],
+            "command.solve" => {
+                known
+                    == [
+                        CommandParameterType::Character,
+                        CommandParameterType::Deduction,
+                    ]
+            }
+            _ => true,
+        };
+        if !valid {
+            self.push(
+                Severity::Error,
+                "command.runtime_signature",
+                match command.id.as_str() {
+                    "command.claim" | "command.deduce" => {
+                        format!("reserved `{}` must not declare parameters", command.id)
+                    }
+                    "command.move" => {
+                        "`command.move` must declare exactly one setting parameter".to_string()
+                    }
+                    "command.take" => {
+                        "`command.take` must declare exactly one entity parameter".to_string()
+                    }
+                    "command.solve" => {
+                        "`command.solve` must declare character then deduction parameters"
+                            .to_string()
+                    }
+                    _ => unreachable!("only reserved runtime commands are checked"),
+                },
+                &command.path,
+                Some(format!("{}/parameters", command.pointer)),
+                None,
+                Some(command.id.clone()),
+            );
+        }
+    }
+
     fn validate_command_effects(
         &mut self,
         command: &Item,
@@ -1845,15 +1939,14 @@ impl<'a> Validator<'a> {
                         &pointer,
                         &["operation", "minutes"],
                     );
-                    let valid_minutes = effect
-                        .get(Value::String("minutes".to_string()))
-                        .and_then(Value::as_f64)
-                        .is_some_and(|minutes| minutes.is_finite() && minutes > 0.0);
+                    let valid_minutes = integer_field(effect, "minutes")
+                        .is_some_and(|minutes| minutes > 0 && u32::try_from(minutes).is_ok());
                     if !valid_minutes {
                         self.push(
                             Severity::Error,
                             "command.effect_minutes",
-                            "`advance_time.minutes` must be a positive number".to_string(),
+                            "`advance_time.minutes` must be a positive whole number supported by the runtime"
+                                .to_string(),
                             &command.path,
                             Some(format!("{pointer}/minutes")),
                             None,
@@ -2171,8 +2264,17 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn validate_trigger_values(&mut self, triggers: &[Item], fact_claims_enabled: bool) {
+    fn validate_trigger_values(
+        &mut self,
+        triggers: &[Item],
+        commands: &[Item],
+        fact_claims_enabled: bool,
+    ) {
         for trigger in triggers {
+            let parameter_types = string_field(&trigger.mapping, "command")
+                .and_then(|command_id| commands.iter().find(|command| command.id == command_id))
+                .map(command_parameter_types_by_name)
+                .unwrap_or_default();
             if !string_field(&trigger.mapping, "command")
                 .is_some_and(|command| !command.trim().is_empty())
             {
@@ -2259,6 +2361,13 @@ impl<'a> Validator<'a> {
                         "learn" | "learn_after" | "discover" | "discover_after"
                             if fact_claims_enabled =>
                         {
+                            self.validate_trigger_effect_fields(
+                                trigger,
+                                index,
+                                effect,
+                                true,
+                                matches!(operation, "learn_after" | "discover_after"),
+                            );
                             self.push(
                                 Severity::Error,
                                 "trigger.legacy_knowledge_effect",
@@ -2271,28 +2380,172 @@ impl<'a> Validator<'a> {
                                 Some(trigger.id.clone()),
                             );
                         }
-                        "learn" | "learn_after" => self.validate_trigger_effect_target(
-                            trigger,
-                            index,
-                            operation,
-                            target,
-                            Kind::Fact,
+                        "learn" | "learn_after" => {
+                            self.validate_trigger_effect_fields(
+                                trigger,
+                                index,
+                                effect,
+                                true,
+                                operation == "learn_after",
+                            );
+                            self.validate_trigger_effect_operand(
+                                trigger,
+                                index,
+                                operation,
+                                "target",
+                                target,
+                                &[Kind::Fact],
+                                &[],
+                                true,
+                                &parameter_types,
+                            );
+                        }
+                        "discover" | "discover_after" => {
+                            self.validate_trigger_effect_fields(
+                                trigger,
+                                index,
+                                effect,
+                                true,
+                                operation == "discover_after",
+                            );
+                            self.validate_trigger_effect_operand(
+                                trigger,
+                                index,
+                                operation,
+                                "target",
+                                target,
+                                &[Kind::Clue],
+                                &[],
+                                true,
+                                &parameter_types,
+                            );
+                        }
+                        "move" => {
+                            self.validate_trigger_effect_fields(trigger, index, effect, true, true);
+                            self.validate_trigger_effect_operand(
+                                trigger,
+                                index,
+                                operation,
+                                "target",
+                                target,
+                                &[Kind::Character, Kind::Entity],
+                                &["$actor"],
+                                true,
+                                &parameter_types,
+                            );
+                            if let Some(value) = string_field(effect, "value") {
+                                self.validate_trigger_effect_operand(
+                                    trigger,
+                                    index,
+                                    operation,
+                                    "value",
+                                    value,
+                                    &[Kind::Setting],
+                                    &[],
+                                    true,
+                                    &parameter_types,
+                                );
+                            }
+                        }
+                        "advance_time_by_route" => {
+                            self.validate_trigger_effect_fields(trigger, index, effect, true, true);
+                            self.validate_trigger_effect_operand(
+                                trigger,
+                                index,
+                                operation,
+                                "target",
+                                target,
+                                &[],
+                                &["$actor"],
+                                false,
+                                &parameter_types,
+                            );
+                            if let Some(value) = string_field(effect, "value") {
+                                self.validate_trigger_effect_operand(
+                                    trigger,
+                                    index,
+                                    operation,
+                                    "value",
+                                    value,
+                                    &[Kind::Setting],
+                                    &[],
+                                    true,
+                                    &parameter_types,
+                                );
+                            }
+                        }
+                        "claim" => {
+                            self.validate_trigger_effect_fields(
+                                trigger, index, effect, false, false,
+                            );
+                            self.validate_trigger_effect_operand(
+                                trigger,
+                                index,
+                                operation,
+                                "target",
+                                target,
+                                &[Kind::Fact],
+                                &["$fact"],
+                                false,
+                                &parameter_types,
+                            );
+                        }
+                        "give" | "give_after" | "remove" => {
+                            self.validate_trigger_effect_fields(
+                                trigger,
+                                index,
+                                effect,
+                                operation == "give_after",
+                                operation == "give_after",
+                            );
+                            self.validate_trigger_effect_operand(
+                                trigger,
+                                index,
+                                operation,
+                                "target",
+                                target,
+                                &[Kind::Flag],
+                                &[],
+                                false,
+                                &parameter_types,
+                            );
+                        }
+                        "satisfy_requirement" => {
+                            self.validate_trigger_effect_fields(trigger, index, effect, true, true);
+                            self.validate_trigger_effect_operand(
+                                trigger,
+                                index,
+                                operation,
+                                "target",
+                                target,
+                                &[Kind::Route],
+                                &[],
+                                true,
+                                &parameter_types,
+                            );
+                            if let Some(value) = string_field(effect, "value") {
+                                self.validate_trigger_effect_operand(
+                                    trigger,
+                                    index,
+                                    operation,
+                                    "value",
+                                    value,
+                                    &[Kind::Entity],
+                                    &[],
+                                    true,
+                                    &parameter_types,
+                                );
+                            }
+                        }
+                        _ => self.push(
+                            Severity::Error,
+                            "trigger.effect_unknown_operation",
+                            format!("unknown trigger effect operation `{operation}`"),
+                            &trigger.path,
+                            Some(format!("{}/effects/{index}/operation", trigger.pointer)),
+                            locate_scalar(&trigger.source, operation),
+                            Some(trigger.id.clone()),
                         ),
-                        "discover" | "discover_after" => self.validate_trigger_effect_target(
-                            trigger,
-                            index,
-                            operation,
-                            target,
-                            Kind::Clue,
-                        ),
-                        "give" | "give_after" | "remove" => self.validate_trigger_effect_target(
-                            trigger,
-                            index,
-                            operation,
-                            target,
-                            Kind::Flag,
-                        ),
-                        _ => {}
                     }
                     if matches!(operation, "learn_after" | "discover_after" | "give_after")
                         && !invalid_value_type
@@ -2328,6 +2581,9 @@ impl<'a> Validator<'a> {
         let Some(time) = trigger.mapping.get(Value::String("time".to_string())) else {
             return;
         };
+        if time.is_null() {
+            return;
+        }
         let Some(time) = time.as_mapping() else {
             self.push(
                 Severity::Error,
@@ -2380,11 +2636,11 @@ impl<'a> Validator<'a> {
                 Some(trigger.id.clone()),
             );
         }
-        if !string_field(time, "value").is_some_and(|value| !value.trim().is_empty()) {
+        if !string_field(time, "value").is_some_and(valid_time) {
             self.push(
                 Severity::Error,
                 "trigger.time_value",
-                "trigger `time.value` must be a non-empty string".to_string(),
+                "trigger `time.value` must be a quoted 24-hour HH:MM value".to_string(),
                 &trigger.path,
                 Some(format!("{}/time/value", trigger.pointer)),
                 None,
@@ -2450,49 +2706,161 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn validate_trigger_effect_target(
+    fn validate_trigger_effect_fields(
+        &mut self,
+        trigger: &Item,
+        effect_index: usize,
+        effect: &Mapping,
+        allow_value: bool,
+        require_value: bool,
+    ) {
+        let pointer = format!("{}/effects/{effect_index}", trigger.pointer);
+        for key in effect.keys() {
+            let Some(key) = key.as_str() else {
+                self.push(
+                    Severity::Error,
+                    "trigger.effect_field",
+                    "trigger effect field names must be strings".to_string(),
+                    &trigger.path,
+                    Some(pointer.clone()),
+                    None,
+                    Some(trigger.id.clone()),
+                );
+                continue;
+            };
+            if !(matches!(key, "operation" | "target") || allow_value && key == "value") {
+                self.push(
+                    Severity::Error,
+                    "trigger.effect_unknown_field",
+                    format!("`{key}` is not valid for this trigger effect"),
+                    &trigger.path,
+                    Some(format!("{pointer}/{}", escape_pointer(key))),
+                    None,
+                    Some(trigger.id.clone()),
+                );
+            }
+        }
+        if require_value
+            && !string_field(effect, "value").is_some_and(|value| !value.trim().is_empty())
+        {
+            self.push(
+                Severity::Error,
+                "trigger.effect_value_missing",
+                "this trigger effect requires a non-empty string `value`".to_string(),
+                &trigger.path,
+                Some(format!("{pointer}/value")),
+                None,
+                Some(trigger.id.clone()),
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn validate_trigger_effect_operand(
         &mut self,
         trigger: &Item,
         effect_index: usize,
         operation: &str,
-        target: &str,
-        expected: Kind,
+        field: &str,
+        value: &str,
+        expected: &[Kind],
+        special_operands: &[&str],
+        allow_named_operand: bool,
+        parameter_types: &BTreeMap<String, CommandParameterType>,
     ) {
-        if target.starts_with('$') {
+        if special_operands.contains(&value) {
             return;
+        }
+        let pointer = format!(
+            "{}/effects/{effect_index}/{}",
+            trigger.pointer,
+            escape_pointer(field)
+        );
+        let expected_names = expected
+            .iter()
+            .map(|kind| kind.name())
+            .collect::<Vec<_>>()
+            .join(" or ");
+        if let Some(name) = value.strip_prefix('$') {
+            if allow_named_operand {
+                match parameter_types.get(name) {
+                    Some(parameter_type) if expected.contains(&parameter_type.kind()) => return,
+                    Some(parameter_type) => {
+                        self.push(
+                            Severity::Error,
+                            "trigger.effect_parameter_type",
+                            format!(
+                                "trigger effect `{operation}` `{field}` uses {value}, a {} parameter; expected {expected_names}",
+                                parameter_type.name()
+                            ),
+                            &trigger.path,
+                            Some(pointer),
+                            locate_scalar(&trigger.source, value),
+                            Some(trigger.id.clone()),
+                        );
+                        return;
+                    }
+                    None => {
+                        self.push(
+                            Severity::Error,
+                            "trigger.effect_parameter_unknown",
+                            format!(
+                                "trigger effect `{operation}` `{field}` refers to unknown command parameter `{name}`"
+                            ),
+                            &trigger.path,
+                            Some(pointer),
+                            locate_scalar(&trigger.source, value),
+                            Some(trigger.id.clone()),
+                        );
+                        return;
+                    }
+                }
+            }
         }
         match self
             .definitions
-            .get(target)
+            .get(value)
             .map(|definition| definition.kind)
         {
-            Some(kind) if kind == expected => {}
+            Some(kind) if expected.contains(&kind) => {}
             Some(kind) => self.push(
                 Severity::Error,
                 "trigger.effect_target_type",
                 format!(
-                    "trigger effect `{operation}` targets a {}; expected a {}",
+                    "trigger effect `{operation}` `{field}` refers to a {}; expected {expected_names}",
                     kind.name(),
-                    expected.name()
                 ),
                 &trigger.path,
-                Some(format!("{}/effects/{effect_index}/target", trigger.pointer)),
-                locate_scalar(&trigger.source, target),
-                Some(target.to_string()),
+                Some(pointer),
+                locate_scalar(&trigger.source, value),
+                Some(value.to_string()),
             ),
-            None if looks_like_id(target) => {
-                // The generic reference pass reports the unknown ID.
-            }
+            None if looks_like_id(value) => self.push(
+                Severity::Error,
+                "reference.unknown",
+                format!("`{value}` does not refer to a defined ID"),
+                &trigger.path,
+                Some(pointer),
+                locate_scalar(&trigger.source, value),
+                Some(value.to_string()),
+            ),
             None => self.push(
                 Severity::Error,
                 "trigger.effect_target_type",
                 format!(
-                    "trigger effect `{operation}` must target a {} ID",
-                    expected.name()
+                    "trigger effect `{operation}` `{field}` must be {expected_names}{}",
+                    if special_operands.is_empty() && !allow_named_operand {
+                        " ID".to_string()
+                    } else {
+                        format!(
+                            " ID or a supported operand ({})",
+                            special_operands.join(", ")
+                        )
+                    }
                 ),
                 &trigger.path,
-                Some(format!("{}/effects/{effect_index}/target", trigger.pointer)),
-                locate_scalar(&trigger.source, target),
+                Some(pointer),
+                locate_scalar(&trigger.source, value),
                 Some(trigger.id.clone()),
             ),
         }
@@ -3245,6 +3613,22 @@ fn reachable(graph: &BTreeMap<String, Vec<String>>, starts: &[String]) -> HashSe
     visited
 }
 
+fn command_parameter_types_by_name(command: &Item) -> BTreeMap<String, CommandParameterType> {
+    command
+        .mapping
+        .get(Value::String("parameters".to_string()))
+        .and_then(Value::as_sequence)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_mapping)
+        .filter_map(|parameter| {
+            let name = string_field(parameter, "name")?;
+            let kind = string_field(parameter, "type").and_then(CommandParameterType::parse)?;
+            Some((name.to_string(), kind))
+        })
+        .collect()
+}
+
 fn string_field<'a>(mapping: &'a Mapping, field: &str) -> Option<&'a str> {
     mapping
         .get(Value::String(field.to_string()))
@@ -3369,10 +3753,17 @@ fn valid_time(value: &str) -> bool {
 
 fn valid_delay(value: &str) -> bool {
     let value = value.trim();
-    for suffix in ["turns", "turn", "m", "h"] {
-        if let Some(number) = value.strip_suffix(suffix) {
-            return number.trim().parse::<u64>().is_ok_and(|number| number > 0);
-        }
+    if let Some(number) = value.strip_suffix("turns") {
+        return number.trim().parse::<u32>().is_ok_and(|number| number > 0);
+    }
+    if let Some(number) = value.strip_suffix('m') {
+        return number.trim().parse::<u32>().is_ok_and(|number| number > 0);
+    }
+    if let Some(number) = value.strip_suffix('h') {
+        return number
+            .trim()
+            .parse::<u32>()
+            .is_ok_and(|number| number > 0 && number.checked_mul(60).is_some());
     }
     false
 }

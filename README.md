@@ -195,6 +195,8 @@ effects:
 parameters. Facts, triggers, narrative text, and durations are authored effect
 values because they are not action parameter types. Trigger-file effects
 continue to use their existing, separate `operation`/`target`/`value` contract.
+Runtime durations such as `advance_time.minutes` and route travel times must be
+positive whole minutes.
 The former `add_tag` and `remove_tag` action effects are invalid.
 
 ## Flags and trigger gates
@@ -234,10 +236,17 @@ triggers:
         target: flag.boathouse_warning_heard
 ```
 
-`time.relation` is `before`, `at`, or `after`, and `time.value` is a non-empty
-authored time expression. The legacy free-form `conditions` list is invalid.
+`time.relation` is `before`, `at`, or `after`, and `time.value` is a quoted
+24-hour `HH:MM` value. The legacy free-form `conditions` list is invalid.
 Trigger command, description, `once`, effects, and nested facts retain their
 existing contracts.
+
+Executable format-2 trigger effects are `move`, `advance_time_by_route`,
+`claim`, `give`, `give_after`, `remove`, and `satisfy_requirement`. Their
+`target` and `value` operands are checked against the referenced command's
+named parameter types; `$actor` and `$fact` are available only to the
+operations that define them. Unknown operations, extra fields, missing values,
+and wrong-kind authored IDs are errors rather than runtime surprises.
 
 Delayed work uses flags. `give`, `give_after`, and `remove` target authored
 flags; `give_after` also needs a positive minute, hour, or turn delay:
@@ -256,6 +265,17 @@ types, `initially_known`, clue-based deduction `supported_by`, and the legacy
 Format 1 remains supported for existing repositories, including its required
 `clues` section and optional 0.3 fact extensions.
 
+Format 2 cases require a quoted `case.initial_time` in 24-hour `HH:MM` form.
+This initializes the authoritative shared clock used by time gates, route
+travel, and delayed effects:
+
+```yaml
+case:
+  id: case.last_tide
+  format_version: 2
+  initial_time: "21:32"
+```
+
 Gameplay deductions may define a player-facing `conclusion`, two or three
 fact/deduction `inputs`, hidden boolean `truth`, `contradicted_by` references,
 and an optional structured `solves` answer. Deduction cycle detection follows
@@ -271,6 +291,7 @@ The first pass checks:
 - known typed and untyped references;
 - duplicate values in reference lists;
 - required flag metadata and typed trigger time/location/subject gates;
+- deterministic format-2 initial time and executable trigger-effect shapes;
 - versioned clue or nested-fact knowledge models and two- or three-input deductions;
 - setting-parent, entity-containment, fact/clue, and deduction cycles;
 - route endpoints, travel duration, reachability, and exitability;

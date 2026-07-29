@@ -88,6 +88,7 @@ const VALID_FORMAT_2_STORY: &str = r#"
 case:
   id: case.example
   format_version: 2
+  initial_time: "21:00"
   entry_settings: [setting.foyer]
   exit_settings: [setting.foyer]
 solution:
@@ -177,7 +178,7 @@ commands:
         required: false
     effects:
       - operation: advance_time
-        minutes: 12.5
+        minutes: 12
       - operation: move
         subjects: [player, character.culprit, param1, param3]
         setting: param2
@@ -267,6 +268,45 @@ fn valid_format_2_repository_has_no_diagnostics() {
     assert!(report.valid, "{:#?}", report.diagnostics);
     assert_eq!(report.format_version, Some(2));
     assert!(report.diagnostics.is_empty());
+}
+
+#[test]
+fn format_2_requires_a_runtime_clock_and_whole_minute_effects() {
+    let missing = report(VALID_FORMAT_2_STORY.replace("  initial_time: \"21:00\"\n", ""));
+    assert!(missing
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "case.initial_time_missing"));
+
+    let invalid = codes(
+        VALID_FORMAT_2_STORY
+            .replace("initial_time: \"21:00\"", "initial_time: \"24:00\"")
+            .replace("minutes: 12", "minutes: 12.5"),
+    );
+    assert!(invalid.contains(&"case.initial_time".to_string()));
+    assert!(invalid.contains(&"command.effect_minutes".to_string()));
+}
+
+#[test]
+fn validates_runtime_trigger_effect_contracts() {
+    let invalid = VALID_FORMAT_2_STORY
+        .replace(
+            "    command: command.investigate\n    effects:",
+            "    command: command.investigate\n    time:\n      relation: after\n      value: \"99:00\"\n    effects:",
+        )
+        .replace(
+            "      - operation: give_after\n        target: flag.knife_analysis_complete\n        value: 20m",
+            "      - operation: move\n        target: $actor\n        value: $target\n        surprise: true\n      - operation: rewrite_reality\n        target: flag.knife_analysis_complete",
+        );
+    let result = codes(invalid);
+    assert!(result.contains(&"trigger.time_value".to_string()));
+    assert!(result.contains(&"trigger.effect_parameter_type".to_string()));
+    assert!(result.contains(&"trigger.effect_unknown_field".to_string()));
+    assert!(result.contains(&"trigger.effect_unknown_operation".to_string()));
+
+    let missing_value =
+        codes(VALID_FORMAT_2_STORY.replace("        value: 20m", "        omitted_value: 20m"));
+    assert!(missing_value.contains(&"trigger.effect_value_missing".to_string()));
 }
 
 #[test]
@@ -443,6 +483,14 @@ fn format_2_validates_state_flags_and_delayed_give_effects() {
 
     let legacy = VALID_FORMAT_2_STORY.replace("operation: give_after", "operation: learn_after");
     assert!(codes(legacy).contains(&"trigger.legacy_knowledge_effect".to_string()));
+
+    for delay in ["1turn", "4294967296turns", "4294967296m"] {
+        assert!(
+            codes(VALID_FORMAT_2_STORY.replace("value: 20m", &format!("value: {delay}")))
+                .contains(&"trigger.effect_delay_invalid".to_string()),
+            "{delay} must be rejected before runtime"
+        );
+    }
 }
 
 #[test]
@@ -551,6 +599,11 @@ fn validates_event_and_route_values() {
     assert!(result.contains(&"event.invalid_day".to_string()));
     assert!(result.contains(&"event.invalid_time".to_string()));
     assert!(result.contains(&"event.invalid_duration".to_string()));
+
+    assert!(
+        codes(VALID_STORY.replace("travel_minutes: 1", "travel_minutes: 4294967296"))
+            .contains(&"route.invalid_travel_minutes".to_string())
+    );
 }
 
 #[test]
@@ -591,6 +644,19 @@ fn validates_command_and_trigger_shapes() {
 }
 
 #[test]
+fn validates_runtime_command_signatures_and_unique_parameter_names() {
+    let duplicate =
+        codes(VALID_FORMAT_2_STORY.replace("      - name: destination", "      - name: target"));
+    assert!(duplicate.contains(&"command.parameter_name_duplicate".to_string()));
+
+    let reserved = codes(VALID_FORMAT_2_STORY.replace(
+        "    description: Learn that the knife is present.\n    effects:",
+        "    description: Learn that the knife is present.\n    parameters:\n      - name: target\n        type: entity\n        required: true\n    effects:",
+    ));
+    assert!(reserved.contains(&"command.runtime_signature".to_string()));
+}
+
+#[test]
 fn validates_action_effect_container_and_operation_shapes() {
     for (source, expected_code) in [
         (
@@ -602,15 +668,15 @@ fn validates_action_effect_container_and_operation_shapes() {
         ),
         (
             VALID_FORMAT_2_STORY.replace(
-                "      - operation: advance_time\n        minutes: 12.5",
+                "      - operation: advance_time\n        minutes: 12",
                 "      - advance_time",
             ),
             "command.effect_type",
         ),
         (
             VALID_FORMAT_2_STORY.replace(
-                "      - operation: advance_time\n        minutes: 12.5",
-                "      - minutes: 12.5",
+                "      - operation: advance_time\n        minutes: 12",
+                "      - minutes: 12",
             ),
             "command.effect_operation",
         ),
@@ -631,7 +697,7 @@ fn validates_action_effect_container_and_operation_shapes() {
 fn validates_every_action_effect_payload() {
     let cases = [
         (
-            "        minutes: 12.5",
+            "        minutes: 12",
             "        minutes: 0",
             "command.effect_minutes",
             "/commands/1/effects/0/minutes",
@@ -830,8 +896,14 @@ fn trigger_time_may_be_omitted() {
         "    time:\n      relation: at\n      value: \"21:18\"\n",
         "",
     );
-    let report = report(source);
-    assert!(report.valid, "{:#?}", report.diagnostics);
+    let omitted = report(source);
+    assert!(omitted.valid, "{:#?}", omitted.diagnostics);
+
+    let blank = report(VALID_STORY.replace(
+        "    time:\n      relation: at\n      value: \"21:18\"",
+        "    time:",
+    ));
+    assert!(blank.valid, "{:#?}", blank.diagnostics);
 }
 
 #[test]
