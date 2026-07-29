@@ -104,7 +104,7 @@ It builds the pinned validator revision and emits native GitHub annotations.
 
 ## Facts and deductions
 
-Validator 0.5 supports the format-2 notebook and claim model. Format 2 removes
+Validator 0.6 supports the format-2 notebook and action-effect model. Format 2 removes
 clues and the standalone `facts.yml` section. Facts are nested beneath the
 character, entity, setting, event, or trigger they belong to. Each owner may
 omit `facts`, use an empty list, or contain any number of fact objects. Every
@@ -129,11 +129,76 @@ entities:
         requires: fact.manual_cutoff
 ```
 
-A `fact.*` requirement means that fact has been claimed, not merely made
-available. Format 2 therefore requires `command.claim` with a parameter that
-accepts fact IDs. The engine evaluates requirements when a player turn begins
-and after an action resolves; the resolved command and arguments participate
-in that check.
+A `fact.*` requirement means that fact has been learned, not merely made
+available. The engine evaluates requirements when a player turn begins and
+after an action resolves; the resolved command, arguments, and authored effects
+participate in that check.
+
+## Actions and effects
+
+Actions remain in the `commands` section. Each action has an ID, name, optional
+description, zero or more typed parameters, and zero or more effects. The old
+`aliases` field is invalid, and each parameter's singular `type` replaces the
+old `accepts` list:
+
+```yaml
+commands:
+  - id: command.enter
+    name: Enter
+    description: Enter a selected room with a companion.
+    parameters:
+      - name: destination
+        type: setting
+        required: true
+      - name: companion
+        type: character
+        required: false
+    effects:
+      - operation: move
+        subjects: [player, param2]
+        setting: param1
+```
+
+Parameter types are `character`, `entity`, `setting`, `deduction`, and `event`.
+Within an effect, `param1`, `param2`, and so on refer to parameters by their
+one-based position. A parameter reference is valid only where its declared
+type matches the operand. Authored IDs are also checked for existence and kind.
+
+Supported effects have these shapes:
+
+```yaml
+effects:
+  - operation: advance_time
+    minutes: 15
+  - operation: move
+    subjects: [player, character.guide, entity.lantern, param1]
+    setting: setting.boathouse
+  - operation: transform
+    entity_from: entity.sealed_letter
+    entity_to: entity.open_letter
+  - operation: learn_fact
+    fact_id: fact.letter_contents
+  - operation: establish_deduction
+    deduction_id: deduction.blackmail
+  - operation: add_tag
+    tag_id: tag.storm_started
+  - operation: remove_tag
+    tag_id: tag.lights_on
+  - operation: describe
+    text: Thunder rolls across the island.
+  - operation: trigger
+    trigger_id: trigger.lockdown
+  - operation: win
+    text: The mystery is solved.
+  - operation: lose
+    text: The culprit escapes.
+```
+
+`move.subjects` accepts `player`, character/entity IDs, and compatible
+parameters. Facts, tags, triggers, narrative text, and durations are authored
+effect values because they are not action parameter types. Trigger-file
+effects continue to use their existing, separate `operation`/`target`/`value`
+contract.
 
 Delayed work uses state tags. A state tag needs no static `members`, and
 `give_after` must target a tag with a positive minute, hour, or turn delay:

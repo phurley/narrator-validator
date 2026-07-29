@@ -61,11 +61,12 @@ tags:
 commands:
   - id: command.examine
     name: Examine
-    aliases: [inspect]
+    description: Inspect an entity.
     parameters:
       - name: target
-        accepts: [entity]
+        type: entity
         required: true
+    effects: []
 triggers:
   - id: trigger.examine_knife
     name: Examine the knife
@@ -145,16 +146,54 @@ tags:
 commands:
   - id: command.claim
     name: Claim
-    parameters:
-      - name: fact
-        accepts: [fact]
-        required: true
+    description: Learn that the knife is present.
+    effects:
+      - operation: learn_fact
+        fact_id: fact.knife_is_present
   - id: command.investigate
     name: Investigate
+    description: Resolve the authored effects of investigating an entity.
     parameters:
       - name: target
-        accepts: [entity]
+        type: entity
         required: true
+      - name: destination
+        type: setting
+        required: false
+      - name: companion
+        type: character
+        required: false
+      - name: conclusion
+        type: deduction
+        required: false
+      - name: incident
+        type: event
+        required: false
+    effects:
+      - operation: advance_time
+        minutes: 12.5
+      - operation: move
+        subjects: [player, character.culprit, param1, param3]
+        setting: param2
+      - operation: transform
+        entity_from: param1
+        entity_to: entity.knife
+      - operation: learn_fact
+        fact_id: fact.knife_has_blood
+      - operation: establish_deduction
+        deduction_id: param4
+      - operation: add_tag
+        tag_id: tag.knife_analysis_complete
+      - operation: remove_tag
+        tag_id: tag.knife_analysis_complete
+      - operation: describe
+        text: The examination reveals a carefully staged scene.
+      - operation: trigger
+        trigger_id: trigger.investigate_knife
+      - operation: win
+        text: The player has solved the mystery.
+      - operation: lose
+        text: The trail has gone cold.
 triggers:
   - id: trigger.investigate_knife
     name: Investigate the knife
@@ -317,15 +356,6 @@ fn format_2_enforces_unclaimed_opening_facts_and_central_requirements() {
 }
 
 #[test]
-fn format_2_requires_a_fact_accepting_claim_command() {
-    let missing = VALID_FORMAT_2_STORY.replace("command.claim", "command.accept");
-    assert!(codes(missing).contains(&"fact.claim_command_missing".to_string()));
-
-    let invalid = VALID_FORMAT_2_STORY.replace("accepts: [fact]", "accepts: [entity]");
-    assert!(codes(invalid).contains(&"fact.claim_command_invalid".to_string()));
-}
-
-#[test]
 fn format_2_validates_state_tags_and_delayed_give_effects() {
     let invalid = VALID_FORMAT_2_STORY
         .replace("state: true", "state: sometimes")
@@ -470,19 +500,206 @@ fn validates_required_reference_shapes() {
 #[test]
 fn validates_command_and_trigger_shapes() {
     let source = VALID_STORY
-        .replace("aliases: [inspect]", "aliases: inspect")
-        .replace("accepts: [entity]", "accepts: []")
+        .replace("description: Inspect an entity.", "aliases: [inspect]")
+        .replace("type: entity", "accepts: [entity]")
         .replace("required: true", "required: sometimes")
         .replace("once: true", "once: sometimes")
         .replace("operator: equals", "operator: \"\"")
         .replace("value: visible", "value: 42");
     let result = codes(source);
-    assert!(result.contains(&"command.aliases_type".to_string()));
-    assert!(result.contains(&"command.parameter_accepts".to_string()));
+    assert!(result.contains(&"command.aliases_removed".to_string()));
+    assert!(result.contains(&"command.parameter_accepts_removed".to_string()));
+    assert!(result.contains(&"command.parameter_kind".to_string()));
     assert!(result.contains(&"command.parameter_required_type".to_string()));
     assert!(result.contains(&"trigger.once_type".to_string()));
     assert!(result.contains(&"trigger.condition_field".to_string()));
     assert!(result.contains(&"trigger.effect_value_type".to_string()));
+}
+
+#[test]
+fn validates_action_effect_container_and_operation_shapes() {
+    for (source, expected_code) in [
+        (
+            VALID_FORMAT_2_STORY.replace(
+                "    effects:\n      - operation: advance_time",
+                "    effects: advance_time\n    ignored_effects:\n      - operation: advance_time",
+            ),
+            "command.effects_type",
+        ),
+        (
+            VALID_FORMAT_2_STORY.replace(
+                "      - operation: advance_time\n        minutes: 12.5",
+                "      - advance_time",
+            ),
+            "command.effect_type",
+        ),
+        (
+            VALID_FORMAT_2_STORY.replace(
+                "      - operation: advance_time\n        minutes: 12.5",
+                "      - minutes: 12.5",
+            ),
+            "command.effect_operation",
+        ),
+        (
+            VALID_FORMAT_2_STORY.replace("operation: advance_time", "operation: warp_time"),
+            "command.effect_unknown_operation",
+        ),
+    ] {
+        let result = codes(source);
+        assert!(
+            result.contains(&expected_code.to_string()),
+            "missing {expected_code}: {result:#?}"
+        );
+    }
+}
+
+#[test]
+fn validates_every_action_effect_payload() {
+    let cases = [
+        (
+            "        minutes: 12.5",
+            "        minutes: 0",
+            "command.effect_minutes",
+            "/commands/1/effects/0/minutes",
+        ),
+        (
+            "        subjects: [player, character.culprit, param1, param3]",
+            "        subjects: []",
+            "command.effect_subjects",
+            "/commands/1/effects/1/subjects",
+        ),
+        (
+            "        setting: param2",
+            "        setting: entity.knife",
+            "reference.wrong_type",
+            "/commands/1/effects/1/setting",
+        ),
+        (
+            "        entity_from: param1",
+            "        entity_from: setting.study",
+            "reference.wrong_type",
+            "/commands/1/effects/2/entity_from",
+        ),
+        (
+            "        entity_to: entity.knife",
+            "        entity_to: 42",
+            "command.effect_reference",
+            "/commands/1/effects/2/entity_to",
+        ),
+        (
+            "        fact_id: fact.knife_has_blood",
+            "        fact_id: entity.knife",
+            "reference.wrong_type",
+            "/commands/1/effects/3/fact_id",
+        ),
+        (
+            "        deduction_id: param4",
+            "        deduction_id: entity.knife",
+            "reference.wrong_type",
+            "/commands/1/effects/4/deduction_id",
+        ),
+        (
+            "        tag_id: tag.knife_analysis_complete",
+            "        tag_id: entity.knife",
+            "reference.wrong_type",
+            "/commands/1/effects/5/tag_id",
+        ),
+        (
+            "        text: The examination reveals a carefully staged scene.",
+            "        text: \"\"",
+            "command.effect_text",
+            "/commands/1/effects/7/text",
+        ),
+        (
+            "        trigger_id: trigger.investigate_knife",
+            "        trigger_id: entity.knife",
+            "reference.wrong_type",
+            "/commands/1/effects/8/trigger_id",
+        ),
+        (
+            "        text: The player has solved the mystery.",
+            "        text: 42",
+            "command.effect_text",
+            "/commands/1/effects/9/text",
+        ),
+        (
+            "        text: The trail has gone cold.",
+            "        text: \"\"",
+            "command.effect_text",
+            "/commands/1/effects/10/text",
+        ),
+        (
+            "        text: The examination reveals a carefully staged scene.",
+            "        text: The examination reveals a carefully staged scene.\n        target: player",
+            "command.effect_unknown_field",
+            "/commands/1/effects/7/target",
+        ),
+    ];
+
+    for (before, after, expected_code, expected_pointer) in cases {
+        let report = report(VALID_FORMAT_2_STORY.replace(before, after));
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == expected_code
+                    && diagnostic.pointer.as_deref() == Some(expected_pointer)
+            }),
+            "missing {expected_code} at {expected_pointer}: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
+fn validates_action_effect_parameter_references() {
+    let cases = [
+        (
+            "        setting: param2",
+            "        setting: param1",
+            "command.effect_parameter_type",
+        ),
+        (
+            "        entity_from: param1",
+            "        entity_from: param5",
+            "command.effect_parameter_type",
+        ),
+        (
+            "        entity_from: param1",
+            "        entity_from: param6",
+            "command.effect_parameter_unknown",
+        ),
+        (
+            "        entity_from: param1",
+            "        entity_from: param0",
+            "command.effect_parameter_unknown",
+        ),
+    ];
+
+    for (before, after, expected_code) in cases {
+        let result = codes(VALID_FORMAT_2_STORY.replace(before, after));
+        assert!(
+            result.contains(&expected_code.to_string()),
+            "missing {expected_code}: {result:#?}"
+        );
+    }
+}
+
+#[test]
+fn action_effects_report_unknown_authored_ids() {
+    let report = report(VALID_FORMAT_2_STORY.replace(
+        "        fact_id: fact.knife_has_blood",
+        "        fact_id: fact.not_authored",
+    ));
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "reference.unknown"
+            && diagnostic.pointer.as_deref() == Some("/commands/1/effects/3/fact_id")
+            && diagnostic.subject_id.as_deref() == Some("fact.not_authored")
+    }));
+}
+
+#[test]
+fn format_2_no_longer_requires_a_fact_accepting_claim_action() {
+    let report = report(VALID_FORMAT_2_STORY.replace("command.claim", "command.observe"));
+    assert!(report.valid, "{:#?}", report.diagnostics);
 }
 
 #[test]
