@@ -274,6 +274,53 @@ facts:
     requires: [command.examine, entity.diving_knife]
 ```
 
+Characters may define explicitly player-safe portrayal and ordered testimony:
+
+```yaml
+characters:
+  - id: character.mara_voss
+    portrayal:
+      demeanor: Controlled and professionally helpful.
+      speech_style: Precise, restrained sentences.
+    testimony:
+      - id: testimony.mara_generator_alibi
+        text: Mara says she was in the generator shed from 21:10 onward.
+        requires: [command.question, character.mara_voss, event.blackout]
+        reveals: [fact.mara_claimed_generator_alibi]
+```
+
+`portrayal` may be omitted. When present, it must be a non-empty mapping with
+only `demeanor` and/or `speech_style`, and each present value must be a
+non-empty string. Empty mappings and unknown fields are rejected so a declared
+player-safe boundary cannot silently contain private or negative-list data.
+
+`testimony` may be omitted or be an empty sequence with the same meaning. Each
+entry must be a mapping with a globally unique `testimony.*` ID, non-empty
+`text`, and a non-empty sequence of unique `requires` IDs. Requirements must
+include both `command.question` and the owning character ID; additional real
+fact, entity, event, setting, flag, deduction, route, or trigger gates may
+follow. No other command ID may appear: a turn executes one command, so a
+testimony gated by both `command.question` and another command could never be
+selected. `reveals` may be omitted or be an empty sequence with the same
+meaning. Its entries must be unique existing fact IDs. Entry fields other than
+`id`, `text`, `requires`, and `reveals` are rejected.
+
+When at least one testimony entry is authored, `command.question` must first
+declare a parameter with exact `name: character`, `type: character`, and
+`required: true`. That first parameter is the testimony owner target used by
+the runtime. Any later parameters must be optional topics
+named `topic_character`, `topic_entity`, `topic_setting`, `topic_event`, or
+`topic_deduction`, with the matching parameter type. This makes owner binding
+and testimony selection deterministic rather than dependent on an ambiguous
+command shape.
+
+The validator proves the structure, reference kinds, uniqueness, and explicit
+question/target gates. It cannot prove that natural-language testimony is
+semantically consistent with the statements of its revealed facts; authors and
+story review remain responsible for that consistency. Legacy goals, motives,
+secrets, methods, cover stories, and earlier behavior notes belong beneath
+`private` and are never converted into player-safe portrayal or testimony.
+
 Format 1 remains supported for existing repositories, including its required
 `clues` section and optional 0.3 fact extensions.
 
@@ -304,6 +351,8 @@ The first pass checks:
 - duplicate values in reference lists;
 - required flag metadata and typed trigger time/location/subject gates;
 - deterministic format-2 initial time and executable trigger-effect shapes;
+- player-safe character portrayal and testimony shape, identity, gate, and
+  reveal references;
 - versioned clue or nested-fact knowledge models and two- or three-input deductions;
 - setting-parent, entity-containment, fact/clue, and deduction cycles;
 - route endpoints, travel duration, reachability, and exitability;

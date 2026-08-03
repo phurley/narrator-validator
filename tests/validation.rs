@@ -243,6 +243,28 @@ fn format_2_story_with_narrative_details() -> String {
         )
 }
 
+fn format_2_story_with_character_fields(fields: &str) -> String {
+    VALID_FORMAT_2_STORY
+        .replace(
+            "  - id: character.culprit\nentities:",
+            &format!("  - id: character.culprit\n{fields}entities:"),
+        )
+        .replace(
+            "commands:\n",
+            "commands:\n  - id: command.question\n    name: Question\n    parameters:\n      - name: character\n        type: character\n        required: true\n",
+        )
+}
+
+fn format_2_story_with_player_safe_character_behavior() -> String {
+    format_2_story_with_character_fields(
+        "    portrayal:\n      demeanor: Controlled and professionally helpful.\n      speech_style: Precise, restrained sentences.\n    testimony:\n      - id: testimony.culprit_opening_account\n        text: The culprit gives a player-safe opening account.\n        requires: [command.question, character.culprit]\n        reveals: [fact.knife_is_present]\n      - id: testimony.culprit_follow_up\n        text: The culprit gives a second player-safe account.\n        requires: [command.question, character.culprit, fact.knife_is_present]\n        reveals: []\n",
+    )
+    .replace(
+        "  - id: character.victim\n",
+        "  - id: character.victim\n    portrayal:\n      demeanor: Quietly formal.\n    testimony: []\n",
+    )
+}
+
 fn story_files(source: String) -> Vec<SourceFile> {
     let Ok(Value::Mapping(root)) = serde_yaml::from_str::<Value>(&source) else {
         return vec![SourceFile {
@@ -290,8 +312,459 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_2_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_2_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "0.11.0");
+    assert_eq!(report.validator_version, "0.12.0");
     assert_eq!(report.format_version, Some(2));
+    assert!(report.diagnostics.is_empty());
+}
+
+#[test]
+fn accepts_player_safe_portrayal_and_ordered_testimony_for_all_characters() {
+    let report = report(format_2_story_with_player_safe_character_behavior());
+
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert!(report.diagnostics.is_empty());
+}
+
+#[test]
+fn portrayal_may_be_absent_but_present_portrayal_must_be_supported_and_nonempty() {
+    let absent = report(VALID_FORMAT_2_STORY);
+    assert!(absent.valid, "{:#?}", absent.diagnostics);
+
+    let invalid = report(
+        format_2_story_with_player_safe_character_behavior()
+            .replace("demeanor: Quietly formal.", "demeanor: \"   \"")
+            .replace(
+                "speech_style: Precise, restrained sentences.",
+                "speech_style: 42\n      must_not_confirm: SENTINEL_HIDDEN_FACT",
+            ),
+    );
+    for (code, pointer, subject) in [
+        (
+            "character.portrayal_value",
+            "/characters/0/portrayal/demeanor",
+            "character.victim",
+        ),
+        (
+            "character.portrayal_value",
+            "/characters/1/portrayal/speech_style",
+            "character.culprit",
+        ),
+        (
+            "character.portrayal_unknown_field",
+            "/characters/1/portrayal/must_not_confirm",
+            "character.culprit",
+        ),
+    ] {
+        assert!(
+            invalid.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code
+                    && diagnostic.pointer.as_deref() == Some(pointer)
+                    && diagnostic.subject_id.as_deref() == Some(subject)
+            }),
+            "missing {code} at {pointer}: {:#?}",
+            invalid.diagnostics
+        );
+    }
+
+    for (value, code) in [
+        ("[]", "character.portrayal_type"),
+        ("{}", "character.portrayal_empty"),
+        (
+            "{must_not_confirm: SENTINEL_HIDDEN_FACT}",
+            "character.portrayal_empty",
+        ),
+    ] {
+        let invalid = report(format_2_story_with_character_fields(&format!(
+            "    portrayal: {value}\n"
+        )));
+        assert!(
+            invalid.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code
+                    && diagnostic.pointer.as_deref() == Some("/characters/1/portrayal")
+                    && diagnostic.subject_id.as_deref() == Some("character.culprit")
+            }),
+            "{value}: {:#?}",
+            invalid.diagnostics
+        );
+    }
+}
+
+#[test]
+fn testimony_requires_safe_shape_text_and_explicit_question_target_gates() {
+    let malformed = report(format_2_story_with_character_fields(
+        "    testimony:\n      - id: testimony.bad_shape\n        text: \"   \"\n        requires: []\n        reveals: fact.knife_is_present\n        must_not_confirm: SENTINEL_HIDDEN_FACT\n",
+    ));
+    for (code, pointer) in [
+        ("character.testimony_text", "/characters/1/testimony/0/text"),
+        (
+            "character.testimony_requires_type",
+            "/characters/1/testimony/0/requires",
+        ),
+        (
+            "character.testimony_reveals_type",
+            "/characters/1/testimony/0/reveals",
+        ),
+        (
+            "character.testimony_unknown_field",
+            "/characters/1/testimony/0/must_not_confirm",
+        ),
+    ] {
+        assert!(
+            malformed.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code
+                    && diagnostic.pointer.as_deref() == Some(pointer)
+                    && diagnostic.subject_id.as_deref() == Some("testimony.bad_shape")
+            }),
+            "missing {code}: {:#?}",
+            malformed.diagnostics
+        );
+    }
+
+    let unsafe_gates = report(format_2_story_with_character_fields(
+        "    testimony:\n      - id: testimony.missing_safe_gates\n        text: A structurally safe statement.\n        requires: [fact.knife_is_present]\n",
+    ));
+    for code in [
+        "character.testimony_question_requirement",
+        "character.testimony_character_requirement",
+    ] {
+        assert!(
+            unsafe_gates.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code
+                    && diagnostic.pointer.as_deref() == Some("/characters/1/testimony/0/requires")
+                    && diagnostic.subject_id.as_deref() == Some("testimony.missing_safe_gates")
+            }),
+            "missing {code}: {:#?}",
+            unsafe_gates.diagnostics
+        );
+    }
+}
+
+#[test]
+fn testimony_rejects_collection_entry_and_id_shapes() {
+    let mapping = report(format_2_story_with_character_fields(
+        "    testimony: {default: SENTINEL_PRIVATE_LEGACY_TEXT}\n",
+    ));
+    assert!(mapping.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "character.testimony_type"
+            && diagnostic.pointer.as_deref() == Some("/characters/1/testimony")
+            && diagnostic.subject_id.as_deref() == Some("character.culprit")
+    }));
+
+    let entries = report(format_2_story_with_character_fields(
+        "    testimony:\n      - SENTINEL_NOT_A_MAPPING\n      - text: Missing an ID.\n        requires: [command.question, character.culprit]\n      - id: fact.wrong_prefix_but_unique\n        text: Wrong prefix.\n        requires: [command.question, character.culprit]\n      - id: Testimony.Invalid\n        text: Invalid ID shape.\n        requires: [command.question, character.culprit]\n",
+    ));
+    for (code, pointer) in [
+        (
+            "character.testimony_entry_type",
+            "/characters/1/testimony/0",
+        ),
+        ("id.missing", "/characters/1/testimony/1/id"),
+        ("id.wrong_prefix", "/characters/1/testimony/2/id"),
+        ("id.invalid", "/characters/1/testimony/3/id"),
+    ] {
+        assert!(
+            entries.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code && diagnostic.pointer.as_deref() == Some(pointer)
+            }),
+            "missing {code}: {:#?}",
+            entries.diagnostics
+        );
+    }
+}
+
+#[test]
+fn testimony_ids_and_reference_lists_are_unique_and_typed() {
+    let duplicate_id = report(
+        format_2_story_with_player_safe_character_behavior().replace(
+            "    testimony: []",
+            "    testimony:\n      - id: testimony.culprit_opening_account\n        text: Duplicate across character owners.\n        requires: [command.question, character.victim]",
+        ),
+    );
+    let duplicate = duplicate_id
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "id.duplicate")
+        .expect("duplicate testimony ID diagnostic");
+    assert_eq!(
+        duplicate.pointer.as_deref(),
+        Some("/characters/1/testimony/0/id")
+    );
+    assert_eq!(
+        duplicate.subject_id.as_deref(),
+        Some("testimony.culprit_opening_account")
+    );
+    assert_eq!(duplicate.related.len(), 1);
+
+    let bad_refs = report(format_2_story_with_character_fields(
+        "    testimony:\n      - id: testimony.bad_refs\n        text: References are structurally checked.\n        requires: [command.question, character.culprit, flag.not_authored, command.question]\n        reveals: [entity.knife, fact.not_authored, entity.knife]\n",
+    ));
+    for (code, pointer, subject) in [
+        (
+            "reference.unknown",
+            "/characters/1/testimony/0/requires/2",
+            "flag.not_authored",
+        ),
+        (
+            "list.duplicate_reference",
+            "/characters/1/testimony/0/requires/3",
+            "command.question",
+        ),
+        (
+            "reference.wrong_type",
+            "/characters/1/testimony/0/reveals/0",
+            "entity.knife",
+        ),
+        (
+            "reference.unknown",
+            "/characters/1/testimony/0/reveals/1",
+            "fact.not_authored",
+        ),
+        (
+            "list.duplicate_reference",
+            "/characters/1/testimony/0/reveals/2",
+            "entity.knife",
+        ),
+    ] {
+        assert!(
+            bad_refs.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code
+                    && diagnostic.pointer.as_deref() == Some(pointer)
+                    && diagnostic.subject_id.as_deref() == Some(subject)
+            }),
+            "missing {code} at {pointer}: {:#?}",
+            bad_refs.diagnostics
+        );
+    }
+}
+
+#[test]
+fn testimony_rejects_every_non_question_command_gate_and_preserves_duplicate_diagnostics() {
+    let source = format_2_story_with_character_fields(
+        "    testimony:\n      - id: testimony.impossible_commands\n        text: This can only be selected by questioning.\n        requires: [command.question, character.culprit, command.examine, command.investigate, command.examine]\n",
+    )
+    .replace(
+        "  - id: command.claim",
+        "  - id: command.examine\n    name: Examine\n  - id: command.claim",
+    );
+    let report = report(source);
+
+    for (pointer, subject) in [
+        (
+            "/characters/1/testimony/0/requires/2",
+            "testimony.impossible_commands",
+        ),
+        (
+            "/characters/1/testimony/0/requires/3",
+            "testimony.impossible_commands",
+        ),
+        (
+            "/characters/1/testimony/0/requires/4",
+            "testimony.impossible_commands",
+        ),
+    ] {
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "character.testimony_command_requirement"
+                    && diagnostic.pointer.as_deref() == Some(pointer)
+                    && diagnostic.subject_id.as_deref() == Some(subject)
+            }),
+            "missing forbidden command diagnostic at {pointer}: {:#?}",
+            report.diagnostics
+        );
+    }
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "list.duplicate_reference"
+            && diagnostic.pointer.as_deref() == Some("/characters/1/testimony/0/requires/4")
+            && diagnostic.subject_id.as_deref() == Some("command.examine")
+    }));
+}
+
+#[test]
+fn testimony_accepts_exact_question_gate_with_real_non_command_prerequisites() {
+    let source = format_2_story_with_character_fields(
+        "    testimony:\n      - id: testimony.real_prerequisites\n        text: Every additional prerequisite can be satisfied independently.\n        requires:\n          - command.question\n          - character.culprit\n          - character.victim\n          - entity.knife\n          - event.murder\n          - fact.knife_is_present\n          - deduction.solution\n          - flag.knife_examined\n          - setting.study\n          - route.foyer_study\n          - trigger.investigate_knife\n        reveals: []\n",
+    );
+    let report = report(source);
+
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert!(report.diagnostics.is_empty());
+}
+
+#[test]
+fn authored_testimony_requires_a_first_required_character_question_target() {
+    let base = format_2_story_with_player_safe_character_behavior();
+    let valid_parameters = "    parameters:\n      - name: character\n        type: character\n        required: true\n";
+    for (replacement, code, pointer) in [
+        (
+            "",
+            "character.testimony_question_parameters",
+            "/commands/0/parameters",
+        ),
+        (
+            "    parameters: []\n",
+            "character.testimony_question_target_missing",
+            "/commands/0/parameters/0",
+        ),
+        (
+            "    parameters:\n      - name: character\n        type: entity\n        required: true\n",
+            "character.testimony_question_target_type",
+            "/commands/0/parameters/0/type",
+        ),
+        (
+            "    parameters:\n      - name: character\n        type: character\n        required: false\n",
+            "character.testimony_question_target_required",
+            "/commands/0/parameters/0/required",
+        ),
+    ] {
+        let report = report(base.replace(valid_parameters, replacement));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == code
+                && diagnostic.pointer.as_deref() == Some(pointer)
+                && diagnostic.subject_id.as_deref() == Some("command.question")
+        }), "missing {code} at {pointer}: {:#?}", report.diagnostics);
+    }
+}
+
+#[test]
+fn question_character_target_requires_exact_name_without_target_diagnostic_cascades() {
+    let base = format_2_story_with_player_safe_character_behavior();
+    let valid_parameters = "    parameters:\n      - name: character\n        type: character\n        required: true\n";
+    for replacement in [
+        "    parameters:\n      - type: character\n        required: true\n",
+        "    parameters:\n      - name: null\n        type: character\n        required: true\n",
+        "    parameters:\n      - name: 42\n        type: character\n        required: true\n",
+        "    parameters:\n      - name: \"\"\n        type: character\n        required: true\n",
+        "    parameters:\n      - name: \"   \"\n        type: character\n        required: true\n",
+        "    parameters:\n      - name: suspect\n        type: character\n        required: true\n",
+    ] {
+        let invalid = report(base.replace(valid_parameters, replacement));
+        let target_diagnostics = invalid
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| {
+                diagnostic
+                    .code
+                    .starts_with("character.testimony_question_target_")
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            target_diagnostics.len(),
+            1,
+            "invalid signature {replacement:?}: {:#?}",
+            invalid.diagnostics
+        );
+        assert_eq!(
+            target_diagnostics[0].code,
+            "character.testimony_question_target_name"
+        );
+        assert_eq!(
+            target_diagnostics[0].pointer.as_deref(),
+            Some("/commands/0/parameters/0/name")
+        );
+        assert_eq!(
+            target_diagnostics[0].subject_id.as_deref(),
+            Some("command.question")
+        );
+    }
+
+    let valid = report(base);
+    assert!(valid.valid, "{:#?}", valid.diagnostics);
+    assert!(!valid
+        .diagnostics
+        .iter()
+        .any(|diagnostic| { diagnostic.code == "character.testimony_question_target_name" }));
+}
+
+#[test]
+fn question_parameters_after_the_character_target_must_be_optional_typed_topics() {
+    let base = format_2_story_with_player_safe_character_behavior();
+    let valid_parameters = "    parameters:\n      - name: character\n        type: character\n        required: true\n";
+    let malformed = base.replace(
+        valid_parameters,
+        "    parameters:\n      - name: character\n        type: character\n        required: true\n      - name: other\n        type: entity\n        required: true\n      - name: topic_event\n        type: entity\n        required: false\n",
+    );
+    let malformed_report = report(malformed);
+    for (code, pointer) in [
+        (
+            "character.testimony_question_topic_name",
+            "/commands/0/parameters/1/name",
+        ),
+        (
+            "character.testimony_question_topic_required",
+            "/commands/0/parameters/1/required",
+        ),
+        (
+            "character.testimony_question_topic_type",
+            "/commands/0/parameters/2/type",
+        ),
+    ] {
+        assert!(
+            malformed_report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code
+                    && diagnostic.pointer.as_deref() == Some(pointer)
+                    && diagnostic.subject_id.as_deref() == Some("command.question")
+            }),
+            "missing {code} at {pointer}: {:#?}",
+            malformed_report.diagnostics
+        );
+    }
+
+    let wrong_order = base.replace(
+        valid_parameters,
+        "    parameters:\n      - name: topic_entity\n        type: entity\n        required: false\n      - name: character\n        type: character\n        required: true\n",
+    );
+    let report = report(wrong_order);
+    for (code, pointer) in [
+        (
+            "character.testimony_question_target_type",
+            "/commands/0/parameters/0/type",
+        ),
+        (
+            "character.testimony_question_target_required",
+            "/commands/0/parameters/0/required",
+        ),
+        (
+            "character.testimony_question_topic_name",
+            "/commands/0/parameters/1/name",
+        ),
+        (
+            "character.testimony_question_topic_required",
+            "/commands/0/parameters/1/required",
+        ),
+    ] {
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code
+                    && diagnostic.pointer.as_deref() == Some(pointer)
+                    && diagnostic.subject_id.as_deref() == Some("command.question")
+            }),
+            "wrong order missing {code}: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
+fn question_signature_accepts_optional_topics_in_authored_order() {
+    let source = format_2_story_with_player_safe_character_behavior().replace(
+        "    parameters:\n      - name: character\n        type: character\n        required: true\n",
+        "    parameters:\n      - name: character\n        type: character\n        required: true\n      - name: topic_character\n        type: character\n        required: false\n      - name: topic_entity\n        type: entity\n      - name: topic_setting\n        type: setting\n        required: false\n      - name: topic_event\n        type: event\n        required: false\n      - name: topic_deduction\n        type: deduction\n        required: false\n",
+    );
+    let report = report(source);
+
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert!(report.diagnostics.is_empty());
+}
+
+#[test]
+fn omitted_and_empty_reveals_match_and_private_legacy_behavior_is_not_safe_content() {
+    let source = format_2_story_with_character_fields(
+        "    private:\n      goal: SENTINEL_PRIVATE_GOAL\n      testimony:\n        under_pressure: SENTINEL_PRIVATE_UNDER_PRESSURE\n        must_not_confirm: SENTINEL_HIDDEN_FACT\n    portrayal:\n      demeanor: Player-safe demeanor.\n    testimony:\n      - id: testimony.no_reveal_omitted\n        text: This entry reveals no fact.\n        requires: [command.question, character.culprit]\n      - id: testimony.no_reveal_empty\n        text: This entry also reveals no fact.\n        requires: [command.question, character.culprit]\n        reveals: []\n",
+    );
+    let report = report(source);
+
+    assert!(report.valid, "{:#?}", report.diagnostics);
     assert!(report.diagnostics.is_empty());
 }
 

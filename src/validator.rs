@@ -62,6 +62,7 @@ enum Kind {
     Flag,
     Command,
     Trigger,
+    Testimony,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +122,7 @@ impl Kind {
             Self::Flag => "flag",
             Self::Command => "command",
             Self::Trigger => "trigger",
+            Self::Testimony => "testimony",
         }
     }
 
@@ -238,6 +240,7 @@ impl<'a> Validator<'a> {
         } else {
             Vec::new()
         };
+        self.nested_testimonies(&characters);
         let facts_enabled = !facts.is_empty();
 
         self.validate_solution();
@@ -268,6 +271,7 @@ impl<'a> Validator<'a> {
         }
         self.validate_deduction_values(&deductions, fact_claims_enabled);
         self.validate_command_values(&commands);
+        self.validate_testimony_question_signature(&characters, &commands);
         self.validate_trigger_values(&triggers, &commands, fact_claims_enabled);
         if !fact_claims_enabled {
             self.validate_fact_reachability(
@@ -871,6 +875,108 @@ impl<'a> Validator<'a> {
         result
     }
 
+    fn nested_testimonies(&mut self, characters: &[Item]) {
+        for character in characters {
+            let Some(value) = character
+                .mapping
+                .get(Value::String("testimony".to_string()))
+            else {
+                continue;
+            };
+            let collection_pointer = format!("{}/testimony", character.pointer);
+            let Some(values) = value.as_sequence() else {
+                self.push(
+                    Severity::Error,
+                    "character.testimony_type",
+                    "character `testimony` must be a sequence of player-safe testimony mappings"
+                        .to_string(),
+                    &character.path,
+                    Some(collection_pointer),
+                    None,
+                    Some(character.id.clone()),
+                );
+                continue;
+            };
+            for (index, value) in values.iter().enumerate() {
+                let pointer = format!("{}/testimony/{index}", character.pointer);
+                let Some(mapping) = value.as_mapping().cloned() else {
+                    self.push(
+                        Severity::Error,
+                        "character.testimony_entry_type",
+                        "character testimony entries must be mappings".to_string(),
+                        &character.path,
+                        Some(pointer),
+                        None,
+                        Some(character.id.clone()),
+                    );
+                    continue;
+                };
+                let id_pointer = format!("{pointer}/id");
+                let Some(id) = string_field(&mapping, "id").map(str::to_string) else {
+                    self.push(
+                        Severity::Error,
+                        "id.missing",
+                        "character testimony is missing a string `id`".to_string(),
+                        &character.path,
+                        Some(id_pointer),
+                        None,
+                        Some(character.id.clone()),
+                    );
+                    continue;
+                };
+                let range = locate_id(&character.source, &id);
+                if !valid_id(&id) {
+                    self.push(
+                        Severity::Error,
+                        "id.invalid",
+                        format!(
+                            "`{id}` must contain a lowercase kind prefix, a dot, and a lowercase snake-case name"
+                        ),
+                        &character.path,
+                        Some(id_pointer.clone()),
+                        range,
+                        Some(id.clone()),
+                    );
+                } else if id_prefix(&id) != Some(Kind::Testimony.prefix()) {
+                    self.push(
+                        Severity::Error,
+                        "id.wrong_prefix",
+                        format!("testimony ID `{id}` must start with `testimony.`"),
+                        &character.path,
+                        Some(id_pointer.clone()),
+                        range,
+                        Some(id.clone()),
+                    );
+                }
+                let definition = Definition {
+                    kind: Kind::Testimony,
+                    path: character.path.clone(),
+                    pointer: pointer.clone(),
+                    range,
+                };
+                if let Some(first) = self.definitions.get(&id).cloned() {
+                    self.diagnostics.push(Diagnostic {
+                        severity: Severity::Error,
+                        code: "id.duplicate".to_string(),
+                        message: format!("ID `{id}` is defined more than once"),
+                        path: character.path.clone(),
+                        pointer: Some(id_pointer),
+                        range,
+                        subject_id: Some(id.clone()),
+                        related: vec![RelatedLocation {
+                            message: "first defined here".to_string(),
+                            path: first.path,
+                            pointer: Some(format!("{}/id", first.pointer)),
+                            range: first.range,
+                        }],
+                    });
+                } else {
+                    self.definitions.insert(id, definition);
+                }
+            }
+        }
+    }
+
     fn validate_case(&mut self, cases: &[Item]) {
         if cases.len() != 1 {
             return;
@@ -1255,99 +1361,317 @@ impl<'a> Validator<'a> {
 
     fn validate_character_values(&mut self, characters: &[Item], facts_enabled: bool) {
         for character in characters {
-            let Some(knowledge) = character
+            self.validate_character_portrayal(character);
+            self.validate_character_testimony(character);
+
+            if let Some(knowledge) = character
                 .mapping
                 .get(Value::String("knowledge".to_string()))
-            else {
-                continue;
-            };
-            let Some(knowledge) = knowledge.as_sequence() else {
+            {
+                let Some(knowledge) = knowledge.as_sequence() else {
+                    self.push(
+                        Severity::Error,
+                        "character.knowledge_type",
+                        "character `knowledge` must be a sequence".to_string(),
+                        &character.path,
+                        Some(format!("{}/knowledge", character.pointer)),
+                        None,
+                        Some(character.id.clone()),
+                    );
+                    continue;
+                };
+                for (index, entry) in knowledge.iter().enumerate() {
+                    let pointer = format!("{}/knowledge/{index}", character.pointer);
+                    let Some(entry) = entry.as_mapping() else {
+                        self.push(
+                            Severity::Error,
+                            "character.knowledge_entry_type",
+                            "character knowledge entries must be mappings".to_string(),
+                            &character.path,
+                            Some(pointer),
+                            None,
+                            Some(character.id.clone()),
+                        );
+                        continue;
+                    };
+                    let Some(fact) =
+                        string_field(entry, "fact").filter(|value| !value.trim().is_empty())
+                    else {
+                        self.push(
+                            Severity::Error,
+                            "character.knowledge_fact",
+                            "character knowledge `fact` must be a non-empty string".to_string(),
+                            &character.path,
+                            Some(format!("{pointer}/fact")),
+                            None,
+                            Some(character.id.clone()),
+                        );
+                        continue;
+                    };
+                    if facts_enabled {
+                        if !looks_like_id(fact) {
+                            self.push(
+                                Severity::Error,
+                                "character.knowledge_fact_reference",
+                                "character knowledge `fact` must be a fact ID when facts are authored"
+                                    .to_string(),
+                                &character.path,
+                                Some(format!("{pointer}/fact")),
+                                locate_scalar(&character.source, fact),
+                                Some(character.id.clone()),
+                            );
+                        } else if self
+                            .definitions
+                            .get(fact)
+                            .is_some_and(|definition| definition.kind != Kind::Fact)
+                        {
+                            self.push(
+                                Severity::Error,
+                                "reference.wrong_type",
+                                format!("`{fact}` does not refer to a fact"),
+                                &character.path,
+                                Some(format!("{pointer}/fact")),
+                                locate_scalar(&character.source, fact),
+                                Some(fact.to_string()),
+                            );
+                        }
+                    }
+                    if entry
+                        .get(Value::String("source".to_string()))
+                        .is_some_and(|source| {
+                            !source
+                                .as_str()
+                                .is_some_and(|source| !source.trim().is_empty())
+                        })
+                    {
+                        self.push(
+                            Severity::Error,
+                            "character.knowledge_source_type",
+                            "character knowledge `source` must be a non-empty ID when present"
+                                .to_string(),
+                            &character.path,
+                            Some(format!("{pointer}/source")),
+                            None,
+                            Some(character.id.clone()),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn validate_character_portrayal(&mut self, character: &Item) {
+        let Some(portrayal) = character
+            .mapping
+            .get(Value::String("portrayal".to_string()))
+        else {
+            return;
+        };
+        let pointer = format!("{}/portrayal", character.pointer);
+        let Some(portrayal) = portrayal.as_mapping() else {
+            self.push(
+                Severity::Error,
+                "character.portrayal_type",
+                "character `portrayal` must be a mapping".to_string(),
+                &character.path,
+                Some(pointer),
+                None,
+                Some(character.id.clone()),
+            );
+            return;
+        };
+        if portrayal.is_empty() {
+            self.push(
+                Severity::Error,
+                "character.portrayal_empty",
+                "character `portrayal` must contain `demeanor` or `speech_style`".to_string(),
+                &character.path,
+                Some(pointer.clone()),
+                None,
+                Some(character.id.clone()),
+            );
+        }
+        let mut has_supported_field = false;
+        for (key, value) in portrayal {
+            let Some(key) = key.as_str() else {
                 self.push(
                     Severity::Error,
-                    "character.knowledge_type",
-                    "character `knowledge` must be a sequence".to_string(),
+                    "character.portrayal_field",
+                    "character portrayal field names must be strings".to_string(),
                     &character.path,
-                    Some(format!("{}/knowledge", character.pointer)),
+                    Some(pointer.clone()),
                     None,
                     Some(character.id.clone()),
                 );
                 continue;
             };
-            for (index, entry) in knowledge.iter().enumerate() {
-                let pointer = format!("{}/knowledge/{index}", character.pointer);
-                let Some(entry) = entry.as_mapping() else {
+            let field_pointer = format!("{pointer}/{}", escape_pointer(key));
+            if !matches!(key, "demeanor" | "speech_style") {
+                self.push(
+                    Severity::Error,
+                    "character.portrayal_unknown_field",
+                    format!("`{key}` is not a supported player-safe portrayal field"),
+                    &character.path,
+                    Some(field_pointer),
+                    None,
+                    Some(character.id.clone()),
+                );
+                continue;
+            }
+            has_supported_field = true;
+            if !value.as_str().is_some_and(|text| !text.trim().is_empty()) {
+                self.push(
+                    Severity::Error,
+                    "character.portrayal_value",
+                    format!("character portrayal `{key}` must be a non-empty string"),
+                    &character.path,
+                    Some(field_pointer),
+                    None,
+                    Some(character.id.clone()),
+                );
+            }
+        }
+        if !portrayal.is_empty() && !has_supported_field {
+            self.push(
+                Severity::Error,
+                "character.portrayal_empty",
+                "character `portrayal` must contain `demeanor` or `speech_style`".to_string(),
+                &character.path,
+                Some(pointer),
+                None,
+                Some(character.id.clone()),
+            );
+        }
+    }
+
+    fn validate_character_testimony(&mut self, character: &Item) {
+        let Some(entries) = character
+            .mapping
+            .get(Value::String("testimony".to_string()))
+            .and_then(Value::as_sequence)
+        else {
+            return;
+        };
+        for (index, entry) in entries.iter().enumerate() {
+            let pointer = format!("{}/testimony/{index}", character.pointer);
+            let Some(entry) = entry.as_mapping() else {
+                continue;
+            };
+            let subject = string_field(entry, "id")
+                .filter(|id| !id.trim().is_empty())
+                .unwrap_or(&character.id)
+                .to_string();
+            for key in entry.keys() {
+                let Some(key) = key.as_str() else {
                     self.push(
                         Severity::Error,
-                        "character.knowledge_entry_type",
-                        "character knowledge entries must be mappings".to_string(),
+                        "character.testimony_field",
+                        "character testimony field names must be strings".to_string(),
                         &character.path,
-                        Some(pointer),
+                        Some(pointer.clone()),
                         None,
-                        Some(character.id.clone()),
+                        Some(subject.clone()),
                     );
                     continue;
                 };
-                let Some(fact) =
-                    string_field(entry, "fact").filter(|value| !value.trim().is_empty())
-                else {
+                if !matches!(key, "id" | "text" | "requires" | "reveals") {
                     self.push(
                         Severity::Error,
-                        "character.knowledge_fact",
-                        "character knowledge `fact` must be a non-empty string".to_string(),
+                        "character.testimony_unknown_field",
+                        format!("`{key}` is not a supported player-safe testimony field"),
                         &character.path,
-                        Some(format!("{pointer}/fact")),
+                        Some(format!("{pointer}/{}", escape_pointer(key))),
                         None,
-                        Some(character.id.clone()),
+                        Some(subject.clone()),
                     );
-                    continue;
-                };
-                if facts_enabled {
-                    if !looks_like_id(fact) {
-                        self.push(
-                            Severity::Error,
-                            "character.knowledge_fact_reference",
-                            "character knowledge `fact` must be a fact ID when facts are authored"
-                                .to_string(),
-                            &character.path,
-                            Some(format!("{pointer}/fact")),
-                            locate_scalar(&character.source, fact),
-                            Some(character.id.clone()),
-                        );
-                    } else if self
-                        .definitions
-                        .get(fact)
-                        .is_some_and(|definition| definition.kind != Kind::Fact)
+                }
+            }
+            if !string_field(entry, "text").is_some_and(|text| !text.trim().is_empty()) {
+                self.push(
+                    Severity::Error,
+                    "character.testimony_text",
+                    "character testimony `text` must be a non-empty string".to_string(),
+                    &character.path,
+                    Some(format!("{pointer}/text")),
+                    None,
+                    Some(subject.clone()),
+                );
+            }
+            let requires_pointer = format!("{pointer}/requires");
+            let valid_requires = entry
+                .get(Value::String("requires".to_string()))
+                .is_some_and(|requires| is_nonempty_string_sequence(requires, false));
+            if !valid_requires {
+                self.push(
+                    Severity::Error,
+                    "character.testimony_requires_type",
+                    "character testimony `requires` must be a non-empty sequence of non-empty IDs"
+                        .to_string(),
+                    &character.path,
+                    Some(requires_pointer.clone()),
+                    None,
+                    Some(subject.clone()),
+                );
+            } else {
+                let requirements = string_list_field(entry, "requires");
+                if !requirements.iter().any(|id| id == "command.question") {
+                    self.push(
+                        Severity::Error,
+                        "character.testimony_question_requirement",
+                        "character testimony `requires` must include `command.question`"
+                            .to_string(),
+                        &character.path,
+                        Some(requires_pointer.clone()),
+                        None,
+                        Some(subject.clone()),
+                    );
+                }
+                if !requirements.iter().any(|id| id == &character.id) {
+                    self.push(
+                        Severity::Error,
+                        "character.testimony_character_requirement",
+                        format!(
+                            "character testimony `requires` must include its owner `{}`",
+                            character.id
+                        ),
+                        &character.path,
+                        Some(requires_pointer.clone()),
+                        None,
+                        Some(subject.clone()),
+                    );
+                }
+                for (requirement_index, requirement) in requirements.iter().enumerate() {
+                    if id_prefix(requirement) == Some(Kind::Command.prefix())
+                        && requirement != "command.question"
                     {
                         self.push(
                             Severity::Error,
-                            "reference.wrong_type",
-                            format!("`{fact}` does not refer to a fact"),
+                            "character.testimony_command_requirement",
+                            format!(
+                                "character testimony cannot require `{requirement}`; `command.question` is the only compatible command gate"
+                            ),
                             &character.path,
-                            Some(format!("{pointer}/fact")),
-                            locate_scalar(&character.source, fact),
-                            Some(fact.to_string()),
+                            Some(format!("{requires_pointer}/{requirement_index}")),
+                            locate_scalar(&character.source, requirement),
+                            Some(subject.clone()),
                         );
                     }
                 }
-                if entry
-                    .get(Value::String("source".to_string()))
-                    .is_some_and(|source| {
-                        !source
-                            .as_str()
-                            .is_some_and(|source| !source.trim().is_empty())
-                    })
-                {
-                    self.push(
-                        Severity::Error,
-                        "character.knowledge_source_type",
-                        "character knowledge `source` must be a non-empty ID when present"
-                            .to_string(),
-                        &character.path,
-                        Some(format!("{pointer}/source")),
-                        None,
-                        Some(character.id.clone()),
-                    );
-                }
+            }
+            if entry
+                .get(Value::String("reveals".to_string()))
+                .is_some_and(|reveals| !is_nonempty_string_sequence(reveals, true))
+            {
+                self.push(
+                    Severity::Error,
+                    "character.testimony_reveals_type",
+                    "character testimony `reveals` must be a sequence of non-empty fact IDs"
+                        .to_string(),
+                    &character.path,
+                    Some(format!("{pointer}/reveals")),
+                    None,
+                    Some(subject),
+                );
             }
         }
     }
@@ -1786,6 +2110,167 @@ impl<'a> Validator<'a> {
                 self.validate_runtime_command_signature(command, &parameter_types);
             }
             self.validate_command_effects(command, &parameter_types);
+        }
+    }
+
+    fn validate_testimony_question_signature(&mut self, characters: &[Item], commands: &[Item]) {
+        let testimony_authored = characters.iter().any(|character| {
+            character
+                .mapping
+                .get(Value::String("testimony".to_string()))
+                .and_then(Value::as_sequence)
+                .is_some_and(|entries| !entries.is_empty())
+        });
+        if !testimony_authored {
+            return;
+        }
+        let Some(command) = commands
+            .iter()
+            .find(|command| command.id == "command.question")
+        else {
+            // Each structurally valid testimony already reports its exact
+            // unknown `command.question` requirement pointer.
+            return;
+        };
+        let parameters_pointer = format!("{}/parameters", command.pointer);
+        let Some(parameters) = command
+            .mapping
+            .get(Value::String("parameters".to_string()))
+            .and_then(Value::as_sequence)
+        else {
+            self.push(
+                Severity::Error,
+                "character.testimony_question_parameters",
+                "`command.question` must declare its character target as the first parameter"
+                    .to_string(),
+                &command.path,
+                Some(parameters_pointer),
+                None,
+                Some(command.id.clone()),
+            );
+            return;
+        };
+        let Some(first) = parameters.first() else {
+            self.push(
+                Severity::Error,
+                "character.testimony_question_target_missing",
+                "`command.question` must declare a required character target first".to_string(),
+                &command.path,
+                Some(format!("{parameters_pointer}/0")),
+                None,
+                Some(command.id.clone()),
+            );
+            return;
+        };
+        let first_pointer = format!("{parameters_pointer}/0");
+        let Some(first) = first.as_mapping() else {
+            self.push(
+                Severity::Error,
+                "character.testimony_question_target_type",
+                "the first `command.question` parameter must be a character target mapping"
+                    .to_string(),
+                &command.path,
+                Some(first_pointer),
+                None,
+                Some(command.id.clone()),
+            );
+            return;
+        };
+        if string_field(first, "name") != Some("character") {
+            self.push(
+                Severity::Error,
+                "character.testimony_question_target_name",
+                "the first `command.question` parameter must be named `character`".to_string(),
+                &command.path,
+                Some(format!("{first_pointer}/name")),
+                None,
+                Some(command.id.clone()),
+            );
+        }
+        if string_field(first, "type").and_then(CommandParameterType::parse)
+            != Some(CommandParameterType::Character)
+        {
+            self.push(
+                Severity::Error,
+                "character.testimony_question_target_type",
+                "the first `command.question` parameter must have type `character`".to_string(),
+                &command.path,
+                Some(format!("{first_pointer}/type")),
+                None,
+                Some(command.id.clone()),
+            );
+        }
+        if bool_field(first, "required") != Some(true) {
+            self.push(
+                Severity::Error,
+                "character.testimony_question_target_required",
+                "the first `command.question` character parameter must be required".to_string(),
+                &command.path,
+                Some(format!("{first_pointer}/required")),
+                None,
+                Some(command.id.clone()),
+            );
+        }
+
+        for (index, parameter) in parameters.iter().enumerate().skip(1) {
+            let pointer = format!("{parameters_pointer}/{index}");
+            let Some(parameter) = parameter.as_mapping() else {
+                self.push(
+                    Severity::Error,
+                    "character.testimony_question_topic_type",
+                    "later `command.question` parameters must be optional topic mappings"
+                        .to_string(),
+                    &command.path,
+                    Some(pointer),
+                    None,
+                    Some(command.id.clone()),
+                );
+                continue;
+            };
+            let expected_type = match string_field(parameter, "name") {
+                Some("topic_character") => Some(CommandParameterType::Character),
+                Some("topic_entity") => Some(CommandParameterType::Entity),
+                Some("topic_setting") => Some(CommandParameterType::Setting),
+                Some("topic_deduction") => Some(CommandParameterType::Deduction),
+                Some("topic_event") => Some(CommandParameterType::Event),
+                _ => None,
+            };
+            if expected_type.is_none() {
+                self.push(
+                    Severity::Error,
+                    "character.testimony_question_topic_name",
+                    "later `command.question` parameters must be named for a supported optional topic"
+                        .to_string(),
+                    &command.path,
+                    Some(format!("{pointer}/name")),
+                    None,
+                    Some(command.id.clone()),
+                );
+            } else if string_field(parameter, "type").and_then(CommandParameterType::parse)
+                != expected_type
+            {
+                self.push(
+                    Severity::Error,
+                    "character.testimony_question_topic_type",
+                    "a `command.question` topic parameter type must match its topic name"
+                        .to_string(),
+                    &command.path,
+                    Some(format!("{pointer}/type")),
+                    None,
+                    Some(command.id.clone()),
+                );
+            }
+            if bool_field(parameter, "required") == Some(true) {
+                self.push(
+                    Severity::Error,
+                    "character.testimony_question_topic_required",
+                    "later `command.question` topic parameters must be optional".to_string(),
+                    &command.path,
+                    Some(format!("{pointer}/required")),
+                    None,
+                    Some(command.id.clone()),
+                );
+            }
         }
     }
 
@@ -3481,6 +3966,8 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
         _ if (field == "requires" || parent == "requires") && pointer.contains("/facts/") => {
             Some(FACT_REQUIREMENTS)
         }
+        _ if is_character_testimony_list_pointer(pointer, "requires") => Some(FACT_REQUIREMENTS),
+        _ if is_character_testimony_list_pointer(pointer, "reveals") => Some(FACTS),
         _ if is_fact_association_pointer(pointer) => Some(FACTS),
         _ if parent == "requires" && pointer.contains("/routes/") => Some(ENTITIES),
         _ if parent == "requires" && pointer.contains("/clues/") => Some(CLUES),
@@ -3495,6 +3982,21 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
         }
         _ => None,
     }
+}
+
+fn is_character_testimony_list_pointer(pointer: &str, field: &str) -> bool {
+    let parts = pointer
+        .trim_start_matches('/')
+        .split('/')
+        .collect::<Vec<_>>();
+    matches!(
+        parts.as_slice(),
+        ["characters", character_index, "testimony", testimony_index, list_field, item_index]
+            if character_index.parse::<usize>().is_ok()
+                && testimony_index.parse::<usize>().is_ok()
+                && *list_field == field
+                && item_index.parse::<usize>().is_ok()
+    )
 }
 
 fn is_fact_association_pointer(pointer: &str) -> bool {
