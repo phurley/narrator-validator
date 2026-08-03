@@ -1465,6 +1465,25 @@ impl<'a> Validator<'a> {
                     Some(fact.id.clone()),
                 );
             }
+            if fact
+                .mapping
+                .get(Value::String("narrative_detail".to_string()))
+                .is_some_and(|detail| {
+                    !detail
+                        .as_str()
+                        .is_some_and(|detail| !detail.trim().is_empty())
+                })
+            {
+                self.push(
+                    Severity::Error,
+                    "fact.narrative_detail",
+                    "fact `narrative_detail` must be a non-empty string".to_string(),
+                    &fact.path,
+                    Some(format!("{}/narrative_detail", fact.pointer)),
+                    None,
+                    Some(fact.id.clone()),
+                );
+            }
             if let Some(initially_known) = fact
                 .mapping
                 .get(Value::String("initially_known".to_string()))

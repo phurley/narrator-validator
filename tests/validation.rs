@@ -219,6 +219,30 @@ fn codes(source: impl Into<String>) -> Vec<String> {
         .collect()
 }
 
+fn format_2_story_with_narrative_details() -> String {
+    VALID_FORMAT_2_STORY
+        .replace(
+            "  - id: setting.foyer\n    type: room\n    parent: setting.world",
+            "  - id: setting.foyer\n    type: room\n    parent: setting.world\n    facts:\n      - id: fact.setting_detail\n        statement: A setting-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL",
+        )
+        .replace(
+            "  - id: character.culprit\nentities:",
+            "  - id: character.culprit\n    facts:\n      - id: fact.character_detail\n        statement: A character-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL\nentities:",
+        )
+        .replace(
+            "        statement: The knife is present.",
+            "        statement: The knife is present.\n        narrative_detail: SAFE_NARRATIVE_DETAIL",
+        )
+        .replace(
+            "    participants: [character.victim, character.culprit]\ndeductions:",
+            "    participants: [character.victim, character.culprit]\n    facts:\n      - id: fact.event_detail\n        statement: An event-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL\ndeductions:",
+        )
+        .replace(
+            "        value: 20m\n",
+            "        value: 20m\n    facts:\n      - id: fact.trigger_detail\n        statement: A trigger-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL\n",
+        )
+}
+
 fn story_files(source: String) -> Vec<SourceFile> {
     let Ok(Value::Mapping(root)) = serde_yaml::from_str::<Value>(&source) else {
         return vec![SourceFile {
@@ -266,8 +290,84 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_2_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_2_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
+    assert_eq!(report.validator_version, "0.11.0");
     assert_eq!(report.format_version, Some(2));
     assert!(report.diagnostics.is_empty());
+}
+
+#[test]
+fn format_2_accepts_narrative_detail_on_every_supported_fact_owner() {
+    let report = report(format_2_story_with_narrative_details());
+
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert!(report.diagnostics.is_empty());
+}
+
+#[test]
+fn format_2_rejects_blank_narrative_detail_on_every_supported_fact_owner() {
+    for blank in ["\"\"", "\"   \""] {
+        let source =
+            format_2_story_with_narrative_details().replace("SAFE_NARRATIVE_DETAIL", blank);
+        let report = report(source);
+        let pointers: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "fact.narrative_detail")
+            .filter_map(|diagnostic| diagnostic.pointer.as_deref())
+            .collect();
+
+        assert_eq!(
+            pointers,
+            [
+                "/characters/1/facts/0/narrative_detail",
+                "/entities/0/facts/0/narrative_detail",
+                "/events/0/facts/0/narrative_detail",
+                "/settings/1/facts/0/narrative_detail",
+                "/triggers/0/facts/0/narrative_detail",
+            ],
+            "{blank}"
+        );
+    }
+}
+
+#[test]
+fn format_2_rejects_every_non_string_narrative_detail_shape() {
+    for value in ["null", "false", "42", "[detail]", "{text: detail}"] {
+        let report = report(VALID_FORMAT_2_STORY.replace(
+            "        statement: The knife is present.",
+            &format!("        statement: The knife is present.\n        narrative_detail: {value}"),
+        ));
+        let diagnostics: Vec<_> = report
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "fact.narrative_detail")
+            .collect();
+
+        assert_eq!(diagnostics.len(), 1, "{value}: {:#?}", report.diagnostics);
+        assert_eq!(
+            diagnostics[0].pointer.as_deref(),
+            Some("/entities/0/facts/0/narrative_detail")
+        );
+        assert_eq!(
+            diagnostics[0].subject_id.as_deref(),
+            Some("fact.knife_is_present")
+        );
+    }
+}
+
+#[test]
+fn format_1_does_not_treat_clue_metadata_as_fact_narrative_detail() {
+    let source = VALID_STORY.replace(
+        "  - id: clue.weapon\n    discover_by:",
+        "  - id: clue.weapon\n    narrative_detail: 42\n    discover_by:",
+    );
+    let report = report(source);
+
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert!(!report
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "fact.narrative_detail"));
 }
 
 #[test]

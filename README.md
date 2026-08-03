@@ -262,6 +262,18 @@ clue sections, top-level fact sections, facts nested beneath unsupported owner
 types, `initially_known`, clue-based deduction `supported_by`, and the legacy
 `learn`/`discover` effects. Fact requirement cycles are also rejected.
 
+Format 2 facts may include optional player-safe `narrative_detail`. When
+present, it must be a non-empty string and inherits the fact's requirements;
+it has no separate visibility gate:
+
+```yaml
+facts:
+  - id: fact.knife_was_recently_washed
+    statement: The diving knife was recently washed.
+    narrative_detail: Fresh scratches mark the blade beneath its polished surface.
+    requires: [command.examine, entity.diving_knife]
+```
+
 Format 1 remains supported for existing repositories, including its required
 `clues` section and optional 0.3 fact extensions.
 
