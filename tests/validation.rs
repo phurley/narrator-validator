@@ -243,6 +243,20 @@ fn format_2_story_with_narrative_details() -> String {
         )
 }
 
+fn format_2_story_with_occurrences_on_every_fact_owner() -> String {
+    format_2_story_with_narrative_details().replace(
+        "        narrative_detail: SAFE_NARRATIVE_DETAIL",
+        "        narrative_detail: SAFE_NARRATIVE_DETAIL\n        occurred_at:\n          day: 0\n          time: \"21:18\"",
+    )
+}
+
+fn format_2_story_with_entity_occurrence(occurred_at: &str) -> String {
+    VALID_FORMAT_2_STORY.replace(
+        "        statement: The knife is present.",
+        &format!("        statement: The knife is present.\n{occurred_at}"),
+    )
+}
+
 fn format_2_story_with_character_fields(fields: &str) -> String {
     VALID_FORMAT_2_STORY
         .replace(
@@ -312,7 +326,7 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_2_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_2_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "0.12.0");
+    assert_eq!(report.validator_version, "0.13.0");
     assert_eq!(report.format_version, Some(2));
     assert!(report.diagnostics.is_empty());
 }
@@ -829,6 +843,156 @@ fn format_2_rejects_every_non_string_narrative_detail_shape() {
 }
 
 #[test]
+fn format_2_accepts_exact_occurrence_on_every_supported_fact_owner() {
+    let all_owners = report(format_2_story_with_occurrences_on_every_fact_owner());
+
+    assert!(all_owners.valid, "{:#?}", all_owners.diagnostics);
+    assert!(all_owners.diagnostics.is_empty());
+
+    let maximum_day = report(format_2_story_with_entity_occurrence(
+        "        occurred_at:\n          day: 2147483647\n          time: \"23:59\"",
+    ));
+    assert!(maximum_day.valid, "{:#?}", maximum_day.diagnostics);
+    assert!(maximum_day.diagnostics.is_empty());
+}
+
+#[test]
+fn format_2_occurrence_requires_an_exact_mapping_and_both_fields() {
+    for value in ["null", "[]", "\"21:18\"", "false"] {
+        let report = report(format_2_story_with_entity_occurrence(&format!(
+            "        occurred_at: {value}"
+        )));
+        let diagnostic = report
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "fact.occurred_at_type")
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing type diagnostic for {value}: {:#?}",
+                    report.diagnostics
+                )
+            });
+        assert_eq!(
+            diagnostic.pointer.as_deref(),
+            Some("/entities/0/facts/0/occurred_at")
+        );
+        assert_eq!(
+            diagnostic.subject_id.as_deref(),
+            Some("fact.knife_is_present")
+        );
+    }
+
+    for (mapping, code, pointer) in [
+        (
+            "        occurred_at:\n          time: \"21:18\"",
+            "fact.occurred_at_day_missing",
+            "/entities/0/facts/0/occurred_at/day",
+        ),
+        (
+            "        occurred_at:\n          day: 0",
+            "fact.occurred_at_time_missing",
+            "/entities/0/facts/0/occurred_at/time",
+        ),
+    ] {
+        let report = report(format_2_story_with_entity_occurrence(mapping));
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code
+                    && diagnostic.pointer.as_deref() == Some(pointer)
+                    && diagnostic.subject_id.as_deref() == Some("fact.knife_is_present")
+            }),
+            "missing {code}: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
+fn format_2_occurrence_day_is_a_bounded_nonnegative_integer() {
+    for day in ["-1", "true", "1.5", "\"0\"", "2147483648"] {
+        let report = report(format_2_story_with_entity_occurrence(&format!(
+            "        occurred_at:\n          day: {day}\n          time: \"21:18\""
+        )));
+        let diagnostic = report
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "fact.occurred_at_day")
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing day diagnostic for {day}: {:#?}",
+                    report.diagnostics
+                )
+            });
+        assert_eq!(
+            diagnostic.pointer.as_deref(),
+            Some("/entities/0/facts/0/occurred_at/day")
+        );
+        assert_eq!(
+            diagnostic.subject_id.as_deref(),
+            Some("fact.knife_is_present")
+        );
+    }
+}
+
+#[test]
+fn format_2_occurrence_time_requires_canonical_exact_hh_mm() {
+    for time in [
+        "\"1:02\"",
+        "\"01:2\"",
+        "\"24:00\"",
+        "\"23:60\"",
+        "\" 01:02\"",
+        "\"01:02 \"",
+        "42",
+        "null",
+    ] {
+        let report = report(format_2_story_with_entity_occurrence(&format!(
+            "        occurred_at:\n          day: 0\n          time: {time}"
+        )));
+        let diagnostic = report
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "fact.occurred_at_time")
+            .unwrap_or_else(|| {
+                panic!(
+                    "missing time diagnostic for {time}: {:#?}",
+                    report.diagnostics
+                )
+            });
+        assert_eq!(
+            diagnostic.pointer.as_deref(),
+            Some("/entities/0/facts/0/occurred_at/time")
+        );
+        assert_eq!(
+            diagnostic.subject_id.as_deref(),
+            Some("fact.knife_is_present")
+        );
+    }
+}
+
+#[test]
+fn format_2_occurrence_rejects_unknown_fields_at_the_exact_pointer() {
+    let report = report(format_2_story_with_entity_occurrence(
+        "        occurred_at:\n          time: \"21:18\"\n          timezone: UTC\n          day: 0",
+    ));
+    let diagnostics = report
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "fact.occurred_at_unknown_field")
+        .collect::<Vec<_>>();
+
+    assert_eq!(diagnostics.len(), 1, "{:#?}", report.diagnostics);
+    assert_eq!(
+        diagnostics[0].pointer.as_deref(),
+        Some("/entities/0/facts/0/occurred_at/timezone")
+    );
+    assert_eq!(
+        diagnostics[0].subject_id.as_deref(),
+        Some("fact.knife_is_present")
+    );
+}
+
+#[test]
 fn format_1_does_not_treat_clue_metadata_as_fact_narrative_detail() {
     let source = VALID_STORY.replace(
         "  - id: clue.weapon\n    discover_by:",
@@ -841,6 +1005,21 @@ fn format_1_does_not_treat_clue_metadata_as_fact_narrative_detail() {
         .diagnostics
         .iter()
         .any(|diagnostic| diagnostic.code == "fact.narrative_detail"));
+}
+
+#[test]
+fn format_1_does_not_treat_clue_metadata_as_fact_occurrence() {
+    let source = VALID_STORY.replace(
+        "  - id: clue.weapon\n    discover_by:",
+        "  - id: clue.weapon\n    occurred_at:\n      day: invalid\n      time: invalid\n    discover_by:",
+    );
+    let report = report(source);
+
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert!(!report
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code.starts_with("fact.occurred_at")));
 }
 
 #[test]

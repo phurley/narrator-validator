@@ -1835,6 +1835,7 @@ impl<'a> Validator<'a> {
                 }
             }
             if fact_claims_enabled {
+                self.validate_fact_occurred_at(fact);
                 if let Some(requires) = fact.mapping.get(Value::String("requires".to_string())) {
                     if !is_nonempty_string_or_sequence(requires) {
                         self.push(
@@ -1867,6 +1868,106 @@ impl<'a> Validator<'a> {
                     );
                 }
             }
+        }
+    }
+
+    fn validate_fact_occurred_at(&mut self, fact: &Item) {
+        let Some(value) = fact.mapping.get(Value::String("occurred_at".to_string())) else {
+            return;
+        };
+        let pointer = format!("{}/occurred_at", fact.pointer);
+        let Some(occurred_at) = value.as_mapping() else {
+            self.push(
+                Severity::Error,
+                "fact.occurred_at_type",
+                "fact `occurred_at` must be a mapping with exactly `day` and `time`".to_string(),
+                &fact.path,
+                Some(pointer),
+                None,
+                Some(fact.id.clone()),
+            );
+            return;
+        };
+
+        let mut unknown_fields = occurred_at
+            .keys()
+            .filter_map(Value::as_str)
+            .filter(|field| !matches!(*field, "day" | "time"))
+            .collect::<Vec<_>>();
+        unknown_fields.sort_unstable();
+        for field in unknown_fields {
+            self.push(
+                Severity::Error,
+                "fact.occurred_at_unknown_field",
+                format!(
+                    "fact `occurred_at` does not support `{field}`; expected only `day` and `time`"
+                ),
+                &fact.path,
+                Some(format!("{pointer}/{}", escape_pointer(field))),
+                locate_scalar(&fact.source, field),
+                Some(fact.id.clone()),
+            );
+        }
+        if occurred_at.keys().any(|key| key.as_str().is_none()) {
+            self.push(
+                Severity::Error,
+                "fact.occurred_at_unknown_field",
+                "fact `occurred_at` keys must be strings named only `day` and `time`".to_string(),
+                &fact.path,
+                Some(pointer.clone()),
+                None,
+                Some(fact.id.clone()),
+            );
+        }
+
+        match occurred_at.get(Value::String("day".to_string())) {
+            Some(Value::Number(day))
+                if day
+                    .as_i64()
+                    .is_some_and(|day| day >= 0 && i32::try_from(day).is_ok()) =>
+            {
+            }
+            Some(_) => self.push(
+                Severity::Error,
+                "fact.occurred_at_day",
+                "fact `occurred_at.day` must be a non-negative whole number supported by the runtime"
+                    .to_string(),
+                &fact.path,
+                Some(format!("{pointer}/day")),
+                None,
+                Some(fact.id.clone()),
+            ),
+            None => self.push(
+                Severity::Error,
+                "fact.occurred_at_day_missing",
+                "fact `occurred_at` is missing required `day`".to_string(),
+                &fact.path,
+                Some(format!("{pointer}/day")),
+                None,
+                Some(fact.id.clone()),
+            ),
+        }
+
+        match occurred_at.get(Value::String("time".to_string())) {
+            Some(Value::String(time)) if valid_time(time) => {}
+            Some(_) => self.push(
+                Severity::Error,
+                "fact.occurred_at_time",
+                "fact `occurred_at.time` must be an exact quoted 24-hour HH:MM value".to_string(),
+                &fact.path,
+                Some(format!("{pointer}/time")),
+                None,
+                Some(fact.id.clone()),
+            ),
+            None => self.push(
+                Severity::Error,
+                "fact.occurred_at_time_missing",
+                "fact `occurred_at` is missing required `time`".to_string(),
+                &fact.path,
+                Some(format!("{pointer}/time")),
+                None,
+                Some(fact.id.clone()),
+            ),
         }
     }
 

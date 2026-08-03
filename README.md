@@ -274,6 +274,26 @@ facts:
     requires: [command.examine, entity.diving_knife]
 ```
 
+Facts may also carry an explicit occurrence time when the fact statement itself
+asserts that the described occurrence happened then:
+
+```yaml
+facts:
+  - id: fact.rowan_died_at_2118
+    statement: Rowan's watch recorded his final heartbeat at 21:18.
+    occurred_at:
+      day: 0
+      time: "21:18"
+```
+
+`occurred_at` is optional. When present, it is an exact mapping containing only
+required `day` and `time` keys. `day` is a non-negative integer within the
+runtime's signed 32-bit day range. `time` is an exact quoted `HH:MM` value from
+`"00:00"` through `"23:59"`; whitespace and missing zero padding are rejected.
+This metadata records the occurrence asserted by the fact, not when evidence
+was discovered. The validator never infers chronology from the fact statement
+or from `about`, which remains relationship metadata.
+
 Characters may define explicitly player-safe portrayal and ordered testimony:
 
 ```yaml
