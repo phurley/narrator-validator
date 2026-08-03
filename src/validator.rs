@@ -940,6 +940,63 @@ impl<'a> Validator<'a> {
                 }
             }
         }
+        if case
+            .mapping
+            .get(Value::String("genre".to_string()))
+            .is_some_and(|value| !value.as_str().is_some_and(|genre| !genre.trim().is_empty()))
+        {
+            self.push(
+                Severity::Error,
+                "case.genre",
+                "`case.genre` must be a non-empty string".to_string(),
+                &case.path,
+                Some(format!("{}/genre", case.pointer)),
+                None,
+                Some(case.id.clone()),
+            );
+        }
+        if let Some(tone) = case.mapping.get(Value::String("tone".to_string())) {
+            if let Some(entries) = tone.as_sequence() {
+                let mut seen = HashSet::new();
+                for (index, entry) in entries.iter().enumerate() {
+                    let pointer = format!("{}/tone/{index}", case.pointer);
+                    let Some(value) = entry.as_str().filter(|value| !value.trim().is_empty())
+                    else {
+                        self.push(
+                            Severity::Error,
+                            "case.tone_entry",
+                            "`case.tone` entries must be non-empty strings".to_string(),
+                            &case.path,
+                            Some(pointer),
+                            None,
+                            Some(case.id.clone()),
+                        );
+                        continue;
+                    };
+                    if !seen.insert(value.trim()) {
+                        self.push(
+                            Severity::Error,
+                            "case.tone_duplicate",
+                            format!("`case.tone` entry `{}` occurs more than once", value.trim()),
+                            &case.path,
+                            Some(pointer),
+                            None,
+                            Some(case.id.clone()),
+                        );
+                    }
+                }
+            } else {
+                self.push(
+                    Severity::Error,
+                    "case.tone_type",
+                    "`case.tone` must be a sequence of unique non-empty strings".to_string(),
+                    &case.path,
+                    Some(format!("{}/tone", case.pointer)),
+                    None,
+                    Some(case.id.clone()),
+                );
+            }
+        }
         if self.format_version == Some(2) {
             match case
                 .mapping

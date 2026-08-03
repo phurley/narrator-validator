@@ -271,6 +271,68 @@ fn valid_format_2_repository_has_no_diagnostics() {
 }
 
 #[test]
+fn validates_optional_case_voice_metadata() {
+    let with_voice = VALID_FORMAT_2_STORY.replace(
+        "  initial_time: \"21:00\"",
+        "  initial_time: \"21:00\"\n  genre: closed-circle mystery\n  tone: [elegant, storm-bound, quietly menacing]",
+    );
+    let with_voice_report = report(with_voice);
+    assert!(
+        with_voice_report.valid,
+        "{:#?}",
+        with_voice_report.diagnostics
+    );
+
+    let without_voice = report(VALID_FORMAT_2_STORY);
+    assert!(without_voice.valid, "{:#?}", without_voice.diagnostics);
+}
+
+#[test]
+fn rejects_blank_and_wrong_type_case_genre() {
+    for genre in ["\"   \"", "[mystery]", "42"] {
+        let report = report(VALID_FORMAT_2_STORY.replace(
+            "  initial_time: \"21:00\"",
+            &format!("  initial_time: \"21:00\"\n  genre: {genre}"),
+        ));
+        let diagnostic = report
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "case.genre")
+            .expect("genre diagnostic");
+        assert_eq!(diagnostic.pointer.as_deref(), Some("/case/genre"));
+    }
+}
+
+#[test]
+fn rejects_wrong_type_blank_and_duplicate_case_tones() {
+    let wrong_type = report(VALID_FORMAT_2_STORY.replace(
+        "  initial_time: \"21:00\"",
+        "  initial_time: \"21:00\"\n  tone: elegant",
+    ));
+    assert!(wrong_type
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "case.tone_type"
+            && diagnostic.pointer.as_deref() == Some("/case/tone")));
+
+    let invalid_entries = report(VALID_FORMAT_2_STORY.replace(
+        "  initial_time: \"21:00\"",
+        "  initial_time: \"21:00\"\n  tone: [elegant, \"   \", 42, \" elegant \"]",
+    ));
+    let entry_pointers: Vec<_> = invalid_entries
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "case.tone_entry")
+        .filter_map(|diagnostic| diagnostic.pointer.as_deref())
+        .collect();
+    assert_eq!(entry_pointers, ["/case/tone/1", "/case/tone/2"]);
+    assert!(invalid_entries.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "case.tone_duplicate"
+            && diagnostic.pointer.as_deref() == Some("/case/tone/3")
+    }));
+}
+
+#[test]
 fn format_2_requires_a_runtime_clock_and_whole_minute_effects() {
     let missing = report(VALID_FORMAT_2_STORY.replace("  initial_time: \"21:00\"\n", ""));
     assert!(missing
