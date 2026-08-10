@@ -2871,11 +2871,15 @@ impl<'a> Validator<'a> {
                     if let Some(after) = effect.get(Value::String("after".to_string())) {
                         if !command.id.starts_with("trigger.")
                             || !after.as_str().is_some_and(valid_delay)
+                            || effect
+                                .get(Value::String("value".to_string()))
+                                .and_then(Value::as_bool)
+                                != Some(true)
                         {
                             self.push(
                                 Severity::Error,
                                 "effect.delay",
-                                "`set_flag.after` is available on triggers and must be a positive delay such as `20m`, `1h`, or `2turns`".to_string(),
+                                "`set_flag.after` is available for trigger assignment to true and must be a positive delay such as `20m`, `1h`, or `2turns`".to_string(),
                                 &command.path,
                                 Some(format!("{pointer}/after")),
                                 None,
