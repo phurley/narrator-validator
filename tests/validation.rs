@@ -78,10 +78,7 @@ triggers:
     location: setting.study
     any_of: [character.culprit, entity.knife]
     all_of: [flag.knife_examined]
-    effects:
-      - operation: discover
-        target: clue.weapon
-        value: visible
+    effects: []
 "#;
 
 const VALID_FORMAT_2_STORY: &str = r#"
@@ -191,8 +188,6 @@ commands:
         deduction_id: param4
       - operation: describe
         text: The examination reveals a carefully staged scene.
-      - operation: trigger
-        trigger_id: trigger.investigate_knife
       - operation: win
         text: The player has solved the mystery.
       - operation: lose
@@ -202,9 +197,10 @@ triggers:
     name: Investigate the knife
     command: command.investigate
     effects:
-      - operation: give_after
-        target: flag.knife_analysis_complete
-        value: 20m
+      - operation: set_flag
+        flag: flag.knife_analysis_complete
+        value: true
+        after: 20m
 "#;
 
 fn report(source: impl Into<String>) -> narrator_validator::ValidationReport {
@@ -238,8 +234,8 @@ fn format_2_story_with_narrative_details() -> String {
             "    participants: [character.victim, character.culprit]\n    facts:\n      - id: fact.event_detail\n        statement: An event-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL\ndeductions:",
         )
         .replace(
-            "        value: 20m\n",
-            "        value: 20m\n    facts:\n      - id: fact.trigger_detail\n        statement: A trigger-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL\n",
+            "        after: 20m\n",
+            "        after: 20m\n    facts:\n      - id: fact.trigger_detail\n        statement: A trigger-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL\n",
         )
 }
 
@@ -326,7 +322,7 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_2_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_2_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "0.16.0");
+    assert_eq!(report.validator_version, "0.17.0");
     assert_eq!(report.format_version, Some(2));
     assert!(report.diagnostics.is_empty());
 }
@@ -1109,18 +1105,18 @@ fn validates_runtime_trigger_effect_contracts() {
             "    command: command.investigate\n    time:\n      relation: after\n      value: \"99:00\"\n    effects:",
         )
         .replace(
-            "      - operation: give_after\n        target: flag.knife_analysis_complete\n        value: 20m",
-            "      - operation: move\n        target: $actor\n        value: $target\n        surprise: true\n      - operation: rewrite_reality\n        target: flag.knife_analysis_complete",
+            "      - operation: set_flag\n        flag: flag.knife_analysis_complete\n        value: true\n        after: 20m",
+            "      - operation: move\n        subjects: [player]\n        setting: param1\n        surprise: true\n      - operation: rewrite_reality\n        flag: flag.knife_analysis_complete",
         );
     let result = codes(invalid);
     assert!(result.contains(&"trigger.time_value".to_string()));
-    assert!(result.contains(&"trigger.effect_parameter_type".to_string()));
-    assert!(result.contains(&"trigger.effect_unknown_field".to_string()));
-    assert!(result.contains(&"trigger.effect_unknown_operation".to_string()));
+    assert!(result.contains(&"command.effect_parameter_type".to_string()));
+    assert!(result.contains(&"command.effect_unknown_field".to_string()));
+    assert!(result.contains(&"command.effect_unknown_operation".to_string()));
 
     let missing_value =
-        codes(VALID_FORMAT_2_STORY.replace("        value: 20m", "        omitted_value: 20m"));
-    assert!(missing_value.contains(&"trigger.effect_value_missing".to_string()));
+        codes(VALID_FORMAT_2_STORY.replace("        value: true", "        omitted_value: true"));
+    assert!(missing_value.contains(&"effect.flag_value".to_string()));
 }
 
 #[test]
@@ -1280,31 +1276,43 @@ fn format_2_enforces_automatic_opening_facts_and_central_requirements() {
 }
 
 #[test]
-fn format_2_validates_state_flags_and_delayed_give_effects() {
+fn format_2_validates_flags_and_delayed_assignment() {
     let invalid = VALID_FORMAT_2_STORY
         .replace(
             "  - id: flag.knife_analysis_complete\n    name: Knife analysis complete\n    description: Whether the delayed knife analysis has completed.\n    initial_state: false",
             "  - id: flag.knife_analysis_complete\n    name: Knife analysis complete\n    description: Whether the delayed knife analysis has completed.\n    initial_state: sometimes",
         )
         .replace(
-            "target: flag.knife_analysis_complete\n        value: 20m",
-            "target: entity.knife\n        value: 0m",
+            "flag: flag.knife_analysis_complete\n        value: true\n        after: 20m",
+            "flag: entity.knife\n        value: true\n        after: 0m",
         );
     let result = codes(invalid);
     assert!(result.contains(&"flag.initial_state".to_string()));
-    assert!(result.contains(&"trigger.effect_target_type".to_string()));
-    assert!(result.contains(&"trigger.effect_delay_invalid".to_string()));
+    assert!(result.contains(&"reference.wrong_type".to_string()));
+    assert!(result.contains(&"effect.delay".to_string()));
 
-    let legacy = VALID_FORMAT_2_STORY.replace("operation: give_after", "operation: learn_after");
-    assert!(codes(legacy).contains(&"trigger.legacy_knowledge_effect".to_string()));
+    let legacy = VALID_FORMAT_2_STORY.replace("operation: set_flag", "operation: learn_after");
+    assert!(codes(legacy).contains(&"command.effect_unknown_operation".to_string()));
 
     for delay in ["1turn", "4294967296turns", "4294967296m"] {
         assert!(
-            codes(VALID_FORMAT_2_STORY.replace("value: 20m", &format!("value: {delay}")))
-                .contains(&"trigger.effect_delay_invalid".to_string()),
+            codes(VALID_FORMAT_2_STORY.replace("after: 20m", &format!("after: {delay}")))
+                .contains(&"effect.delay".to_string()),
             "{delay} must be rejected before runtime"
         );
     }
+}
+
+#[test]
+fn delayed_set_flag_rejects_false_assignment() {
+    let report = report(VALID_FORMAT_2_STORY.replace(
+        "        value: true\n        after: 20m",
+        "        value: false\n        after: 20m",
+    ));
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "effect.delay"
+            && diagnostic.pointer.as_deref() == Some("/triggers/0/effects/0/after")
+    }));
 }
 
 #[test]
@@ -1580,7 +1588,7 @@ fn validates_command_and_trigger_shapes() {
             "    time:\n      relation: at",
             "    conditions: []\n    time:\n      relation: at",
         )
-        .replace("value: visible", "value: 42");
+        .replace("effects: []", "effects: invalid");
     let result = codes(source);
     assert!(result.contains(&"command.aliases_removed".to_string()));
     assert!(result.contains(&"command.parameter_accepts_removed".to_string()));
@@ -1588,7 +1596,7 @@ fn validates_command_and_trigger_shapes() {
     assert!(result.contains(&"command.parameter_required_type".to_string()));
     assert!(result.contains(&"trigger.once_type".to_string()));
     assert!(result.contains(&"trigger.conditions_removed".to_string()));
-    assert!(result.contains(&"trigger.effect_value_type".to_string()));
+    assert!(result.contains(&"command.effects_type".to_string()));
 }
 
 #[test]
@@ -1756,22 +1764,16 @@ fn validates_every_action_effect_payload() {
             "/commands/1/effects/5/text",
         ),
         (
-            "        trigger_id: trigger.investigate_knife",
-            "        trigger_id: entity.knife",
-            "reference.wrong_type",
-            "/commands/1/effects/6/trigger_id",
-        ),
-        (
             "        text: The player has solved the mystery.",
             "        text: 42",
             "command.effect_text",
-            "/commands/1/effects/7/text",
+            "/commands/1/effects/6/text",
         ),
         (
             "        text: The trail has gone cold.",
             "        text: \"\"",
             "command.effect_text",
-            "/commands/1/effects/8/text",
+            "/commands/1/effects/7/text",
         ),
         (
             "        text: The examination reveals a carefully staged scene.",
@@ -1791,6 +1793,52 @@ fn validates_every_action_effect_payload() {
             "missing {expected_code} at {expected_pointer}: {:#?}",
             report.diagnostics
         );
+    }
+}
+
+#[test]
+fn every_world_effect_uses_the_same_command_and_trigger_validator() {
+    let effects = [
+        "operation: set_flag\n        flag: flag.knife_examined\n        value: true",
+        "operation: move\n        subjects: [player]\n        setting: setting.study",
+        "operation: transform\n        entity_from: entity.knife\n        entity_to: entity.replacement",
+        "operation: reveal\n        entity: entity.knife",
+        "operation: conceal\n        entity: entity.knife",
+        "operation: learn_fact\n        fact_id: fact.knife_has_blood",
+        "operation: establish_deduction\n        deduction_id: deduction.solution",
+        "operation: describe\n        text: A precise authored beat.",
+        "operation: advance_time\n        minutes: 1",
+        "operation: win\n        text: Solved.",
+        "operation: lose\n        text: Lost.",
+    ];
+    let base = VALID_FORMAT_2_STORY.replace(
+        "  - id: entity.knife\n    initial:",
+        "  - id: entity.replacement\n  - id: entity.knife\n    initial:",
+    );
+    for effect in effects {
+        for (owner, source) in [
+            (
+                "command",
+                base.replace(
+                    "    description: Learn that the knife is present.\n    effects:\n      - operation: learn_fact\n        fact_id: fact.knife_is_present",
+                    &format!("    description: Learn that the knife is present.\n    effects:\n      - {effect}"),
+                ),
+            ),
+            (
+                "trigger",
+                base.replace(
+                    "    effects:\n      - operation: set_flag\n        flag: flag.knife_analysis_complete\n        value: true\n        after: 20m",
+                    &format!("    effects:\n      - {effect}"),
+                ),
+            ),
+        ] {
+            let diagnostics = report(source)
+                .diagnostics
+                .into_iter()
+                .filter(|diagnostic| diagnostic.code.contains("effect"))
+                .collect::<Vec<_>>();
+            assert!(diagnostics.is_empty(), "{owner} {effect}: {diagnostics:#?}");
+        }
     }
 }
 

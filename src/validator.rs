@@ -287,7 +287,6 @@ impl<'a> Validator<'a> {
                     triggers.as_slice(),
                 ],
                 &clues,
-                &triggers,
             );
         }
         self.validate_graphs(
@@ -2170,7 +2169,6 @@ impl<'a> Validator<'a> {
         facts: &[Item],
         fact_owners: &[&[Item]],
         clues: &[Item],
-        triggers: &[Item],
     ) {
         let mut reachable = BTreeSet::new();
         reachable.extend(
@@ -2189,31 +2187,12 @@ impl<'a> Validator<'a> {
         for clue in clues {
             reachable.extend(string_list_field(&clue.mapping, "establishes"));
         }
-        for trigger in triggers {
-            for effect in trigger
-                .mapping
-                .get(Value::String("effects".to_string()))
-                .and_then(Value::as_sequence)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_mapping)
-            {
-                if matches!(
-                    string_field(effect, "operation"),
-                    Some("learn" | "learn_after")
-                ) {
-                    if let Some(target) = string_field(effect, "target") {
-                        reachable.insert(target.to_string());
-                    }
-                }
-            }
-        }
         for fact in facts.iter().filter(|fact| !reachable.contains(&fact.id)) {
             self.push(
                 Severity::Warning,
                 "fact.unreachable",
                 format!(
-                    "fact `{}` is neither initially known nor associated with a discoverable element, clue, or learning effect",
+                    "fact `{}` is neither initially known nor associated with a discoverable element or clue",
                     fact.id
                 ),
                 &fact.path,
@@ -2404,7 +2383,7 @@ impl<'a> Validator<'a> {
             if self.format_version == Some(2) {
                 self.validate_runtime_command_signature(command, &parameter_types);
             }
-            self.validate_command_effects(command, &parameter_types);
+            self.validate_world_effects(command, &parameter_types);
         }
     }
 
@@ -2787,7 +2766,7 @@ impl<'a> Validator<'a> {
         );
     }
 
-    fn validate_command_effects(
+    fn validate_world_effects(
         &mut self,
         command: &Item,
         parameter_types: &[Option<CommandParameterType>],
@@ -2838,25 +2817,86 @@ impl<'a> Validator<'a> {
             };
 
             match operation {
+                "set_flag" => {
+                    self.validate_command_effect_fields(
+                        command,
+                        effect,
+                        &pointer,
+                        &["operation", "flag", "value", "after"],
+                    );
+                    self.validate_command_effect_reference_field(
+                        command,
+                        effect,
+                        &pointer,
+                        "flag",
+                        &[Kind::Flag],
+                        parameter_types,
+                    );
+                    if effect
+                        .get(Value::String("value".to_string()))
+                        .and_then(Value::as_bool)
+                        .is_none()
+                    {
+                        self.push(
+                            Severity::Error,
+                            "effect.flag_value",
+                            "`set_flag.value` must be true or false".to_string(),
+                            &command.path,
+                            Some(format!("{pointer}/value")),
+                            None,
+                            Some(command.id.clone()),
+                        );
+                    }
+                    if let Some(after) = effect.get(Value::String("after".to_string())) {
+                        if !command.id.starts_with("trigger.")
+                            || !after.as_str().is_some_and(valid_delay)
+                            || effect
+                                .get(Value::String("value".to_string()))
+                                .and_then(Value::as_bool)
+                                != Some(true)
+                        {
+                            self.push(
+                                Severity::Error,
+                                "effect.delay",
+                                "`set_flag.after` is available for trigger assignment to true and must be a positive delay such as `20m`, `1h`, or `2turns`".to_string(),
+                                &command.path,
+                                Some(format!("{pointer}/after")),
+                                None,
+                                Some(command.id.clone()),
+                            );
+                        }
+                    }
+                }
                 "advance_time" => {
                     self.validate_command_effect_fields(
                         command,
                         effect,
                         &pointer,
-                        &["operation", "minutes"],
+                        &["operation", "minutes", "route"],
                     );
                     let valid_minutes = integer_field(effect, "minutes")
                         .is_some_and(|minutes| minutes > 0 && u32::try_from(minutes).is_ok());
-                    if !valid_minutes {
+                    let has_route = effect.contains_key(Value::String("route".to_string()));
+                    if valid_minutes == has_route {
                         self.push(
                             Severity::Error,
                             "command.effect_minutes",
-                            "`advance_time.minutes` must be a positive whole number supported by the runtime"
+                            "`advance_time` requires exactly one positive whole `minutes` value or route reference"
                                 .to_string(),
                             &command.path,
                             Some(format!("{pointer}/minutes")),
                             None,
                             Some(command.id.clone()),
+                        );
+                    }
+                    if has_route {
+                        self.validate_command_effect_reference_field(
+                            command,
+                            effect,
+                            &pointer,
+                            "route",
+                            &[Kind::Route],
+                            parameter_types,
                         );
                     }
                 }
@@ -2920,6 +2960,22 @@ impl<'a> Validator<'a> {
                         );
                     }
                 }
+                "reveal" | "conceal" => {
+                    self.validate_command_effect_fields(
+                        command,
+                        effect,
+                        &pointer,
+                        &["operation", "entity"],
+                    );
+                    self.validate_command_effect_reference_field(
+                        command,
+                        effect,
+                        &pointer,
+                        "entity",
+                        &[Kind::Entity],
+                        parameter_types,
+                    );
+                }
                 "learn_fact" => {
                     self.validate_command_effect_fields(
                         command,
@@ -2970,22 +3026,6 @@ impl<'a> Validator<'a> {
                             Some(command.id.clone()),
                         );
                     }
-                }
-                "trigger" => {
-                    self.validate_command_effect_fields(
-                        command,
-                        effect,
-                        &pointer,
-                        &["operation", "trigger_id"],
-                    );
-                    self.validate_command_effect_reference_field(
-                        command,
-                        effect,
-                        &pointer,
-                        "trigger_id",
-                        &[Kind::Trigger],
-                        parameter_types,
-                    );
                 }
                 _ => self.push(
                     Severity::Error,
@@ -3087,6 +3127,9 @@ impl<'a> Validator<'a> {
         if allow_player && reference == "player" {
             return;
         }
+        if reference == "route" && expected.contains(&Kind::Route) {
+            return;
+        }
 
         match command_parameter_reference(reference) {
             Ok(Some(index)) => {
@@ -3174,12 +3217,12 @@ impl<'a> Validator<'a> {
         &mut self,
         triggers: &[Item],
         commands: &[Item],
-        fact_claims_enabled: bool,
+        _fact_claims_enabled: bool,
     ) {
         for trigger in triggers {
             let parameter_types = string_field(&trigger.mapping, "command")
                 .and_then(|command_id| commands.iter().find(|command| command.id == command_id))
-                .map(command_parameter_types_by_name)
+                .map(command_parameter_types)
                 .unwrap_or_default();
             if !string_field(&trigger.mapping, "command")
                 .is_some_and(|command| !command.trim().is_empty())
@@ -3227,259 +3270,7 @@ impl<'a> Validator<'a> {
             self.validate_trigger_location(trigger);
             self.validate_trigger_gate_list(trigger, "any_of");
             self.validate_trigger_gate_list(trigger, "all_of");
-            self.validate_trigger_mapping_list(
-                trigger,
-                "effects",
-                &["operation", "target"],
-                "trigger.effect",
-            );
-
-            if let Some(effects) = trigger
-                .mapping
-                .get(Value::String("effects".to_string()))
-                .and_then(Value::as_sequence)
-            {
-                for (index, effect) in effects.iter().enumerate() {
-                    let Some(effect) = effect.as_mapping() else {
-                        continue;
-                    };
-                    let invalid_value_type = effect
-                        .get(Value::String("value".to_string()))
-                        .is_some_and(|value| value.as_str().is_none());
-                    if invalid_value_type {
-                        self.push(
-                            Severity::Error,
-                            "trigger.effect_value_type",
-                            "trigger effect `value` must be a string when present".to_string(),
-                            &trigger.path,
-                            Some(format!("{}/effects/{index}/value", trigger.pointer)),
-                            None,
-                            Some(trigger.id.clone()),
-                        );
-                    }
-                    let Some(operation) = string_field(effect, "operation") else {
-                        continue;
-                    };
-                    let Some(target) = string_field(effect, "target") else {
-                        continue;
-                    };
-                    match operation {
-                        "learn" | "learn_after" | "discover" | "discover_after"
-                            if fact_claims_enabled =>
-                        {
-                            self.validate_trigger_effect_fields(
-                                trigger,
-                                index,
-                                effect,
-                                true,
-                                matches!(operation, "learn_after" | "discover_after"),
-                            );
-                            self.push(
-                                Severity::Error,
-                                "trigger.legacy_knowledge_effect",
-                                format!(
-                                    "format 2 derives fact availability from `requires`; `{operation}` is no longer used"
-                                ),
-                                &trigger.path,
-                                Some(format!("{}/effects/{index}/operation", trigger.pointer)),
-                                locate_scalar(&trigger.source, operation),
-                                Some(trigger.id.clone()),
-                            );
-                        }
-                        "learn" | "learn_after" => {
-                            self.validate_trigger_effect_fields(
-                                trigger,
-                                index,
-                                effect,
-                                true,
-                                operation == "learn_after",
-                            );
-                            self.validate_trigger_effect_operand(
-                                trigger,
-                                index,
-                                operation,
-                                "target",
-                                target,
-                                &[Kind::Fact],
-                                &[],
-                                true,
-                                &parameter_types,
-                            );
-                        }
-                        "discover" | "discover_after" => {
-                            self.validate_trigger_effect_fields(
-                                trigger,
-                                index,
-                                effect,
-                                true,
-                                operation == "discover_after",
-                            );
-                            self.validate_trigger_effect_operand(
-                                trigger,
-                                index,
-                                operation,
-                                "target",
-                                target,
-                                &[Kind::Clue],
-                                &[],
-                                true,
-                                &parameter_types,
-                            );
-                        }
-                        "move" => {
-                            self.validate_trigger_effect_fields(trigger, index, effect, true, true);
-                            self.validate_trigger_effect_operand(
-                                trigger,
-                                index,
-                                operation,
-                                "target",
-                                target,
-                                &[Kind::Character, Kind::Entity],
-                                &["$actor"],
-                                true,
-                                &parameter_types,
-                            );
-                            if let Some(value) = string_field(effect, "value") {
-                                self.validate_trigger_effect_operand(
-                                    trigger,
-                                    index,
-                                    operation,
-                                    "value",
-                                    value,
-                                    &[Kind::Setting],
-                                    &[],
-                                    true,
-                                    &parameter_types,
-                                );
-                            }
-                        }
-                        "advance_time_by_route" => {
-                            self.validate_trigger_effect_fields(trigger, index, effect, true, true);
-                            self.validate_trigger_effect_operand(
-                                trigger,
-                                index,
-                                operation,
-                                "target",
-                                target,
-                                &[],
-                                &["$actor"],
-                                false,
-                                &parameter_types,
-                            );
-                            if let Some(value) = string_field(effect, "value") {
-                                self.validate_trigger_effect_operand(
-                                    trigger,
-                                    index,
-                                    operation,
-                                    "value",
-                                    value,
-                                    &[Kind::Setting],
-                                    &[],
-                                    true,
-                                    &parameter_types,
-                                );
-                            }
-                        }
-                        "claim" => {
-                            self.validate_trigger_effect_fields(
-                                trigger, index, effect, false, false,
-                            );
-                            self.validate_trigger_effect_operand(
-                                trigger,
-                                index,
-                                operation,
-                                "target",
-                                target,
-                                &[Kind::Fact],
-                                &["$fact"],
-                                false,
-                                &parameter_types,
-                            );
-                        }
-                        "give" | "give_after" | "remove" => {
-                            self.validate_trigger_effect_fields(
-                                trigger,
-                                index,
-                                effect,
-                                operation == "give_after",
-                                operation == "give_after",
-                            );
-                            self.validate_trigger_effect_operand(
-                                trigger,
-                                index,
-                                operation,
-                                "target",
-                                target,
-                                &[Kind::Flag],
-                                &[],
-                                false,
-                                &parameter_types,
-                            );
-                        }
-                        "satisfy_requirement" => {
-                            self.validate_trigger_effect_fields(trigger, index, effect, true, true);
-                            self.validate_trigger_effect_operand(
-                                trigger,
-                                index,
-                                operation,
-                                "target",
-                                target,
-                                &[Kind::Route],
-                                &[],
-                                true,
-                                &parameter_types,
-                            );
-                            if let Some(value) = string_field(effect, "value") {
-                                self.validate_trigger_effect_operand(
-                                    trigger,
-                                    index,
-                                    operation,
-                                    "value",
-                                    value,
-                                    &[Kind::Entity],
-                                    &[],
-                                    true,
-                                    &parameter_types,
-                                );
-                            }
-                        }
-                        _ => self.push(
-                            Severity::Error,
-                            "trigger.effect_unknown_operation",
-                            format!("unknown trigger effect operation `{operation}`"),
-                            &trigger.path,
-                            Some(format!("{}/effects/{index}/operation", trigger.pointer)),
-                            locate_scalar(&trigger.source, operation),
-                            Some(trigger.id.clone()),
-                        ),
-                    }
-                    if matches!(operation, "learn_after" | "discover_after" | "give_after")
-                        && !invalid_value_type
-                    {
-                        match string_field(effect, "value") {
-                            Some(value) if valid_delay(value) => {}
-                            Some(_) => self.push(
-                                Severity::Error,
-                                "trigger.effect_delay_invalid",
-                                "delayed effects need a positive delay such as `20m`, `1h`, or `2turns`".to_string(),
-                                &trigger.path,
-                                Some(format!("{}/effects/{index}/value", trigger.pointer)),
-                                None,
-                                Some(trigger.id.clone()),
-                            ),
-                            None => self.push(
-                                Severity::Error,
-                                "trigger.effect_delay_missing",
-                                "delayed effects require a `value` delay".to_string(),
-                                &trigger.path,
-                                Some(format!("{}/effects/{index}/value", trigger.pointer)),
-                                None,
-                                Some(trigger.id.clone()),
-                            ),
-                        }
-                    }
-                }
-            }
+            self.validate_world_effects(trigger, &parameter_types);
         }
     }
 
@@ -3608,220 +3399,6 @@ impl<'a> Validator<'a> {
                     None,
                     Some(trigger.id.clone()),
                 );
-            }
-        }
-    }
-
-    fn validate_trigger_effect_fields(
-        &mut self,
-        trigger: &Item,
-        effect_index: usize,
-        effect: &Mapping,
-        allow_value: bool,
-        require_value: bool,
-    ) {
-        let pointer = format!("{}/effects/{effect_index}", trigger.pointer);
-        for key in effect.keys() {
-            let Some(key) = key.as_str() else {
-                self.push(
-                    Severity::Error,
-                    "trigger.effect_field",
-                    "trigger effect field names must be strings".to_string(),
-                    &trigger.path,
-                    Some(pointer.clone()),
-                    None,
-                    Some(trigger.id.clone()),
-                );
-                continue;
-            };
-            if !(matches!(key, "operation" | "target") || allow_value && key == "value") {
-                self.push(
-                    Severity::Error,
-                    "trigger.effect_unknown_field",
-                    format!("`{key}` is not valid for this trigger effect"),
-                    &trigger.path,
-                    Some(format!("{pointer}/{}", escape_pointer(key))),
-                    None,
-                    Some(trigger.id.clone()),
-                );
-            }
-        }
-        if require_value
-            && !string_field(effect, "value").is_some_and(|value| !value.trim().is_empty())
-        {
-            self.push(
-                Severity::Error,
-                "trigger.effect_value_missing",
-                "this trigger effect requires a non-empty string `value`".to_string(),
-                &trigger.path,
-                Some(format!("{pointer}/value")),
-                None,
-                Some(trigger.id.clone()),
-            );
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn validate_trigger_effect_operand(
-        &mut self,
-        trigger: &Item,
-        effect_index: usize,
-        operation: &str,
-        field: &str,
-        value: &str,
-        expected: &[Kind],
-        special_operands: &[&str],
-        allow_named_operand: bool,
-        parameter_types: &BTreeMap<String, CommandParameterType>,
-    ) {
-        if special_operands.contains(&value) {
-            return;
-        }
-        let pointer = format!(
-            "{}/effects/{effect_index}/{}",
-            trigger.pointer,
-            escape_pointer(field)
-        );
-        let expected_names = expected
-            .iter()
-            .map(|kind| kind.name())
-            .collect::<Vec<_>>()
-            .join(" or ");
-        if let Some(name) = value.strip_prefix('$') {
-            if allow_named_operand {
-                match parameter_types.get(name) {
-                    Some(parameter_type) if expected.contains(&parameter_type.kind()) => return,
-                    Some(parameter_type) => {
-                        self.push(
-                            Severity::Error,
-                            "trigger.effect_parameter_type",
-                            format!(
-                                "trigger effect `{operation}` `{field}` uses {value}, a {} parameter; expected {expected_names}",
-                                parameter_type.name()
-                            ),
-                            &trigger.path,
-                            Some(pointer),
-                            locate_scalar(&trigger.source, value),
-                            Some(trigger.id.clone()),
-                        );
-                        return;
-                    }
-                    None => {
-                        self.push(
-                            Severity::Error,
-                            "trigger.effect_parameter_unknown",
-                            format!(
-                                "trigger effect `{operation}` `{field}` refers to unknown command parameter `{name}`"
-                            ),
-                            &trigger.path,
-                            Some(pointer),
-                            locate_scalar(&trigger.source, value),
-                            Some(trigger.id.clone()),
-                        );
-                        return;
-                    }
-                }
-            }
-        }
-        match self
-            .definitions
-            .get(value)
-            .map(|definition| definition.kind)
-        {
-            Some(kind) if expected.contains(&kind) => {}
-            Some(kind) => self.push(
-                Severity::Error,
-                "trigger.effect_target_type",
-                format!(
-                    "trigger effect `{operation}` `{field}` refers to a {}; expected {expected_names}",
-                    kind.name(),
-                ),
-                &trigger.path,
-                Some(pointer),
-                locate_scalar(&trigger.source, value),
-                Some(value.to_string()),
-            ),
-            None if looks_like_id(value) => self.push(
-                Severity::Error,
-                "reference.unknown",
-                format!("`{value}` does not refer to a defined ID"),
-                &trigger.path,
-                Some(pointer),
-                locate_scalar(&trigger.source, value),
-                Some(value.to_string()),
-            ),
-            None => self.push(
-                Severity::Error,
-                "trigger.effect_target_type",
-                format!(
-                    "trigger effect `{operation}` `{field}` must be {expected_names}{}",
-                    if special_operands.is_empty() && !allow_named_operand {
-                        " ID".to_string()
-                    } else {
-                        format!(
-                            " ID or a supported operand ({})",
-                            special_operands.join(", ")
-                        )
-                    }
-                ),
-                &trigger.path,
-                Some(pointer),
-                locate_scalar(&trigger.source, value),
-                Some(trigger.id.clone()),
-            ),
-        }
-    }
-
-    fn validate_trigger_mapping_list(
-        &mut self,
-        trigger: &Item,
-        field: &str,
-        required_fields: &[&str],
-        code_prefix: &str,
-    ) {
-        let Some(values) = trigger.mapping.get(Value::String(field.to_string())) else {
-            return;
-        };
-        let Some(values) = values.as_sequence() else {
-            self.push(
-                Severity::Error,
-                &format!("{code_prefix}s_type"),
-                format!("trigger `{field}` must be a sequence"),
-                &trigger.path,
-                Some(format!("{}/{}", trigger.pointer, escape_pointer(field))),
-                None,
-                Some(trigger.id.clone()),
-            );
-            return;
-        };
-        for (index, value) in values.iter().enumerate() {
-            let pointer = format!("{}/{field}/{index}", trigger.pointer);
-            let Some(mapping) = value.as_mapping() else {
-                self.push(
-                    Severity::Error,
-                    &format!("{code_prefix}_type"),
-                    format!("trigger {field} must be mappings"),
-                    &trigger.path,
-                    Some(pointer),
-                    None,
-                    Some(trigger.id.clone()),
-                );
-                continue;
-            };
-            for required_field in required_fields {
-                if !string_field(mapping, required_field)
-                    .is_some_and(|value| !value.trim().is_empty())
-                {
-                    self.push(
-                        Severity::Error,
-                        &format!("{code_prefix}_field"),
-                        format!("trigger {field} `{required_field}` must be a non-empty string"),
-                        &trigger.path,
-                        Some(format!("{pointer}/{}", escape_pointer(required_field))),
-                        None,
-                        Some(trigger.id.clone()),
-                    );
-                }
             }
         }
     }
@@ -4297,6 +3874,7 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
         Kind::Flag,
         Kind::Trigger,
     ];
+    const ROUTE_REQUIREMENTS: &[Kind] = &[Kind::Entity, Kind::Flag, Kind::Trigger];
     const CONTENT_SOURCES: &[Kind] = &[Kind::Setting, Kind::Character, Kind::Entity, Kind::Event];
     const FACT_TOPICS: &[Kind] = &[
         Kind::Setting,
@@ -4338,7 +3916,7 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
         _ if is_character_testimony_list_pointer(pointer, "requires") => Some(FACT_REQUIREMENTS),
         _ if is_character_testimony_list_pointer(pointer, "reveals") => Some(FACTS),
         _ if is_fact_association_pointer(pointer) => Some(FACTS),
-        _ if parent == "requires" && pointer.contains("/routes/") => Some(ENTITIES),
+        _ if parent == "requires" && pointer.contains("/routes/") => Some(ROUTE_REQUIREMENTS),
         _ if parent == "requires" && pointer.contains("/clues/") => Some(CLUES),
         _ if parent == "requires" && pointer.contains("/deductions/") => Some(DEDUCTIONS),
         _ if parent == "entry_settings" || parent == "exit_settings" => Some(SETTINGS),
@@ -4577,18 +4155,18 @@ fn reachable(graph: &BTreeMap<String, Vec<String>>, starts: &[String]) -> HashSe
     visited
 }
 
-fn command_parameter_types_by_name(command: &Item) -> BTreeMap<String, CommandParameterType> {
+fn command_parameter_types(command: &Item) -> Vec<Option<CommandParameterType>> {
     command
         .mapping
         .get(Value::String("parameters".to_string()))
         .and_then(Value::as_sequence)
         .into_iter()
         .flatten()
-        .filter_map(Value::as_mapping)
-        .filter_map(|parameter| {
-            let name = string_field(parameter, "name")?;
-            let kind = string_field(parameter, "type").and_then(CommandParameterType::parse)?;
-            Some((name.to_string(), kind))
+        .map(|parameter| {
+            parameter
+                .as_mapping()
+                .and_then(|parameter| string_field(parameter, "type"))
+                .and_then(CommandParameterType::parse)
         })
         .collect()
 }
