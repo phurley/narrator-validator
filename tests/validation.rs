@@ -326,7 +326,7 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_2_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_2_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "0.15.0");
+    assert_eq!(report.validator_version, "0.16.0");
     assert_eq!(report.format_version, Some(2));
     assert!(report.diagnostics.is_empty());
 }
@@ -1602,6 +1602,69 @@ fn validates_runtime_command_signatures_and_unique_parameter_names() {
         "    description: Learn that the knife is present.\n    parameters:\n      - name: target\n        type: entity\n        required: true\n    effects:",
     ));
     assert!(reserved.contains(&"command.runtime_signature".to_string()));
+}
+
+#[test]
+fn take_and_drop_require_one_required_entity_parameter() {
+    for command in ["command.take", "command.drop"] {
+        let accepted = report(VALID_FORMAT_2_STORY.replace(
+            "commands:\n",
+            &format!(
+                "commands:\n  - id: {command}\n    name: Inventory command\n    parameters:\n      - name: item\n        type: entity\n        required: true\n"
+            ),
+        ));
+        assert!(accepted.valid, "{command}: {:#?}", accepted.diagnostics);
+
+        for (case, parameters, pointer) in [
+            ("zero", "", "/commands/0/parameters"),
+            (
+                "optional",
+                "    parameters:\n      - name: item\n        type: entity\n        required: false\n",
+                "/commands/0/parameters/0/required",
+            ),
+            (
+                "multiple",
+                "    parameters:\n      - name: item\n        type: entity\n        required: true\n      - name: other\n        type: entity\n        required: true\n",
+                "/commands/0/parameters/1",
+            ),
+            (
+                "wrong kind",
+                "    parameters:\n      - name: item\n        type: setting\n        required: true\n",
+                "/commands/0/parameters/0/type",
+            ),
+        ] {
+            let report = report(VALID_FORMAT_2_STORY.replace(
+                "commands:\n",
+                &format!(
+                    "commands:\n  - id: {command}\n    name: Inventory command\n{parameters}"
+                ),
+            ));
+            let diagnostic = report
+                .diagnostics
+                .iter()
+                .find(|diagnostic| {
+                    diagnostic.code == "command.runtime_signature"
+                        && diagnostic.subject_id.as_deref() == Some(command)
+                })
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{command} {case} missing runtime signature: {:#?}",
+                        report.diagnostics
+                    )
+                });
+            assert!(!report.valid, "{command} {case}");
+            assert_eq!(
+                diagnostic.pointer.as_deref(),
+                Some(pointer),
+                "{command} {case}"
+            );
+            assert_eq!(
+                diagnostic.message,
+                format!("`{command}` must declare exactly one required entity parameter"),
+                "{command} {case}"
+            );
+        }
+    }
 }
 
 #[test]
