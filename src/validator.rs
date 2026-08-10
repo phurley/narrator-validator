@@ -2691,6 +2691,10 @@ impl<'a> Validator<'a> {
         command: &Item,
         parameter_types: &[Option<CommandParameterType>],
     ) {
+        if matches!(command.id.as_str(), "command.take" | "command.drop") {
+            self.validate_inventory_command_signature(command, parameter_types);
+            return;
+        }
         let known = parameter_types
             .iter()
             .flatten()
@@ -2699,7 +2703,6 @@ impl<'a> Validator<'a> {
         let valid = match command.id.as_str() {
             "command.claim" | "command.deduce" => known.is_empty(),
             "command.move" => known == [CommandParameterType::Setting],
-            "command.take" => known == [CommandParameterType::Entity],
             "command.solve" => {
                 known
                     == [
@@ -2720,9 +2723,6 @@ impl<'a> Validator<'a> {
                     "command.move" => {
                         "`command.move` must declare exactly one setting parameter".to_string()
                     }
-                    "command.take" => {
-                        "`command.take` must declare exactly one entity parameter".to_string()
-                    }
                     "command.solve" => {
                         "`command.solve` must declare character then deduction parameters"
                             .to_string()
@@ -2735,6 +2735,56 @@ impl<'a> Validator<'a> {
                 Some(command.id.clone()),
             );
         }
+    }
+
+    fn validate_inventory_command_signature(
+        &mut self,
+        command: &Item,
+        parameter_types: &[Option<CommandParameterType>],
+    ) {
+        let parameters_pointer = format!("{}/parameters", command.pointer);
+        let parameters = command
+            .mapping
+            .get(Value::String("parameters".to_string()))
+            .and_then(Value::as_sequence);
+        let Some([parameter]) = parameters.map(Vec::as_slice) else {
+            let pointer = parameters
+                .filter(|parameters| parameters.len() > 1)
+                .map_or(parameters_pointer.clone(), |parameters| {
+                    format!("{parameters_pointer}/{}", parameters.len() - 1)
+                });
+            self.push_inventory_signature_error(command, pointer);
+            return;
+        };
+        if parameter_types != [Some(CommandParameterType::Entity)] {
+            self.push_inventory_signature_error(command, format!("{parameters_pointer}/0/type"));
+            return;
+        }
+        if parameter
+            .as_mapping()
+            .and_then(|parameter| bool_field(parameter, "required"))
+            != Some(true)
+        {
+            self.push_inventory_signature_error(
+                command,
+                format!("{parameters_pointer}/0/required"),
+            );
+        }
+    }
+
+    fn push_inventory_signature_error(&mut self, command: &Item, pointer: String) {
+        self.push(
+            Severity::Error,
+            "command.runtime_signature",
+            format!(
+                "`{}` must declare exactly one required entity parameter",
+                command.id
+            ),
+            &command.path,
+            Some(pointer),
+            None,
+            Some(command.id.clone()),
+        );
     }
 
     fn validate_command_effects(
