@@ -3220,10 +3220,9 @@ impl<'a> Validator<'a> {
         _fact_claims_enabled: bool,
     ) {
         for trigger in triggers {
-            let parameter_types = string_field(&trigger.mapping, "command")
-                .and_then(|command_id| commands.iter().find(|command| command.id == command_id))
-                .map(command_parameter_types)
-                .unwrap_or_default();
+            let command = string_field(&trigger.mapping, "command")
+                .and_then(|command_id| commands.iter().find(|command| command.id == command_id));
+            let parameter_types = command.map(command_parameter_types).unwrap_or_default();
             if !string_field(&trigger.mapping, "command")
                 .is_some_and(|command| !command.trim().is_empty())
             {
@@ -3270,7 +3269,116 @@ impl<'a> Validator<'a> {
             self.validate_trigger_location(trigger);
             self.validate_trigger_gate_list(trigger, "any_of");
             self.validate_trigger_gate_list(trigger, "all_of");
+            self.validate_trigger_parameters(trigger, command);
             self.validate_world_effects(trigger, &parameter_types);
+        }
+    }
+
+    fn validate_trigger_parameters(&mut self, trigger: &Item, command: Option<&Item>) {
+        let Some(value) = trigger.mapping.get(Value::String("parameters".to_string())) else {
+            return;
+        };
+        let pointer = format!("{}/parameters", trigger.pointer);
+        let Some(bindings) = value.as_mapping() else {
+            self.push(
+                Severity::Error,
+                "trigger.parameters_type",
+                "trigger `parameters` must be a mapping from command parameter names to authored IDs"
+                    .to_string(),
+                &trigger.path,
+                Some(pointer),
+                None,
+                Some(trigger.id.clone()),
+            );
+            return;
+        };
+        let parameters = command
+            .and_then(|command| {
+                command
+                    .mapping
+                    .get(Value::String("parameters".to_string()))
+                    .and_then(Value::as_sequence)
+            })
+            .into_iter()
+            .flatten()
+            .filter_map(|parameter| {
+                let parameter = parameter.as_mapping()?;
+                Some((
+                    string_field(parameter, "name")?.to_string(),
+                    CommandParameterType::parse(string_field(parameter, "type")?)?,
+                ))
+            })
+            .collect::<BTreeMap<_, _>>();
+
+        for (raw_name, raw_reference) in bindings {
+            let Some(name) = raw_name.as_str().filter(|name| !name.trim().is_empty()) else {
+                self.push(
+                    Severity::Error,
+                    "trigger.parameter_name",
+                    "trigger parameter binding names must be non-empty strings".to_string(),
+                    &trigger.path,
+                    Some(pointer.clone()),
+                    None,
+                    Some(trigger.id.clone()),
+                );
+                continue;
+            };
+            let binding_pointer = format!("{pointer}/{}", escape_pointer(name));
+            let Some(expected) = parameters.get(name).copied() else {
+                self.push(
+                    Severity::Error,
+                    "trigger.parameter_unknown",
+                    format!(
+                        "`{name}` is not a parameter of `{}`",
+                        string_field(&trigger.mapping, "command").unwrap_or("the trigger command")
+                    ),
+                    &trigger.path,
+                    Some(binding_pointer),
+                    None,
+                    Some(trigger.id.clone()),
+                );
+                continue;
+            };
+            let Some(reference) = raw_reference
+                .as_str()
+                .filter(|reference| !reference.trim().is_empty())
+            else {
+                self.push(
+                    Severity::Error,
+                    "trigger.parameter_reference",
+                    format!("trigger parameter `{name}` must bind to a non-empty authored ID"),
+                    &trigger.path,
+                    Some(binding_pointer),
+                    None,
+                    Some(trigger.id.clone()),
+                );
+                continue;
+            };
+            match self.definitions.get(reference) {
+                Some(definition) if definition.kind == expected.kind() => {}
+                Some(definition) => self.push(
+                    Severity::Error,
+                    "reference.wrong_type",
+                    format!(
+                        "`{reference}` refers to a {}; parameter `{name}` expects {}",
+                        definition.kind.name(),
+                        expected.name()
+                    ),
+                    &trigger.path,
+                    Some(binding_pointer),
+                    locate_scalar(&trigger.source, reference),
+                    Some(reference.to_string()),
+                ),
+                None => self.push(
+                    Severity::Error,
+                    "reference.unknown",
+                    format!("reference `{reference}` is not defined"),
+                    &trigger.path,
+                    Some(binding_pointer),
+                    locate_scalar(&trigger.source, reference),
+                    Some(reference.to_string()),
+                ),
+            }
         }
     }
 

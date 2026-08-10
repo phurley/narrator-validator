@@ -322,7 +322,7 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_2_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_2_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "0.17.0");
+    assert_eq!(report.validator_version, "0.18.0");
     assert_eq!(report.format_version, Some(2));
     assert!(report.diagnostics.is_empty());
 }
@@ -1597,6 +1597,49 @@ fn validates_command_and_trigger_shapes() {
     assert!(result.contains(&"trigger.once_type".to_string()));
     assert!(result.contains(&"trigger.conditions_removed".to_string()));
     assert!(result.contains(&"command.effects_type".to_string()));
+}
+
+#[test]
+fn validates_typed_trigger_parameter_bindings() {
+    let valid = VALID_STORY.replace(
+        "    command: command.examine\n    once: true",
+        "    command: command.examine\n    parameters:\n      target: entity.knife\n    once: true",
+    );
+    let result = report(valid.clone());
+    assert!(result.valid, "{:#?}", result.diagnostics);
+
+    let cases = [
+        (
+            valid.replace(
+                "    parameters:\n      target: entity.knife",
+                "    parameters: []",
+            ),
+            "trigger.parameters_type",
+        ),
+        (
+            valid.replace("target: entity.knife", "missing: entity.knife"),
+            "trigger.parameter_unknown",
+        ),
+        (
+            valid.replace("target: entity.knife", "target: 42"),
+            "trigger.parameter_reference",
+        ),
+        (
+            valid.replace("target: entity.knife", "target: character.culprit"),
+            "reference.wrong_type",
+        ),
+        (
+            valid.replace("target: entity.knife", "target: entity.missing"),
+            "reference.unknown",
+        ),
+    ];
+    for (source, expected) in cases {
+        let result = codes(source);
+        assert!(
+            result.contains(&expected.to_string()),
+            "{expected}: {result:?}"
+        );
+    }
 }
 
 #[test]
