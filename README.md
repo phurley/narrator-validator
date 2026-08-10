@@ -188,9 +188,8 @@ other verb-shaped booleans.
 ## Actions and effects
 
 Actions remain in the `commands` section. Each action has an ID, name, optional
-description, zero or more typed parameters, and zero or more effects. The old
-`aliases` field is invalid, and each parameter's singular `type` replaces the
-old `accepts` list:
+description, zero or more semantic parameters, and zero or more effects. Each
+parameter declares its accepted definition kinds and selection cardinality:
 
 ```yaml
 commands:
@@ -199,11 +198,13 @@ commands:
     description: Enter a selected room with a companion.
     parameters:
       - name: destination
-        type: setting
-        required: true
+        types: [setting]
+        min: 1
+        max: 1
       - name: companion
-        type: character
-        required: false
+        types: [character]
+        min: 0
+        max: 1
     effects:
       - operation: move
         subjects: [player, param2]
@@ -211,9 +212,15 @@ commands:
 ```
 
 Parameter types are `character`, `entity`, `setting`, `deduction`, and `event`.
+`types` is ordered, non-empty, and unique. Cardinality must satisfy
+`0 <= min <= max` and `max >= 1`. A parameter can therefore model one semantic
+role that accepts alternative kinds or multiple selected cards without merging
+distinct roles. The legacy singular `type`/`required` shape remains readable
+for existing stories, while maintained stories use `types`/`min`/`max`.
 Within an effect, `param1`, `param2`, and so on refer to parameters by their
-one-based position. A parameter reference is valid only where its declared
-type matches the operand. Authored IDs are also checked for existence and kind.
+one-based position. An effect parameter reference is valid only for a
+single-card parameter whose accepted kinds all match the operand. Authored IDs
+are also checked for existence and kind.
 
 Supported effects have these shapes:
 

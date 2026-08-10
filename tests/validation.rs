@@ -322,7 +322,7 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_2_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_2_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "0.18.0");
+    assert_eq!(report.validator_version, "0.19.0");
     assert_eq!(report.format_version, Some(2));
     assert!(report.diagnostics.is_empty());
 }
@@ -1653,6 +1653,47 @@ fn validates_runtime_command_signatures_and_unique_parameter_names() {
         "    description: Learn that the knife is present.\n    parameters:\n      - name: target\n        type: entity\n        required: true\n    effects:",
     ));
     assert!(reserved.contains(&"command.runtime_signature".to_string()));
+}
+
+#[test]
+fn validates_union_parameter_kinds_and_cardinality() {
+    let canonical = VALID_STORY.replace(
+        "        type: entity\n        required: true",
+        "        types: [entity, character, setting]\n        min: 1\n        max: 3",
+    );
+    let accepted = report(canonical.clone());
+    assert!(accepted.valid, "{:#?}", accepted.diagnostics);
+
+    for (source, code) in [
+        (
+            canonical.replace(
+                "types: [entity, character, setting]",
+                "types: [entity, entity]",
+            ),
+            "command.parameter_kind_duplicate",
+        ),
+        (
+            canonical.replace("types: [entity, character, setting]", "types: []"),
+            "command.parameter_types_empty",
+        ),
+        (
+            canonical.replace("min: 1\n        max: 3", "min: 4\n        max: 3"),
+            "command.parameter_cardinality",
+        ),
+        (
+            canonical.replace("max: 3", "max: nope"),
+            "command.parameter_cardinality_type",
+        ),
+        (
+            canonical.replace(
+                "types: [entity, character, setting]",
+                "type: entity\n        types: [entity]",
+            ),
+            "command.parameter_kind",
+        ),
+    ] {
+        assert!(codes(source).contains(&code.to_string()), "missing {code}");
+    }
 }
 
 #[test]

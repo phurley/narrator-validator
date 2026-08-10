@@ -65,13 +65,20 @@ enum Kind {
     Testimony,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum CommandParameterType {
     Character,
     Entity,
     Setting,
     Deduction,
     Event,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommandParameterShape {
+    types: Vec<CommandParameterType>,
+    min: usize,
+    max: usize,
 }
 
 impl CommandParameterType {
@@ -2548,7 +2555,10 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn validate_command_parameters(&mut self, command: &Item) -> Vec<Option<CommandParameterType>> {
+    fn validate_command_parameters(
+        &mut self,
+        command: &Item,
+    ) -> Vec<Option<CommandParameterShape>> {
         let Some(parameters) = command.mapping.get(Value::String("parameters".to_string())) else {
             return Vec::new();
         };
@@ -2619,9 +2629,7 @@ impl<'a> Validator<'a> {
                         Some(command.id.clone()),
                     );
                 }
-                if parameter
-                    .contains_key(Value::String("accepts".to_string()))
-                {
+                if parameter.contains_key(Value::String("accepts".to_string())) {
                     self.push(
                         Severity::Error,
                         "command.parameter_accepts_removed",
@@ -2633,15 +2641,82 @@ impl<'a> Validator<'a> {
                         Some(command.id.clone()),
                     );
                 }
-                let parameter_type = string_field(parameter, "type")
+                let legacy_type = string_field(parameter, "type")
                     .and_then(CommandParameterType::parse);
-                if parameter_type.is_none() {
+                let types_value = parameter.get(Value::String("types".to_string()));
+                if legacy_type.is_some() && types_value.is_some() {
                     self.push(
                         Severity::Error,
                         "command.parameter_kind",
-                        "command parameter `type` must be `character`, `entity`, `setting`, `deduction`, or `event`".to_string(),
+                        "command parameter must use either legacy `type` or canonical `types`, not both".to_string(),
                         &command.path,
-                        Some(format!("{pointer}/type")),
+                        Some(format!("{pointer}/types")),
+                        None,
+                        Some(command.id.clone()),
+                    );
+                }
+                let mut types = legacy_type.into_iter().collect::<Vec<_>>();
+                if let Some(types_value) = types_value {
+                    let Some(values) = types_value.as_sequence() else {
+                        self.push(
+                            Severity::Error,
+                            "command.parameter_types_type",
+                            "command parameter `types` must be a non-empty sequence".to_string(),
+                            &command.path,
+                            Some(format!("{pointer}/types")),
+                            None,
+                            Some(command.id.clone()),
+                        );
+                        return None;
+                    };
+                    let mut seen_types = HashSet::new();
+                    for (type_index, value) in values.iter().enumerate() {
+                        let parsed = value.as_str().and_then(CommandParameterType::parse);
+                        let Some(parsed) = parsed else {
+                            self.push(
+                                Severity::Error,
+                                "command.parameter_kind",
+                                "command parameter kinds must be `character`, `entity`, `setting`, `deduction`, or `event`".to_string(),
+                                &command.path,
+                                Some(format!("{pointer}/types/{type_index}")),
+                                None,
+                                Some(command.id.clone()),
+                            );
+                            continue;
+                        };
+                        if !seen_types.insert(parsed) {
+                            self.push(
+                                Severity::Error,
+                                "command.parameter_kind_duplicate",
+                                "command parameter `types` must not contain duplicate kinds".to_string(),
+                                &command.path,
+                                Some(format!("{pointer}/types/{type_index}")),
+                                None,
+                                Some(command.id.clone()),
+                            );
+                            continue;
+                        }
+                        types.push(parsed);
+                    }
+                    if values.is_empty() {
+                        self.push(
+                            Severity::Error,
+                            "command.parameter_types_empty",
+                            "command parameter `types` must contain at least one kind".to_string(),
+                            &command.path,
+                            Some(format!("{pointer}/types")),
+                            None,
+                            Some(command.id.clone()),
+                        );
+                    }
+                }
+                if types.is_empty() {
+                    self.push(
+                        Severity::Error,
+                        "command.parameter_kind",
+                        "command parameter must declare `types`".to_string(),
+                        &command.path,
+                        Some(format!("{pointer}/types")),
                         None,
                         Some(command.id.clone()),
                     );
@@ -2660,7 +2735,55 @@ impl<'a> Validator<'a> {
                         Some(command.id.clone()),
                     );
                 }
-                parameter_type
+                let required = bool_field(parameter, "required").unwrap_or(false);
+                let min = integer_field(parameter, "min")
+                    .and_then(|value| usize::try_from(value).ok())
+                    .unwrap_or(usize::from(required));
+                let max = integer_field(parameter, "max")
+                    .and_then(|value| usize::try_from(value).ok())
+                    .unwrap_or(1);
+                for field in ["min", "max"] {
+                    if parameter
+                        .get(Value::String(field.to_string()))
+                        .is_some_and(|value| value.as_i64().is_none())
+                    {
+                        self.push(
+                            Severity::Error,
+                            "command.parameter_cardinality_type",
+                            format!("command parameter `{field}` must be a non-negative integer"),
+                            &command.path,
+                            Some(format!("{pointer}/{field}")),
+                            None,
+                            Some(command.id.clone()),
+                        );
+                    }
+                }
+                if max == 0 || min > max {
+                    self.push(
+                        Severity::Error,
+                        "command.parameter_cardinality",
+                        "command parameter cardinality must satisfy 0 <= min <= max and max >= 1".to_string(),
+                        &command.path,
+                        Some(format!("{pointer}/max")),
+                        None,
+                        Some(command.id.clone()),
+                    );
+                }
+                if parameter.contains_key(Value::String("required".to_string()))
+                    && (parameter.contains_key(Value::String("min".to_string()))
+                        || parameter.contains_key(Value::String("max".to_string())))
+                {
+                    self.push(
+                        Severity::Error,
+                        "command.parameter_cardinality_legacy",
+                        "legacy `required` cannot be combined with canonical `min` or `max`".to_string(),
+                        &command.path,
+                        Some(format!("{pointer}/required")),
+                        None,
+                        Some(command.id.clone()),
+                    );
+                }
+                (!types.is_empty()).then_some(CommandParameterShape { types, min, max })
             })
             .collect()
     }
@@ -2668,26 +2791,22 @@ impl<'a> Validator<'a> {
     fn validate_runtime_command_signature(
         &mut self,
         command: &Item,
-        parameter_types: &[Option<CommandParameterType>],
+        parameter_types: &[Option<CommandParameterShape>],
     ) {
         if matches!(command.id.as_str(), "command.take" | "command.drop") {
             self.validate_inventory_command_signature(command, parameter_types);
             return;
         }
-        let known = parameter_types
-            .iter()
-            .flatten()
-            .copied()
-            .collect::<Vec<_>>();
+        let known = parameter_types.iter().flatten().collect::<Vec<_>>();
         let valid = match command.id.as_str() {
             "command.claim" | "command.deduce" => known.is_empty(),
-            "command.move" => known == [CommandParameterType::Setting],
+            "command.move" => {
+                matches!(known.as_slice(), [shape] if shape.types == [CommandParameterType::Setting] && shape.min == 1 && shape.max == 1)
+            }
             "command.solve" => {
-                known
-                    == [
-                        CommandParameterType::Character,
-                        CommandParameterType::Deduction,
-                    ]
+                matches!(known.as_slice(), [suspect, theory]
+                    if suspect.types == [CommandParameterType::Character] && suspect.min == 1 && suspect.max == 1
+                        && theory.types == [CommandParameterType::Deduction] && theory.min == 1 && theory.max == 1)
             }
             _ => true,
         };
@@ -2719,7 +2838,7 @@ impl<'a> Validator<'a> {
     fn validate_inventory_command_signature(
         &mut self,
         command: &Item,
-        parameter_types: &[Option<CommandParameterType>],
+        parameter_types: &[Option<CommandParameterShape>],
     ) {
         let parameters_pointer = format!("{}/parameters", command.pointer);
         let parameters = command
@@ -2735,19 +2854,31 @@ impl<'a> Validator<'a> {
             self.push_inventory_signature_error(command, pointer);
             return;
         };
-        if parameter_types != [Some(CommandParameterType::Entity)] {
-            self.push_inventory_signature_error(command, format!("{parameters_pointer}/0/type"));
-            return;
-        }
-        if parameter
-            .as_mapping()
-            .and_then(|parameter| bool_field(parameter, "required"))
-            != Some(true)
+        if !matches!(parameter_types, [Some(shape)] if shape.types == [CommandParameterType::Entity] && shape.min == 1 && shape.max == 1)
         {
-            self.push_inventory_signature_error(
-                command,
-                format!("{parameters_pointer}/0/required"),
-            );
+            let field = parameter
+                .as_mapping()
+                .map(|mapping| {
+                    if mapping.contains_key(Value::String("types".to_string())) {
+                        if mapping
+                            .get(Value::String("types".to_string()))
+                            .and_then(Value::as_sequence)
+                            .is_some_and(|types| {
+                                types.len() == 1 && types[0].as_str() == Some("entity")
+                            })
+                        {
+                            "min"
+                        } else {
+                            "types"
+                        }
+                    } else if string_field(mapping, "type") == Some("entity") {
+                        "required"
+                    } else {
+                        "type"
+                    }
+                })
+                .unwrap_or("types");
+            self.push_inventory_signature_error(command, format!("{parameters_pointer}/0/{field}"));
         }
     }
 
@@ -2769,7 +2900,7 @@ impl<'a> Validator<'a> {
     fn validate_world_effects(
         &mut self,
         command: &Item,
-        parameter_types: &[Option<CommandParameterType>],
+        parameter_types: &[Option<CommandParameterShape>],
     ) {
         let Some(effects) = command.mapping.get(Value::String("effects".to_string())) else {
             return;
@@ -3081,7 +3212,7 @@ impl<'a> Validator<'a> {
         pointer: &str,
         field: &str,
         expected: &[Kind],
-        parameter_types: &[Option<CommandParameterType>],
+        parameter_types: &[Option<CommandParameterShape>],
     ) {
         let value = effect
             .get(Value::String(field.to_string()))
@@ -3102,7 +3233,7 @@ impl<'a> Validator<'a> {
         value: &Value,
         pointer: &str,
         expected: &[Kind],
-        parameter_types: &[Option<CommandParameterType>],
+        parameter_types: &[Option<CommandParameterShape>],
         allow_player: bool,
     ) {
         let Some(reference) = value
@@ -3133,7 +3264,7 @@ impl<'a> Validator<'a> {
 
         match command_parameter_reference(reference) {
             Ok(Some(index)) => {
-                let Some(parameter_type) = parameter_types.get(index).copied().flatten() else {
+                let Some(parameter) = parameter_types.get(index).and_then(Option::as_ref) else {
                     self.push(
                         Severity::Error,
                         "command.effect_parameter_unknown",
@@ -3145,13 +3276,25 @@ impl<'a> Validator<'a> {
                     );
                     return;
                 };
-                if !expected.contains(&parameter_type.kind()) {
+                if parameter.max != 1
+                    || !parameter
+                        .types
+                        .iter()
+                        .all(|parameter_type| expected.contains(&parameter_type.kind()))
+                {
                     self.push(
                         Severity::Error,
                         "command.effect_parameter_type",
                         format!(
-                            "`{reference}` is a {} parameter; expected {}",
-                            parameter_type.name(),
+                            "`{reference}` accepts {} with cardinality {}..{}; expected one {}",
+                            parameter
+                                .types
+                                .iter()
+                                .map(|parameter_type| parameter_type.name())
+                                .collect::<Vec<_>>()
+                                .join(" or "),
+                            parameter.min,
+                            parameter.max,
                             command_effect_expected_names(expected, allow_player)
                         ),
                         &command.path,
@@ -4263,7 +4406,7 @@ fn reachable(graph: &BTreeMap<String, Vec<String>>, starts: &[String]) -> HashSe
     visited
 }
 
-fn command_parameter_types(command: &Item) -> Vec<Option<CommandParameterType>> {
+fn command_parameter_types(command: &Item) -> Vec<Option<CommandParameterShape>> {
     command
         .mapping
         .get(Value::String("parameters".to_string()))
@@ -4271,10 +4414,33 @@ fn command_parameter_types(command: &Item) -> Vec<Option<CommandParameterType>> 
         .into_iter()
         .flatten()
         .map(|parameter| {
-            parameter
-                .as_mapping()
-                .and_then(|parameter| string_field(parameter, "type"))
-                .and_then(CommandParameterType::parse)
+            let parameter = parameter.as_mapping()?;
+            let types = if let Some(types) = parameter
+                .get(Value::String("types".to_string()))
+                .and_then(Value::as_sequence)
+            {
+                types
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .filter_map(CommandParameterType::parse)
+                    .collect::<Vec<_>>()
+            } else {
+                string_field(parameter, "type")
+                    .and_then(CommandParameterType::parse)
+                    .into_iter()
+                    .collect()
+            };
+            (!types.is_empty()).then(|| CommandParameterShape {
+                types,
+                min: integer_field(parameter, "min")
+                    .and_then(|value| usize::try_from(value).ok())
+                    .unwrap_or_else(|| {
+                        usize::from(bool_field(parameter, "required").unwrap_or(false))
+                    }),
+                max: integer_field(parameter, "max")
+                    .and_then(|value| usize::try_from(value).ok())
+                    .unwrap_or(1),
+            })
         })
         .collect()
 }
