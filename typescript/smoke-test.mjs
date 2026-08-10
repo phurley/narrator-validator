@@ -24,4 +24,19 @@ assert.ok(
   ),
 )
 
+const entityReport = await validateRepository([
+  {
+    path: 'entities.yaml',
+    source:
+      'entities:\n  - id: entity.pistol\n    physical:\n      portable: sometimes\n',
+  },
+])
+assert.ok(
+  entityReport.diagnostics.some(
+    (diagnostic) =>
+      diagnostic.code === 'entity.portable_type' &&
+      diagnostic.pointer === '/entities/0/physical/portable',
+  ),
+)
+
 console.log('browser package smoke test passed')

@@ -62,6 +62,7 @@ enum Kind {
     Flag,
     Command,
     Trigger,
+    Testimony,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -121,6 +122,7 @@ impl Kind {
             Self::Flag => "flag",
             Self::Command => "command",
             Self::Trigger => "trigger",
+            Self::Testimony => "testimony",
         }
     }
 
@@ -238,6 +240,7 @@ impl<'a> Validator<'a> {
         } else {
             Vec::new()
         };
+        self.nested_testimonies(&characters);
         let facts_enabled = !facts.is_empty();
 
         self.validate_solution();
@@ -246,6 +249,7 @@ impl<'a> Validator<'a> {
         self.validate_event_values(&events);
         self.validate_route_values(&routes);
         self.validate_character_values(&characters, facts_enabled);
+        self.validate_entity_values(&entities);
         if !fact_claims_enabled {
             self.validate_clue_values(&clues, facts_enabled);
         }
@@ -268,7 +272,8 @@ impl<'a> Validator<'a> {
         }
         self.validate_deduction_values(&deductions, fact_claims_enabled);
         self.validate_command_values(&commands);
-        self.validate_trigger_values(&triggers, fact_claims_enabled);
+        self.validate_testimony_question_signature(&characters, &commands);
+        self.validate_trigger_values(&triggers, &commands, fact_claims_enabled);
         if !fact_claims_enabled {
             self.validate_fact_reachability(
                 &facts,
@@ -871,6 +876,108 @@ impl<'a> Validator<'a> {
         result
     }
 
+    fn nested_testimonies(&mut self, characters: &[Item]) {
+        for character in characters {
+            let Some(value) = character
+                .mapping
+                .get(Value::String("testimony".to_string()))
+            else {
+                continue;
+            };
+            let collection_pointer = format!("{}/testimony", character.pointer);
+            let Some(values) = value.as_sequence() else {
+                self.push(
+                    Severity::Error,
+                    "character.testimony_type",
+                    "character `testimony` must be a sequence of player-safe testimony mappings"
+                        .to_string(),
+                    &character.path,
+                    Some(collection_pointer),
+                    None,
+                    Some(character.id.clone()),
+                );
+                continue;
+            };
+            for (index, value) in values.iter().enumerate() {
+                let pointer = format!("{}/testimony/{index}", character.pointer);
+                let Some(mapping) = value.as_mapping().cloned() else {
+                    self.push(
+                        Severity::Error,
+                        "character.testimony_entry_type",
+                        "character testimony entries must be mappings".to_string(),
+                        &character.path,
+                        Some(pointer),
+                        None,
+                        Some(character.id.clone()),
+                    );
+                    continue;
+                };
+                let id_pointer = format!("{pointer}/id");
+                let Some(id) = string_field(&mapping, "id").map(str::to_string) else {
+                    self.push(
+                        Severity::Error,
+                        "id.missing",
+                        "character testimony is missing a string `id`".to_string(),
+                        &character.path,
+                        Some(id_pointer),
+                        None,
+                        Some(character.id.clone()),
+                    );
+                    continue;
+                };
+                let range = locate_id(&character.source, &id);
+                if !valid_id(&id) {
+                    self.push(
+                        Severity::Error,
+                        "id.invalid",
+                        format!(
+                            "`{id}` must contain a lowercase kind prefix, a dot, and a lowercase snake-case name"
+                        ),
+                        &character.path,
+                        Some(id_pointer.clone()),
+                        range,
+                        Some(id.clone()),
+                    );
+                } else if id_prefix(&id) != Some(Kind::Testimony.prefix()) {
+                    self.push(
+                        Severity::Error,
+                        "id.wrong_prefix",
+                        format!("testimony ID `{id}` must start with `testimony.`"),
+                        &character.path,
+                        Some(id_pointer.clone()),
+                        range,
+                        Some(id.clone()),
+                    );
+                }
+                let definition = Definition {
+                    kind: Kind::Testimony,
+                    path: character.path.clone(),
+                    pointer: pointer.clone(),
+                    range,
+                };
+                if let Some(first) = self.definitions.get(&id).cloned() {
+                    self.diagnostics.push(Diagnostic {
+                        severity: Severity::Error,
+                        code: "id.duplicate".to_string(),
+                        message: format!("ID `{id}` is defined more than once"),
+                        path: character.path.clone(),
+                        pointer: Some(id_pointer),
+                        range,
+                        subject_id: Some(id.clone()),
+                        related: vec![RelatedLocation {
+                            message: "first defined here".to_string(),
+                            path: first.path,
+                            pointer: Some(format!("{}/id", first.pointer)),
+                            range: first.range,
+                        }],
+                    });
+                } else {
+                    self.definitions.insert(id, definition);
+                }
+            }
+        }
+    }
+
     fn validate_case(&mut self, cases: &[Item]) {
         if cases.len() != 1 {
             return;
@@ -938,6 +1045,90 @@ impl<'a> Validator<'a> {
                         Some(case.id.clone()),
                     );
                 }
+            }
+        }
+        if case
+            .mapping
+            .get(Value::String("genre".to_string()))
+            .is_some_and(|value| !value.as_str().is_some_and(|genre| !genre.trim().is_empty()))
+        {
+            self.push(
+                Severity::Error,
+                "case.genre",
+                "`case.genre` must be a non-empty string".to_string(),
+                &case.path,
+                Some(format!("{}/genre", case.pointer)),
+                None,
+                Some(case.id.clone()),
+            );
+        }
+        if let Some(tone) = case.mapping.get(Value::String("tone".to_string())) {
+            if let Some(entries) = tone.as_sequence() {
+                let mut seen = HashSet::new();
+                for (index, entry) in entries.iter().enumerate() {
+                    let pointer = format!("{}/tone/{index}", case.pointer);
+                    let Some(value) = entry.as_str().filter(|value| !value.trim().is_empty())
+                    else {
+                        self.push(
+                            Severity::Error,
+                            "case.tone_entry",
+                            "`case.tone` entries must be non-empty strings".to_string(),
+                            &case.path,
+                            Some(pointer),
+                            None,
+                            Some(case.id.clone()),
+                        );
+                        continue;
+                    };
+                    if !seen.insert(value.trim()) {
+                        self.push(
+                            Severity::Error,
+                            "case.tone_duplicate",
+                            format!("`case.tone` entry `{}` occurs more than once", value.trim()),
+                            &case.path,
+                            Some(pointer),
+                            None,
+                            Some(case.id.clone()),
+                        );
+                    }
+                }
+            } else {
+                self.push(
+                    Severity::Error,
+                    "case.tone_type",
+                    "`case.tone` must be a sequence of unique non-empty strings".to_string(),
+                    &case.path,
+                    Some(format!("{}/tone", case.pointer)),
+                    None,
+                    Some(case.id.clone()),
+                );
+            }
+        }
+        if self.format_version == Some(2) {
+            match case
+                .mapping
+                .get(Value::String("initial_time".to_string()))
+            {
+                Some(Value::String(time)) if valid_time(time) => {}
+                Some(_) => self.push(
+                    Severity::Error,
+                    "case.initial_time",
+                    "`case.initial_time` must be a quoted 24-hour HH:MM value".to_string(),
+                    &case.path,
+                    Some(format!("{}/initial_time", case.pointer)),
+                    None,
+                    Some(case.id.clone()),
+                ),
+                None => self.push(
+                    Severity::Error,
+                    "case.initial_time_missing",
+                    "format 2 games require `case.initial_time` so runtime time effects are deterministic"
+                        .to_string(),
+                    &case.path,
+                    Some(format!("{}/initial_time", case.pointer)),
+                    None,
+                    Some(case.id.clone()),
+                ),
             }
         }
     }
@@ -1141,11 +1332,12 @@ impl<'a> Validator<'a> {
                 }
             }
             match integer_field(&route.mapping, "travel_minutes") {
-                Some(value) if value > 0 => {}
+                Some(value) if value > 0 && u32::try_from(value).is_ok() => {}
                 _ => self.push(
                     Severity::Error,
                     "route.invalid_travel_minutes",
-                    "`travel_minutes` must be a positive integer".to_string(),
+                    "`travel_minutes` must be a positive whole number supported by the runtime"
+                        .to_string(),
                     &route.path,
                     Some(format!("{}/travel_minutes", route.pointer)),
                     None,
@@ -1170,99 +1362,510 @@ impl<'a> Validator<'a> {
 
     fn validate_character_values(&mut self, characters: &[Item], facts_enabled: bool) {
         for character in characters {
-            let Some(knowledge) = character
+            self.validate_character_portrayal(character);
+            self.validate_character_testimony(character);
+
+            if let Some(knowledge) = character
                 .mapping
                 .get(Value::String("knowledge".to_string()))
+            {
+                let Some(knowledge) = knowledge.as_sequence() else {
+                    self.push(
+                        Severity::Error,
+                        "character.knowledge_type",
+                        "character `knowledge` must be a sequence".to_string(),
+                        &character.path,
+                        Some(format!("{}/knowledge", character.pointer)),
+                        None,
+                        Some(character.id.clone()),
+                    );
+                    continue;
+                };
+                for (index, entry) in knowledge.iter().enumerate() {
+                    let pointer = format!("{}/knowledge/{index}", character.pointer);
+                    let Some(entry) = entry.as_mapping() else {
+                        self.push(
+                            Severity::Error,
+                            "character.knowledge_entry_type",
+                            "character knowledge entries must be mappings".to_string(),
+                            &character.path,
+                            Some(pointer),
+                            None,
+                            Some(character.id.clone()),
+                        );
+                        continue;
+                    };
+                    let Some(fact) =
+                        string_field(entry, "fact").filter(|value| !value.trim().is_empty())
+                    else {
+                        self.push(
+                            Severity::Error,
+                            "character.knowledge_fact",
+                            "character knowledge `fact` must be a non-empty string".to_string(),
+                            &character.path,
+                            Some(format!("{pointer}/fact")),
+                            None,
+                            Some(character.id.clone()),
+                        );
+                        continue;
+                    };
+                    if facts_enabled {
+                        if !looks_like_id(fact) {
+                            self.push(
+                                Severity::Error,
+                                "character.knowledge_fact_reference",
+                                "character knowledge `fact` must be a fact ID when facts are authored"
+                                    .to_string(),
+                                &character.path,
+                                Some(format!("{pointer}/fact")),
+                                locate_scalar(&character.source, fact),
+                                Some(character.id.clone()),
+                            );
+                        } else if self
+                            .definitions
+                            .get(fact)
+                            .is_some_and(|definition| definition.kind != Kind::Fact)
+                        {
+                            self.push(
+                                Severity::Error,
+                                "reference.wrong_type",
+                                format!("`{fact}` does not refer to a fact"),
+                                &character.path,
+                                Some(format!("{pointer}/fact")),
+                                locate_scalar(&character.source, fact),
+                                Some(fact.to_string()),
+                            );
+                        }
+                    }
+                    if entry
+                        .get(Value::String("source".to_string()))
+                        .is_some_and(|source| {
+                            !source
+                                .as_str()
+                                .is_some_and(|source| !source.trim().is_empty())
+                        })
+                    {
+                        self.push(
+                            Severity::Error,
+                            "character.knowledge_source_type",
+                            "character knowledge `source` must be a non-empty ID when present"
+                                .to_string(),
+                            &character.path,
+                            Some(format!("{pointer}/source")),
+                            None,
+                            Some(character.id.clone()),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn validate_entity_values(&mut self, entities: &[Item]) {
+        for entity in entities {
+            for field in ["portable", "searchable", "investigatable", "takeable"] {
+                if entity
+                    .mapping
+                    .contains_key(Value::String(field.to_string()))
+                {
+                    self.push(
+                        Severity::Error,
+                        "entity.capability_field",
+                        format!(
+                            "entity `{field}` is not supported; portability belongs at `physical.portable`, while actions are determined by commands and state"
+                        ),
+                        &entity.path,
+                        Some(format!("{}/{}", entity.pointer, escape_pointer(field))),
+                        None,
+                        Some(entity.id.clone()),
+                    );
+                }
+            }
+
+            if let Some(initial) = entity.mapping.get(Value::String("initial".to_string())) {
+                let pointer = format!("{}/initial", entity.pointer);
+                let Some(initial) = initial.as_mapping() else {
+                    self.push(
+                        Severity::Error,
+                        "entity.initial_type",
+                        "entity `initial` must be a mapping".to_string(),
+                        &entity.path,
+                        Some(pointer),
+                        None,
+                        Some(entity.id.clone()),
+                    );
+                    continue;
+                };
+                if initial
+                    .get(Value::String("container".to_string()))
+                    .is_some_and(|container| {
+                        !container
+                            .as_str()
+                            .is_some_and(|container| !container.trim().is_empty())
+                    })
+                {
+                    self.push(
+                        Severity::Error,
+                        "entity.container_type",
+                        "entity `initial.container` must be a non-empty setting, character, or entity ID"
+                            .to_string(),
+                        &entity.path,
+                        Some(format!("{pointer}/container")),
+                        None,
+                        Some(entity.id.clone()),
+                    );
+                }
+            }
+
+            if let Some(physical) = entity.mapping.get(Value::String("physical".to_string())) {
+                let pointer = format!("{}/physical", entity.pointer);
+                let Some(physical) = physical.as_mapping() else {
+                    self.push(
+                        Severity::Error,
+                        "entity.physical_type",
+                        "entity `physical` must be a mapping".to_string(),
+                        &entity.path,
+                        Some(pointer),
+                        None,
+                        Some(entity.id.clone()),
+                    );
+                    continue;
+                };
+                for key in physical.keys() {
+                    match key.as_str() {
+                        Some("portable") => {}
+                        Some(field) => self.push(
+                            Severity::Error,
+                            "entity.physical_unknown_field",
+                            format!("`{field}` is not a supported entity physical field"),
+                            &entity.path,
+                            Some(format!("{pointer}/{}", escape_pointer(field))),
+                            None,
+                            Some(entity.id.clone()),
+                        ),
+                        None => self.push(
+                            Severity::Error,
+                            "entity.physical_field",
+                            "entity physical field names must be strings".to_string(),
+                            &entity.path,
+                            Some(pointer.clone()),
+                            None,
+                            Some(entity.id.clone()),
+                        ),
+                    }
+                }
+                if physical
+                    .get(Value::String("portable".to_string()))
+                    .is_some_and(|portable| portable.as_bool().is_none())
+                {
+                    self.push(
+                        Severity::Error,
+                        "entity.portable_type",
+                        "entity `physical.portable` must be a boolean".to_string(),
+                        &entity.path,
+                        Some(format!("{pointer}/portable")),
+                        None,
+                        Some(entity.id.clone()),
+                    );
+                }
+            }
+
+            let Some(visibility) = entity.mapping.get(Value::String("visibility".to_string()))
             else {
                 continue;
             };
-            let Some(knowledge) = knowledge.as_sequence() else {
+            let pointer = format!("{}/visibility", entity.pointer);
+            let Some(visibility) = visibility.as_mapping() else {
                 self.push(
                     Severity::Error,
-                    "character.knowledge_type",
-                    "character `knowledge` must be a sequence".to_string(),
+                    "entity.visibility_type",
+                    "entity `visibility` must be a mapping".to_string(),
+                    &entity.path,
+                    Some(pointer),
+                    None,
+                    Some(entity.id.clone()),
+                );
+                continue;
+            };
+            for key in visibility.keys() {
+                match key.as_str() {
+                    Some("requires") => {}
+                    Some(field) => self.push(
+                        Severity::Error,
+                        "entity.visibility_unknown_field",
+                        format!("`{field}` is not a supported entity visibility field"),
+                        &entity.path,
+                        Some(format!("{pointer}/{}", escape_pointer(field))),
+                        None,
+                        Some(entity.id.clone()),
+                    ),
+                    None => self.push(
+                        Severity::Error,
+                        "entity.visibility_field",
+                        "entity visibility field names must be strings".to_string(),
+                        &entity.path,
+                        Some(pointer.clone()),
+                        None,
+                        Some(entity.id.clone()),
+                    ),
+                }
+            }
+            let Some(requires) = visibility.get(Value::String("requires".to_string())) else {
+                continue;
+            };
+            let requires_pointer = format!("{pointer}/requires");
+            match requires {
+                Value::String(id) if !id.trim().is_empty() => {
+                    // Reference existence and persistence are checked centrally.
+                }
+                Value::Sequence(values) if !values.is_empty() => {
+                    values.iter().enumerate().for_each(|(index, value)| {
+                        let item_pointer = format!("{requires_pointer}/{index}");
+                        if value
+                            .as_str()
+                            .filter(|requirement| !requirement.trim().is_empty())
+                            .is_none()
+                        {
+                            self.push(
+                                Severity::Error,
+                                "entity.visibility_requirement_type",
+                                "entity visibility requirements must be non-empty IDs".to_string(),
+                                &entity.path,
+                                Some(item_pointer),
+                                None,
+                                Some(entity.id.clone()),
+                            );
+                        }
+                    })
+                }
+                _ => {
+                    self.push(
+                        Severity::Error,
+                        "entity.visibility_requires_type",
+                        "entity `visibility.requires` must be one ID or a non-empty list of unique IDs"
+                            .to_string(),
+                        &entity.path,
+                        Some(requires_pointer),
+                        None,
+                        Some(entity.id.clone()),
+                    );
+                }
+            }
+        }
+    }
+
+    fn validate_character_portrayal(&mut self, character: &Item) {
+        let Some(portrayal) = character
+            .mapping
+            .get(Value::String("portrayal".to_string()))
+        else {
+            return;
+        };
+        let pointer = format!("{}/portrayal", character.pointer);
+        let Some(portrayal) = portrayal.as_mapping() else {
+            self.push(
+                Severity::Error,
+                "character.portrayal_type",
+                "character `portrayal` must be a mapping".to_string(),
+                &character.path,
+                Some(pointer),
+                None,
+                Some(character.id.clone()),
+            );
+            return;
+        };
+        if portrayal.is_empty() {
+            self.push(
+                Severity::Error,
+                "character.portrayal_empty",
+                "character `portrayal` must contain `demeanor` or `speech_style`".to_string(),
+                &character.path,
+                Some(pointer.clone()),
+                None,
+                Some(character.id.clone()),
+            );
+        }
+        let mut has_supported_field = false;
+        for (key, value) in portrayal {
+            let Some(key) = key.as_str() else {
+                self.push(
+                    Severity::Error,
+                    "character.portrayal_field",
+                    "character portrayal field names must be strings".to_string(),
                     &character.path,
-                    Some(format!("{}/knowledge", character.pointer)),
+                    Some(pointer.clone()),
                     None,
                     Some(character.id.clone()),
                 );
                 continue;
             };
-            for (index, entry) in knowledge.iter().enumerate() {
-                let pointer = format!("{}/knowledge/{index}", character.pointer);
-                let Some(entry) = entry.as_mapping() else {
+            let field_pointer = format!("{pointer}/{}", escape_pointer(key));
+            if !matches!(key, "demeanor" | "speech_style") {
+                self.push(
+                    Severity::Error,
+                    "character.portrayal_unknown_field",
+                    format!("`{key}` is not a supported player-safe portrayal field"),
+                    &character.path,
+                    Some(field_pointer),
+                    None,
+                    Some(character.id.clone()),
+                );
+                continue;
+            }
+            has_supported_field = true;
+            if !value.as_str().is_some_and(|text| !text.trim().is_empty()) {
+                self.push(
+                    Severity::Error,
+                    "character.portrayal_value",
+                    format!("character portrayal `{key}` must be a non-empty string"),
+                    &character.path,
+                    Some(field_pointer),
+                    None,
+                    Some(character.id.clone()),
+                );
+            }
+        }
+        if !portrayal.is_empty() && !has_supported_field {
+            self.push(
+                Severity::Error,
+                "character.portrayal_empty",
+                "character `portrayal` must contain `demeanor` or `speech_style`".to_string(),
+                &character.path,
+                Some(pointer),
+                None,
+                Some(character.id.clone()),
+            );
+        }
+    }
+
+    fn validate_character_testimony(&mut self, character: &Item) {
+        let Some(entries) = character
+            .mapping
+            .get(Value::String("testimony".to_string()))
+            .and_then(Value::as_sequence)
+        else {
+            return;
+        };
+        for (index, entry) in entries.iter().enumerate() {
+            let pointer = format!("{}/testimony/{index}", character.pointer);
+            let Some(entry) = entry.as_mapping() else {
+                continue;
+            };
+            let subject = string_field(entry, "id")
+                .filter(|id| !id.trim().is_empty())
+                .unwrap_or(&character.id)
+                .to_string();
+            for key in entry.keys() {
+                let Some(key) = key.as_str() else {
                     self.push(
                         Severity::Error,
-                        "character.knowledge_entry_type",
-                        "character knowledge entries must be mappings".to_string(),
+                        "character.testimony_field",
+                        "character testimony field names must be strings".to_string(),
                         &character.path,
-                        Some(pointer),
+                        Some(pointer.clone()),
                         None,
-                        Some(character.id.clone()),
+                        Some(subject.clone()),
                     );
                     continue;
                 };
-                let Some(fact) =
-                    string_field(entry, "fact").filter(|value| !value.trim().is_empty())
-                else {
+                if !matches!(key, "id" | "text" | "requires" | "reveals") {
                     self.push(
                         Severity::Error,
-                        "character.knowledge_fact",
-                        "character knowledge `fact` must be a non-empty string".to_string(),
+                        "character.testimony_unknown_field",
+                        format!("`{key}` is not a supported player-safe testimony field"),
                         &character.path,
-                        Some(format!("{pointer}/fact")),
+                        Some(format!("{pointer}/{}", escape_pointer(key))),
                         None,
-                        Some(character.id.clone()),
+                        Some(subject.clone()),
                     );
-                    continue;
-                };
-                if facts_enabled {
-                    if !looks_like_id(fact) {
-                        self.push(
-                            Severity::Error,
-                            "character.knowledge_fact_reference",
-                            "character knowledge `fact` must be a fact ID when facts are authored"
-                                .to_string(),
-                            &character.path,
-                            Some(format!("{pointer}/fact")),
-                            locate_scalar(&character.source, fact),
-                            Some(character.id.clone()),
-                        );
-                    } else if self
-                        .definitions
-                        .get(fact)
-                        .is_some_and(|definition| definition.kind != Kind::Fact)
+                }
+            }
+            if !string_field(entry, "text").is_some_and(|text| !text.trim().is_empty()) {
+                self.push(
+                    Severity::Error,
+                    "character.testimony_text",
+                    "character testimony `text` must be a non-empty string".to_string(),
+                    &character.path,
+                    Some(format!("{pointer}/text")),
+                    None,
+                    Some(subject.clone()),
+                );
+            }
+            let requires_pointer = format!("{pointer}/requires");
+            let valid_requires = entry
+                .get(Value::String("requires".to_string()))
+                .is_some_and(|requires| is_nonempty_string_sequence(requires, false));
+            if !valid_requires {
+                self.push(
+                    Severity::Error,
+                    "character.testimony_requires_type",
+                    "character testimony `requires` must be a non-empty sequence of non-empty IDs"
+                        .to_string(),
+                    &character.path,
+                    Some(requires_pointer.clone()),
+                    None,
+                    Some(subject.clone()),
+                );
+            } else {
+                let requirements = string_list_field(entry, "requires");
+                if !requirements.iter().any(|id| id == "command.question") {
+                    self.push(
+                        Severity::Error,
+                        "character.testimony_question_requirement",
+                        "character testimony `requires` must include `command.question`"
+                            .to_string(),
+                        &character.path,
+                        Some(requires_pointer.clone()),
+                        None,
+                        Some(subject.clone()),
+                    );
+                }
+                if !requirements.iter().any(|id| id == &character.id) {
+                    self.push(
+                        Severity::Error,
+                        "character.testimony_character_requirement",
+                        format!(
+                            "character testimony `requires` must include its owner `{}`",
+                            character.id
+                        ),
+                        &character.path,
+                        Some(requires_pointer.clone()),
+                        None,
+                        Some(subject.clone()),
+                    );
+                }
+                for (requirement_index, requirement) in requirements.iter().enumerate() {
+                    if id_prefix(requirement) == Some(Kind::Command.prefix())
+                        && requirement != "command.question"
                     {
                         self.push(
                             Severity::Error,
-                            "reference.wrong_type",
-                            format!("`{fact}` does not refer to a fact"),
+                            "character.testimony_command_requirement",
+                            format!(
+                                "character testimony cannot require `{requirement}`; `command.question` is the only compatible command gate"
+                            ),
                             &character.path,
-                            Some(format!("{pointer}/fact")),
-                            locate_scalar(&character.source, fact),
-                            Some(fact.to_string()),
+                            Some(format!("{requires_pointer}/{requirement_index}")),
+                            locate_scalar(&character.source, requirement),
+                            Some(subject.clone()),
                         );
                     }
                 }
-                if entry
-                    .get(Value::String("source".to_string()))
-                    .is_some_and(|source| {
-                        !source
-                            .as_str()
-                            .is_some_and(|source| !source.trim().is_empty())
-                    })
-                {
-                    self.push(
-                        Severity::Error,
-                        "character.knowledge_source_type",
-                        "character knowledge `source` must be a non-empty ID when present"
-                            .to_string(),
-                        &character.path,
-                        Some(format!("{pointer}/source")),
-                        None,
-                        Some(character.id.clone()),
-                    );
-                }
+            }
+            if entry
+                .get(Value::String("reveals".to_string()))
+                .is_some_and(|reveals| !is_nonempty_string_sequence(reveals, true))
+            {
+                self.push(
+                    Severity::Error,
+                    "character.testimony_reveals_type",
+                    "character testimony `reveals` must be a sequence of non-empty fact IDs"
+                        .to_string(),
+                    &character.path,
+                    Some(format!("{pointer}/reveals")),
+                    None,
+                    Some(subject),
+                );
             }
         }
     }
@@ -1380,6 +1983,25 @@ impl<'a> Validator<'a> {
                     Some(fact.id.clone()),
                 );
             }
+            if fact
+                .mapping
+                .get(Value::String("narrative_detail".to_string()))
+                .is_some_and(|detail| {
+                    !detail
+                        .as_str()
+                        .is_some_and(|detail| !detail.trim().is_empty())
+                })
+            {
+                self.push(
+                    Severity::Error,
+                    "fact.narrative_detail",
+                    "fact `narrative_detail` must be a non-empty string".to_string(),
+                    &fact.path,
+                    Some(format!("{}/narrative_detail", fact.pointer)),
+                    None,
+                    Some(fact.id.clone()),
+                );
+            }
             if let Some(initially_known) = fact
                 .mapping
                 .get(Value::String("initially_known".to_string()))
@@ -1388,7 +2010,7 @@ impl<'a> Validator<'a> {
                     self.push(
                         Severity::Error,
                         "fact.initially_known_removed",
-                        "format 2 facts begin unclaimed; omit `requires` to make a fact available on the opening turn".to_string(),
+                        "format 2 facts enter the notebook automatically; omit `requires` to add a fact when the player joins".to_string(),
                         &fact.path,
                         Some(format!("{}/initially_known", fact.pointer)),
                         None,
@@ -1407,6 +2029,7 @@ impl<'a> Validator<'a> {
                 }
             }
             if fact_claims_enabled {
+                self.validate_fact_occurred_at(fact);
                 if let Some(requires) = fact.mapping.get(Value::String("requires".to_string())) {
                     if !is_nonempty_string_or_sequence(requires) {
                         self.push(
@@ -1439,6 +2062,106 @@ impl<'a> Validator<'a> {
                     );
                 }
             }
+        }
+    }
+
+    fn validate_fact_occurred_at(&mut self, fact: &Item) {
+        let Some(value) = fact.mapping.get(Value::String("occurred_at".to_string())) else {
+            return;
+        };
+        let pointer = format!("{}/occurred_at", fact.pointer);
+        let Some(occurred_at) = value.as_mapping() else {
+            self.push(
+                Severity::Error,
+                "fact.occurred_at_type",
+                "fact `occurred_at` must be a mapping with exactly `day` and `time`".to_string(),
+                &fact.path,
+                Some(pointer),
+                None,
+                Some(fact.id.clone()),
+            );
+            return;
+        };
+
+        let mut unknown_fields = occurred_at
+            .keys()
+            .filter_map(Value::as_str)
+            .filter(|field| !matches!(*field, "day" | "time"))
+            .collect::<Vec<_>>();
+        unknown_fields.sort_unstable();
+        for field in unknown_fields {
+            self.push(
+                Severity::Error,
+                "fact.occurred_at_unknown_field",
+                format!(
+                    "fact `occurred_at` does not support `{field}`; expected only `day` and `time`"
+                ),
+                &fact.path,
+                Some(format!("{pointer}/{}", escape_pointer(field))),
+                locate_scalar(&fact.source, field),
+                Some(fact.id.clone()),
+            );
+        }
+        if occurred_at.keys().any(|key| key.as_str().is_none()) {
+            self.push(
+                Severity::Error,
+                "fact.occurred_at_unknown_field",
+                "fact `occurred_at` keys must be strings named only `day` and `time`".to_string(),
+                &fact.path,
+                Some(pointer.clone()),
+                None,
+                Some(fact.id.clone()),
+            );
+        }
+
+        match occurred_at.get(Value::String("day".to_string())) {
+            Some(Value::Number(day))
+                if day
+                    .as_i64()
+                    .is_some_and(|day| day >= 0 && i32::try_from(day).is_ok()) =>
+            {
+            }
+            Some(_) => self.push(
+                Severity::Error,
+                "fact.occurred_at_day",
+                "fact `occurred_at.day` must be a non-negative whole number supported by the runtime"
+                    .to_string(),
+                &fact.path,
+                Some(format!("{pointer}/day")),
+                None,
+                Some(fact.id.clone()),
+            ),
+            None => self.push(
+                Severity::Error,
+                "fact.occurred_at_day_missing",
+                "fact `occurred_at` is missing required `day`".to_string(),
+                &fact.path,
+                Some(format!("{pointer}/day")),
+                None,
+                Some(fact.id.clone()),
+            ),
+        }
+
+        match occurred_at.get(Value::String("time".to_string())) {
+            Some(Value::String(time)) if valid_time(time) => {}
+            Some(_) => self.push(
+                Severity::Error,
+                "fact.occurred_at_time",
+                "fact `occurred_at.time` must be an exact quoted 24-hour HH:MM value".to_string(),
+                &fact.path,
+                Some(format!("{pointer}/time")),
+                None,
+                Some(fact.id.clone()),
+            ),
+            None => self.push(
+                Severity::Error,
+                "fact.occurred_at_time_missing",
+                "fact `occurred_at` is missing required `time`".to_string(),
+                &fact.path,
+                Some(format!("{pointer}/time")),
+                None,
+                Some(fact.id.clone()),
+            ),
         }
     }
 
@@ -1542,13 +2265,13 @@ impl<'a> Validator<'a> {
             }
             if let Some(inputs) = deduction.mapping.get(Value::String("inputs".to_string())) {
                 let valid = inputs.as_sequence().is_some_and(|values| {
-                    (2..=3).contains(&values.len()) && values.iter().all(Value::is_string)
+                    (1..=3).contains(&values.len()) && values.iter().all(Value::is_string)
                 });
                 if !valid {
                     self.push(
                         Severity::Error,
                         "deduction.inputs_type",
-                        "deduction `inputs` must contain two or three fact or deduction IDs"
+                        "deduction `inputs` must contain one to three fact or deduction IDs"
                             .to_string(),
                         &deduction.path,
                         Some(format!("{}/inputs", deduction.pointer)),
@@ -1678,7 +2401,171 @@ impl<'a> Validator<'a> {
             }
 
             let parameter_types = self.validate_command_parameters(command);
+            if self.format_version == Some(2) {
+                self.validate_runtime_command_signature(command, &parameter_types);
+            }
             self.validate_command_effects(command, &parameter_types);
+        }
+    }
+
+    fn validate_testimony_question_signature(&mut self, characters: &[Item], commands: &[Item]) {
+        let testimony_authored = characters.iter().any(|character| {
+            character
+                .mapping
+                .get(Value::String("testimony".to_string()))
+                .and_then(Value::as_sequence)
+                .is_some_and(|entries| !entries.is_empty())
+        });
+        if !testimony_authored {
+            return;
+        }
+        let Some(command) = commands
+            .iter()
+            .find(|command| command.id == "command.question")
+        else {
+            // Each structurally valid testimony already reports its exact
+            // unknown `command.question` requirement pointer.
+            return;
+        };
+        let parameters_pointer = format!("{}/parameters", command.pointer);
+        let Some(parameters) = command
+            .mapping
+            .get(Value::String("parameters".to_string()))
+            .and_then(Value::as_sequence)
+        else {
+            self.push(
+                Severity::Error,
+                "character.testimony_question_parameters",
+                "`command.question` must declare its character target as the first parameter"
+                    .to_string(),
+                &command.path,
+                Some(parameters_pointer),
+                None,
+                Some(command.id.clone()),
+            );
+            return;
+        };
+        let Some(first) = parameters.first() else {
+            self.push(
+                Severity::Error,
+                "character.testimony_question_target_missing",
+                "`command.question` must declare a required character target first".to_string(),
+                &command.path,
+                Some(format!("{parameters_pointer}/0")),
+                None,
+                Some(command.id.clone()),
+            );
+            return;
+        };
+        let first_pointer = format!("{parameters_pointer}/0");
+        let Some(first) = first.as_mapping() else {
+            self.push(
+                Severity::Error,
+                "character.testimony_question_target_type",
+                "the first `command.question` parameter must be a character target mapping"
+                    .to_string(),
+                &command.path,
+                Some(first_pointer),
+                None,
+                Some(command.id.clone()),
+            );
+            return;
+        };
+        if string_field(first, "name") != Some("character") {
+            self.push(
+                Severity::Error,
+                "character.testimony_question_target_name",
+                "the first `command.question` parameter must be named `character`".to_string(),
+                &command.path,
+                Some(format!("{first_pointer}/name")),
+                None,
+                Some(command.id.clone()),
+            );
+        }
+        if string_field(first, "type").and_then(CommandParameterType::parse)
+            != Some(CommandParameterType::Character)
+        {
+            self.push(
+                Severity::Error,
+                "character.testimony_question_target_type",
+                "the first `command.question` parameter must have type `character`".to_string(),
+                &command.path,
+                Some(format!("{first_pointer}/type")),
+                None,
+                Some(command.id.clone()),
+            );
+        }
+        if bool_field(first, "required") != Some(true) {
+            self.push(
+                Severity::Error,
+                "character.testimony_question_target_required",
+                "the first `command.question` character parameter must be required".to_string(),
+                &command.path,
+                Some(format!("{first_pointer}/required")),
+                None,
+                Some(command.id.clone()),
+            );
+        }
+
+        for (index, parameter) in parameters.iter().enumerate().skip(1) {
+            let pointer = format!("{parameters_pointer}/{index}");
+            let Some(parameter) = parameter.as_mapping() else {
+                self.push(
+                    Severity::Error,
+                    "character.testimony_question_topic_type",
+                    "later `command.question` parameters must be optional topic mappings"
+                        .to_string(),
+                    &command.path,
+                    Some(pointer),
+                    None,
+                    Some(command.id.clone()),
+                );
+                continue;
+            };
+            let expected_type = match string_field(parameter, "name") {
+                Some("topic_character") => Some(CommandParameterType::Character),
+                Some("topic_entity") => Some(CommandParameterType::Entity),
+                Some("topic_setting") => Some(CommandParameterType::Setting),
+                Some("topic_deduction") => Some(CommandParameterType::Deduction),
+                Some("topic_event") => Some(CommandParameterType::Event),
+                _ => None,
+            };
+            if expected_type.is_none() {
+                self.push(
+                    Severity::Error,
+                    "character.testimony_question_topic_name",
+                    "later `command.question` parameters must be named for a supported optional topic"
+                        .to_string(),
+                    &command.path,
+                    Some(format!("{pointer}/name")),
+                    None,
+                    Some(command.id.clone()),
+                );
+            } else if string_field(parameter, "type").and_then(CommandParameterType::parse)
+                != expected_type
+            {
+                self.push(
+                    Severity::Error,
+                    "character.testimony_question_topic_type",
+                    "a `command.question` topic parameter type must match its topic name"
+                        .to_string(),
+                    &command.path,
+                    Some(format!("{pointer}/type")),
+                    None,
+                    Some(command.id.clone()),
+                );
+            }
+            if bool_field(parameter, "required") == Some(true) {
+                self.push(
+                    Severity::Error,
+                    "character.testimony_question_topic_required",
+                    "later `command.question` topic parameters must be optional".to_string(),
+                    &command.path,
+                    Some(format!("{pointer}/required")),
+                    None,
+                    Some(command.id.clone()),
+                );
+            }
         }
     }
 
@@ -1699,6 +2586,7 @@ impl<'a> Validator<'a> {
             return Vec::new();
         };
 
+        let mut names = HashSet::new();
         parameters
             .iter()
             .enumerate()
@@ -1716,11 +2604,22 @@ impl<'a> Validator<'a> {
                     );
                     return None;
                 };
-                if !string_field(parameter, "name").is_some_and(|name| !name.trim().is_empty()) {
+                let name = string_field(parameter, "name");
+                if !name.is_some_and(|name| !name.trim().is_empty()) {
                     self.push(
                         Severity::Error,
                         "command.parameter_name",
                         "command parameter `name` must be a non-empty string".to_string(),
+                        &command.path,
+                        Some(format!("{pointer}/name")),
+                        None,
+                        Some(command.id.clone()),
+                    );
+                } else if !names.insert(name.expect("validated parameter name")) {
+                    self.push(
+                        Severity::Error,
+                        "command.parameter_name_duplicate",
+                        "command parameter names must be unique".to_string(),
                         &command.path,
                         Some(format!("{pointer}/name")),
                         None,
@@ -1787,6 +2686,57 @@ impl<'a> Validator<'a> {
             .collect()
     }
 
+    fn validate_runtime_command_signature(
+        &mut self,
+        command: &Item,
+        parameter_types: &[Option<CommandParameterType>],
+    ) {
+        let known = parameter_types
+            .iter()
+            .flatten()
+            .copied()
+            .collect::<Vec<_>>();
+        let valid = match command.id.as_str() {
+            "command.claim" | "command.deduce" => known.is_empty(),
+            "command.move" => known == [CommandParameterType::Setting],
+            "command.take" => known == [CommandParameterType::Entity],
+            "command.solve" => {
+                known
+                    == [
+                        CommandParameterType::Character,
+                        CommandParameterType::Deduction,
+                    ]
+            }
+            _ => true,
+        };
+        if !valid {
+            self.push(
+                Severity::Error,
+                "command.runtime_signature",
+                match command.id.as_str() {
+                    "command.claim" | "command.deduce" => {
+                        format!("reserved `{}` must not declare parameters", command.id)
+                    }
+                    "command.move" => {
+                        "`command.move` must declare exactly one setting parameter".to_string()
+                    }
+                    "command.take" => {
+                        "`command.take` must declare exactly one entity parameter".to_string()
+                    }
+                    "command.solve" => {
+                        "`command.solve` must declare character then deduction parameters"
+                            .to_string()
+                    }
+                    _ => unreachable!("only reserved runtime commands are checked"),
+                },
+                &command.path,
+                Some(format!("{}/parameters", command.pointer)),
+                None,
+                Some(command.id.clone()),
+            );
+        }
+    }
+
     fn validate_command_effects(
         &mut self,
         command: &Item,
@@ -1845,15 +2795,14 @@ impl<'a> Validator<'a> {
                         &pointer,
                         &["operation", "minutes"],
                     );
-                    let valid_minutes = effect
-                        .get(Value::String("minutes".to_string()))
-                        .and_then(Value::as_f64)
-                        .is_some_and(|minutes| minutes.is_finite() && minutes > 0.0);
+                    let valid_minutes = integer_field(effect, "minutes")
+                        .is_some_and(|minutes| minutes > 0 && u32::try_from(minutes).is_ok());
                     if !valid_minutes {
                         self.push(
                             Severity::Error,
                             "command.effect_minutes",
-                            "`advance_time.minutes` must be a positive number".to_string(),
+                            "`advance_time.minutes` must be a positive whole number supported by the runtime"
+                                .to_string(),
                             &command.path,
                             Some(format!("{pointer}/minutes")),
                             None,
@@ -2171,8 +3120,17 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn validate_trigger_values(&mut self, triggers: &[Item], fact_claims_enabled: bool) {
+    fn validate_trigger_values(
+        &mut self,
+        triggers: &[Item],
+        commands: &[Item],
+        fact_claims_enabled: bool,
+    ) {
         for trigger in triggers {
+            let parameter_types = string_field(&trigger.mapping, "command")
+                .and_then(|command_id| commands.iter().find(|command| command.id == command_id))
+                .map(command_parameter_types_by_name)
+                .unwrap_or_default();
             if !string_field(&trigger.mapping, "command")
                 .is_some_and(|command| !command.trim().is_empty())
             {
@@ -2259,6 +3217,13 @@ impl<'a> Validator<'a> {
                         "learn" | "learn_after" | "discover" | "discover_after"
                             if fact_claims_enabled =>
                         {
+                            self.validate_trigger_effect_fields(
+                                trigger,
+                                index,
+                                effect,
+                                true,
+                                matches!(operation, "learn_after" | "discover_after"),
+                            );
                             self.push(
                                 Severity::Error,
                                 "trigger.legacy_knowledge_effect",
@@ -2271,28 +3236,172 @@ impl<'a> Validator<'a> {
                                 Some(trigger.id.clone()),
                             );
                         }
-                        "learn" | "learn_after" => self.validate_trigger_effect_target(
-                            trigger,
-                            index,
-                            operation,
-                            target,
-                            Kind::Fact,
+                        "learn" | "learn_after" => {
+                            self.validate_trigger_effect_fields(
+                                trigger,
+                                index,
+                                effect,
+                                true,
+                                operation == "learn_after",
+                            );
+                            self.validate_trigger_effect_operand(
+                                trigger,
+                                index,
+                                operation,
+                                "target",
+                                target,
+                                &[Kind::Fact],
+                                &[],
+                                true,
+                                &parameter_types,
+                            );
+                        }
+                        "discover" | "discover_after" => {
+                            self.validate_trigger_effect_fields(
+                                trigger,
+                                index,
+                                effect,
+                                true,
+                                operation == "discover_after",
+                            );
+                            self.validate_trigger_effect_operand(
+                                trigger,
+                                index,
+                                operation,
+                                "target",
+                                target,
+                                &[Kind::Clue],
+                                &[],
+                                true,
+                                &parameter_types,
+                            );
+                        }
+                        "move" => {
+                            self.validate_trigger_effect_fields(trigger, index, effect, true, true);
+                            self.validate_trigger_effect_operand(
+                                trigger,
+                                index,
+                                operation,
+                                "target",
+                                target,
+                                &[Kind::Character, Kind::Entity],
+                                &["$actor"],
+                                true,
+                                &parameter_types,
+                            );
+                            if let Some(value) = string_field(effect, "value") {
+                                self.validate_trigger_effect_operand(
+                                    trigger,
+                                    index,
+                                    operation,
+                                    "value",
+                                    value,
+                                    &[Kind::Setting],
+                                    &[],
+                                    true,
+                                    &parameter_types,
+                                );
+                            }
+                        }
+                        "advance_time_by_route" => {
+                            self.validate_trigger_effect_fields(trigger, index, effect, true, true);
+                            self.validate_trigger_effect_operand(
+                                trigger,
+                                index,
+                                operation,
+                                "target",
+                                target,
+                                &[],
+                                &["$actor"],
+                                false,
+                                &parameter_types,
+                            );
+                            if let Some(value) = string_field(effect, "value") {
+                                self.validate_trigger_effect_operand(
+                                    trigger,
+                                    index,
+                                    operation,
+                                    "value",
+                                    value,
+                                    &[Kind::Setting],
+                                    &[],
+                                    true,
+                                    &parameter_types,
+                                );
+                            }
+                        }
+                        "claim" => {
+                            self.validate_trigger_effect_fields(
+                                trigger, index, effect, false, false,
+                            );
+                            self.validate_trigger_effect_operand(
+                                trigger,
+                                index,
+                                operation,
+                                "target",
+                                target,
+                                &[Kind::Fact],
+                                &["$fact"],
+                                false,
+                                &parameter_types,
+                            );
+                        }
+                        "give" | "give_after" | "remove" => {
+                            self.validate_trigger_effect_fields(
+                                trigger,
+                                index,
+                                effect,
+                                operation == "give_after",
+                                operation == "give_after",
+                            );
+                            self.validate_trigger_effect_operand(
+                                trigger,
+                                index,
+                                operation,
+                                "target",
+                                target,
+                                &[Kind::Flag],
+                                &[],
+                                false,
+                                &parameter_types,
+                            );
+                        }
+                        "satisfy_requirement" => {
+                            self.validate_trigger_effect_fields(trigger, index, effect, true, true);
+                            self.validate_trigger_effect_operand(
+                                trigger,
+                                index,
+                                operation,
+                                "target",
+                                target,
+                                &[Kind::Route],
+                                &[],
+                                true,
+                                &parameter_types,
+                            );
+                            if let Some(value) = string_field(effect, "value") {
+                                self.validate_trigger_effect_operand(
+                                    trigger,
+                                    index,
+                                    operation,
+                                    "value",
+                                    value,
+                                    &[Kind::Entity],
+                                    &[],
+                                    true,
+                                    &parameter_types,
+                                );
+                            }
+                        }
+                        _ => self.push(
+                            Severity::Error,
+                            "trigger.effect_unknown_operation",
+                            format!("unknown trigger effect operation `{operation}`"),
+                            &trigger.path,
+                            Some(format!("{}/effects/{index}/operation", trigger.pointer)),
+                            locate_scalar(&trigger.source, operation),
+                            Some(trigger.id.clone()),
                         ),
-                        "discover" | "discover_after" => self.validate_trigger_effect_target(
-                            trigger,
-                            index,
-                            operation,
-                            target,
-                            Kind::Clue,
-                        ),
-                        "give" | "give_after" | "remove" => self.validate_trigger_effect_target(
-                            trigger,
-                            index,
-                            operation,
-                            target,
-                            Kind::Flag,
-                        ),
-                        _ => {}
                     }
                     if matches!(operation, "learn_after" | "discover_after" | "give_after")
                         && !invalid_value_type
@@ -2328,6 +3437,9 @@ impl<'a> Validator<'a> {
         let Some(time) = trigger.mapping.get(Value::String("time".to_string())) else {
             return;
         };
+        if time.is_null() {
+            return;
+        }
         let Some(time) = time.as_mapping() else {
             self.push(
                 Severity::Error,
@@ -2380,11 +3492,11 @@ impl<'a> Validator<'a> {
                 Some(trigger.id.clone()),
             );
         }
-        if !string_field(time, "value").is_some_and(|value| !value.trim().is_empty()) {
+        if !string_field(time, "value").is_some_and(valid_time) {
             self.push(
                 Severity::Error,
                 "trigger.time_value",
-                "trigger `time.value` must be a non-empty string".to_string(),
+                "trigger `time.value` must be a quoted 24-hour HH:MM value".to_string(),
                 &trigger.path,
                 Some(format!("{}/time/value", trigger.pointer)),
                 None,
@@ -2450,49 +3562,161 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn validate_trigger_effect_target(
+    fn validate_trigger_effect_fields(
+        &mut self,
+        trigger: &Item,
+        effect_index: usize,
+        effect: &Mapping,
+        allow_value: bool,
+        require_value: bool,
+    ) {
+        let pointer = format!("{}/effects/{effect_index}", trigger.pointer);
+        for key in effect.keys() {
+            let Some(key) = key.as_str() else {
+                self.push(
+                    Severity::Error,
+                    "trigger.effect_field",
+                    "trigger effect field names must be strings".to_string(),
+                    &trigger.path,
+                    Some(pointer.clone()),
+                    None,
+                    Some(trigger.id.clone()),
+                );
+                continue;
+            };
+            if !(matches!(key, "operation" | "target") || allow_value && key == "value") {
+                self.push(
+                    Severity::Error,
+                    "trigger.effect_unknown_field",
+                    format!("`{key}` is not valid for this trigger effect"),
+                    &trigger.path,
+                    Some(format!("{pointer}/{}", escape_pointer(key))),
+                    None,
+                    Some(trigger.id.clone()),
+                );
+            }
+        }
+        if require_value
+            && !string_field(effect, "value").is_some_and(|value| !value.trim().is_empty())
+        {
+            self.push(
+                Severity::Error,
+                "trigger.effect_value_missing",
+                "this trigger effect requires a non-empty string `value`".to_string(),
+                &trigger.path,
+                Some(format!("{pointer}/value")),
+                None,
+                Some(trigger.id.clone()),
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn validate_trigger_effect_operand(
         &mut self,
         trigger: &Item,
         effect_index: usize,
         operation: &str,
-        target: &str,
-        expected: Kind,
+        field: &str,
+        value: &str,
+        expected: &[Kind],
+        special_operands: &[&str],
+        allow_named_operand: bool,
+        parameter_types: &BTreeMap<String, CommandParameterType>,
     ) {
-        if target.starts_with('$') {
+        if special_operands.contains(&value) {
             return;
+        }
+        let pointer = format!(
+            "{}/effects/{effect_index}/{}",
+            trigger.pointer,
+            escape_pointer(field)
+        );
+        let expected_names = expected
+            .iter()
+            .map(|kind| kind.name())
+            .collect::<Vec<_>>()
+            .join(" or ");
+        if let Some(name) = value.strip_prefix('$') {
+            if allow_named_operand {
+                match parameter_types.get(name) {
+                    Some(parameter_type) if expected.contains(&parameter_type.kind()) => return,
+                    Some(parameter_type) => {
+                        self.push(
+                            Severity::Error,
+                            "trigger.effect_parameter_type",
+                            format!(
+                                "trigger effect `{operation}` `{field}` uses {value}, a {} parameter; expected {expected_names}",
+                                parameter_type.name()
+                            ),
+                            &trigger.path,
+                            Some(pointer),
+                            locate_scalar(&trigger.source, value),
+                            Some(trigger.id.clone()),
+                        );
+                        return;
+                    }
+                    None => {
+                        self.push(
+                            Severity::Error,
+                            "trigger.effect_parameter_unknown",
+                            format!(
+                                "trigger effect `{operation}` `{field}` refers to unknown command parameter `{name}`"
+                            ),
+                            &trigger.path,
+                            Some(pointer),
+                            locate_scalar(&trigger.source, value),
+                            Some(trigger.id.clone()),
+                        );
+                        return;
+                    }
+                }
+            }
         }
         match self
             .definitions
-            .get(target)
+            .get(value)
             .map(|definition| definition.kind)
         {
-            Some(kind) if kind == expected => {}
+            Some(kind) if expected.contains(&kind) => {}
             Some(kind) => self.push(
                 Severity::Error,
                 "trigger.effect_target_type",
                 format!(
-                    "trigger effect `{operation}` targets a {}; expected a {}",
+                    "trigger effect `{operation}` `{field}` refers to a {}; expected {expected_names}",
                     kind.name(),
-                    expected.name()
                 ),
                 &trigger.path,
-                Some(format!("{}/effects/{effect_index}/target", trigger.pointer)),
-                locate_scalar(&trigger.source, target),
-                Some(target.to_string()),
+                Some(pointer),
+                locate_scalar(&trigger.source, value),
+                Some(value.to_string()),
             ),
-            None if looks_like_id(target) => {
-                // The generic reference pass reports the unknown ID.
-            }
+            None if looks_like_id(value) => self.push(
+                Severity::Error,
+                "reference.unknown",
+                format!("`{value}` does not refer to a defined ID"),
+                &trigger.path,
+                Some(pointer),
+                locate_scalar(&trigger.source, value),
+                Some(value.to_string()),
+            ),
             None => self.push(
                 Severity::Error,
                 "trigger.effect_target_type",
                 format!(
-                    "trigger effect `{operation}` must target a {} ID",
-                    expected.name()
+                    "trigger effect `{operation}` `{field}` must be {expected_names}{}",
+                    if special_operands.is_empty() && !allow_named_operand {
+                        " ID".to_string()
+                    } else {
+                        format!(
+                            " ID or a supported operand ({})",
+                            special_operands.join(", ")
+                        )
+                    }
                 ),
                 &trigger.path,
-                Some(format!("{}/effects/{effect_index}/target", trigger.pointer)),
-                locate_scalar(&trigger.source, target),
+                Some(pointer),
+                locate_scalar(&trigger.source, value),
                 Some(trigger.id.clone()),
             ),
         }
@@ -2600,11 +3824,26 @@ impl<'a> Validator<'a> {
                     .map(|container| (item.id.clone(), vec![container.to_string()]))
             })
             .collect();
-        self.validate_cycles(
-            entity_containment,
-            "entity.containment_cycle",
-            "entity containment",
-        );
+        for cycle in find_cycles(&entity_containment) {
+            let subject = cycle.first().cloned();
+            let item = subject
+                .as_deref()
+                .and_then(|id| entities.iter().find(|item| item.id == id));
+            let container =
+                item.and_then(|item| nested_string_field(&item.mapping, &["initial", "container"]));
+            self.push(
+                Severity::Error,
+                "entity.containment_cycle",
+                format!(
+                    "entity containment contains a cycle: {}",
+                    cycle.join(" -> ")
+                ),
+                item.map_or("", |item| item.path.as_str()),
+                item.map(|item| format!("{}/initial/container", item.pointer)),
+                item.and_then(|item| container.and_then(|id| locate_scalar(&item.source, id))),
+                subject,
+            );
+        }
 
         if fact_claims_enabled {
             self.validate_cycles(
@@ -3000,6 +4239,14 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
     const FACT_OR_DEDUCTION: &[Kind] = &[Kind::Fact, Kind::Deduction];
     const COMMANDS: &[Kind] = &[Kind::Command];
     const CONTAINERS: &[Kind] = &[Kind::Setting, Kind::Character, Kind::Entity];
+    const PERSISTENT_REQUIREMENTS: &[Kind] = &[
+        Kind::Setting,
+        Kind::Entity,
+        Kind::Fact,
+        Kind::Deduction,
+        Kind::Flag,
+        Kind::Trigger,
+    ];
     const CONTENT_SOURCES: &[Kind] = &[Kind::Setting, Kind::Character, Kind::Entity, Kind::Event];
     const FACT_TOPICS: &[Kind] = &[
         Kind::Setting,
@@ -3037,6 +4284,9 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
         _ if (field == "requires" || parent == "requires") && pointer.contains("/facts/") => {
             Some(FACT_REQUIREMENTS)
         }
+        _ if is_entity_visibility_requirement_pointer(pointer) => Some(PERSISTENT_REQUIREMENTS),
+        _ if is_character_testimony_list_pointer(pointer, "requires") => Some(FACT_REQUIREMENTS),
+        _ if is_character_testimony_list_pointer(pointer, "reveals") => Some(FACTS),
         _ if is_fact_association_pointer(pointer) => Some(FACTS),
         _ if parent == "requires" && pointer.contains("/routes/") => Some(ENTITIES),
         _ if parent == "requires" && pointer.contains("/clues/") => Some(CLUES),
@@ -3051,6 +4301,38 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
         }
         _ => None,
     }
+}
+
+fn is_entity_visibility_requirement_pointer(pointer: &str) -> bool {
+    let parts = pointer
+        .trim_start_matches('/')
+        .split('/')
+        .collect::<Vec<_>>();
+    matches!(
+        parts.as_slice(),
+        ["entities", entity_index, "visibility", "requires"]
+            if entity_index.parse::<usize>().is_ok()
+    ) || matches!(
+        parts.as_slice(),
+        ["entities", entity_index, "visibility", "requires", requirement_index]
+            if entity_index.parse::<usize>().is_ok()
+                && requirement_index.parse::<usize>().is_ok()
+    )
+}
+
+fn is_character_testimony_list_pointer(pointer: &str, field: &str) -> bool {
+    let parts = pointer
+        .trim_start_matches('/')
+        .split('/')
+        .collect::<Vec<_>>();
+    matches!(
+        parts.as_slice(),
+        ["characters", character_index, "testimony", testimony_index, list_field, item_index]
+            if character_index.parse::<usize>().is_ok()
+                && testimony_index.parse::<usize>().is_ok()
+                && *list_field == field
+                && item_index.parse::<usize>().is_ok()
+    )
 }
 
 fn is_fact_association_pointer(pointer: &str) -> bool {
@@ -3245,6 +4527,22 @@ fn reachable(graph: &BTreeMap<String, Vec<String>>, starts: &[String]) -> HashSe
     visited
 }
 
+fn command_parameter_types_by_name(command: &Item) -> BTreeMap<String, CommandParameterType> {
+    command
+        .mapping
+        .get(Value::String("parameters".to_string()))
+        .and_then(Value::as_sequence)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_mapping)
+        .filter_map(|parameter| {
+            let name = string_field(parameter, "name")?;
+            let kind = string_field(parameter, "type").and_then(CommandParameterType::parse)?;
+            Some((name.to_string(), kind))
+        })
+        .collect()
+}
+
 fn string_field<'a>(mapping: &'a Mapping, field: &str) -> Option<&'a str> {
     mapping
         .get(Value::String(field.to_string()))
@@ -3369,10 +4667,17 @@ fn valid_time(value: &str) -> bool {
 
 fn valid_delay(value: &str) -> bool {
     let value = value.trim();
-    for suffix in ["turns", "turn", "m", "h"] {
-        if let Some(number) = value.strip_suffix(suffix) {
-            return number.trim().parse::<u64>().is_ok_and(|number| number > 0);
-        }
+    if let Some(number) = value.strip_suffix("turns") {
+        return number.trim().parse::<u32>().is_ok_and(|number| number > 0);
+    }
+    if let Some(number) = value.strip_suffix('m') {
+        return number.trim().parse::<u32>().is_ok_and(|number| number > 0);
+    }
+    if let Some(number) = value.strip_suffix('h') {
+        return number
+            .trim()
+            .parse::<u32>()
+            .is_ok_and(|number| number > 0 && number.checked_mul(60).is_some());
     }
     false
 }
