@@ -110,6 +110,18 @@ This repository includes a composite action:
 
 It builds the pinned validator revision and emits native GitHub annotations.
 
+## Story format versions
+
+Every story declares a quoted semantic version at `case.format_version`.
+This validator authors format `2.0.0` and accepts story formats in the range
+`>=1.0.0, <3.0.0`. Minor and patch releases remain compatible within their
+major format. A breaking story-contract change increments the major version.
+
+Legacy integer versions, missing versions, and versions outside the supported
+range stop validation with migration guidance before version-specific schema
+rules run. This prevents an older story from producing a misleading cascade of
+unrelated field errors.
+
 ## Facts and deductions
 
 Validator 0.7 supports the format-2 notebook and action-effect model. Format 2
@@ -400,7 +412,7 @@ travel, and delayed effects:
 ```yaml
 case:
   id: case.last_tide
-  format_version: 2
+  format_version: "2.0.0"
   initial_time: "21:32"
 ```
 
@@ -429,13 +441,14 @@ The first pass checks:
   that requires all navigable settings to be strongly connected;
 - solution reference types and basic event time/duration values.
 
-Repositories without an explicit version or navigation contract remain
-accepted with migration warnings. Compatibility mode treats a setting with
-`type: island` as non-navigable. New repositories should add:
+Repositories without an explicit navigation contract remain accepted with
+migration warnings. A semantic format version is required. Compatibility mode
+treats a setting with `type: island` as non-navigable. New repositories should
+add:
 
 ```yaml
 case:
-  format_version: 2
+  format_version: "2.0.0"
   entry_settings:
     - setting.main_lodge
   exit_settings:

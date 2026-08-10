@@ -57,7 +57,7 @@ pub struct Diagnostic {
 pub struct ValidationReport {
     pub validator_version: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub format_version: Option<u64>,
+    pub format_version: Option<String>,
     pub valid: bool,
     pub diagnostics: Vec<Diagnostic>,
 }

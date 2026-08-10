@@ -12,6 +12,10 @@ pub use diagnostic::{
 pub use validator::validate;
 
 pub const VALIDATOR_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Latest story format authored by this release.
+pub const STORY_FORMAT_VERSION: &str = "2.0.0";
+/// Semantic-version range this release can validate and execute.
+pub const SUPPORTED_STORY_FORMATS: &str = ">=1.0.0, <3.0.0";
 
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 mod wasm {

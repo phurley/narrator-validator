@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
+use semver::{Version, VersionReq};
 use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
 
 use crate::{
     Diagnostic, Position, RelatedLocation, Severity, SourceFile, SourceRange, ValidationReport,
-    VALIDATOR_VERSION,
+    STORY_FORMAT_VERSION, SUPPORTED_STORY_FORMATS, VALIDATOR_VERSION,
 };
 
 const MAX_REPOSITORY_FILES: usize = 512;
@@ -164,7 +165,8 @@ struct Validator<'a> {
     diagnostics: Vec<Diagnostic>,
     definitions: BTreeMap<String, Definition>,
     sections: BTreeMap<String, Vec<(String, String)>>,
-    format_version: Option<u64>,
+    format_version: Option<Version>,
+    format_compatible: bool,
 }
 
 /// Validate a complete, immutable repository snapshot.
@@ -176,6 +178,7 @@ pub fn validate(files: &[SourceFile]) -> ValidationReport {
         definitions: BTreeMap::new(),
         sections: BTreeMap::new(),
         format_version: None,
+        format_compatible: true,
     };
     validator.run();
     validator.diagnostics.sort_by(|left, right| {
@@ -200,13 +203,19 @@ pub fn validate(files: &[SourceFile]) -> ValidationReport {
         .all(|diagnostic| diagnostic.severity != Severity::Error);
     ValidationReport {
         validator_version: VALIDATOR_VERSION.to_string(),
-        format_version: validator.format_version,
+        format_version: validator.format_version.map(|version| version.to_string()),
         valid,
         diagnostics: validator.diagnostics,
     }
 }
 
 impl<'a> Validator<'a> {
+    fn is_format_2(&self) -> bool {
+        self.format_version
+            .as_ref()
+            .is_some_and(|version| version.major == 2)
+    }
+
     fn run(&mut self) {
         if !self.validate_repository_bounds() {
             return;
@@ -217,6 +226,9 @@ impl<'a> Validator<'a> {
 
         let cases = self.items("case", Kind::Case, false);
         self.validate_case(&cases);
+        if !self.format_compatible {
+            return;
+        }
         self.validate_sections();
         let settings = self.items("settings", Kind::Setting, true);
         let routes = self.items("routes", Kind::Route, true);
@@ -228,7 +240,7 @@ impl<'a> Validator<'a> {
         let flags = self.items("flags", Kind::Flag, true);
         let commands = self.items("commands", Kind::Command, true);
         let triggers = self.items("triggers", Kind::Trigger, true);
-        let fact_claims_enabled = self.format_version == Some(2);
+        let fact_claims_enabled = self.is_format_2();
         let facts = if fact_claims_enabled {
             self.nested_facts(&[
                 settings.as_slice(),
@@ -505,7 +517,7 @@ impl<'a> Validator<'a> {
             }
         }
         let knowledge_section = "clues";
-        if self.format_version != Some(2) {
+        if !self.is_format_2() {
             match self.sections.get(knowledge_section) {
                 None => self.push(
                     Severity::Error,
@@ -554,7 +566,7 @@ impl<'a> Validator<'a> {
                 }
             }
         }
-        if self.format_version == Some(2) {
+        if self.is_format_2() {
             if let Some(locations) = self.sections.get("clues").cloned() {
                 for (path, pointer) in locations {
                     self.push(
@@ -981,52 +993,84 @@ impl<'a> Validator<'a> {
         if cases.len() != 1 {
             return;
         }
+        self.format_compatible = false;
         let case = &cases[0];
+        let version_pointer = Some(format!("{}/format_version", case.pointer));
         match case
             .mapping
             .get(Value::String("format_version".to_string()))
         {
-            Some(Value::Number(number)) => {
-                if let Some(version) = number.as_u64() {
-                    self.format_version = Some(version);
-                    if !matches!(version, 1 | 2) {
+            Some(Value::String(raw_version)) => match Version::parse(raw_version) {
+                Ok(version) => {
+                    let supported = VersionReq::parse(SUPPORTED_STORY_FORMATS)
+                        .expect("supported story format range is valid");
+                    self.format_compatible = supported.matches(&version);
+                    self.format_version = Some(version.clone());
+                    if !self.format_compatible {
+                        let message = if version
+                            < Version::parse("1.0.0").expect("minimum story format is valid")
+                        {
+                            format!(
+                                "This story uses format {version}, which is too old for this version of Narrator. Please migrate it to story format {STORY_FORMAT_VERSION} before opening it."
+                            )
+                        } else {
+                            format!(
+                                "This story uses format {version}, which is newer than this version of Narrator supports. Please update Narrator before opening it."
+                            )
+                        };
                         self.push(
                             Severity::Error,
-                            "format.unsupported_version",
-                            format!("format version {version} is not supported; expected 1 or 2"),
+                            "format.incompatible_version",
+                            message,
                             &case.path,
-                            Some(format!("{}/format_version", case.pointer)),
-                            locate_scalar(&case.source, &version.to_string()),
+                            version_pointer.clone(),
+                            locate_scalar(&case.source, raw_version),
                             Some(case.id.clone()),
                         );
                     }
-                } else {
-                    self.push(
-                        Severity::Error,
-                        "format.version_type",
-                        "`format_version` must be a positive integer".to_string(),
-                        &case.path,
-                        Some(format!("{}/format_version", case.pointer)),
-                        None,
-                        Some(case.id.clone()),
-                    );
                 }
-            }
+                Err(_) => self.push(
+                    Severity::Error,
+                    "format.version_invalid",
+                    format!(
+                        "`case.format_version` must be a valid quoted semantic version such as \"{STORY_FORMAT_VERSION}\""
+                    ),
+                    &case.path,
+                    version_pointer.clone(),
+                    locate_scalar(&case.source, raw_version),
+                    Some(case.id.clone()),
+                ),
+            },
+            Some(Value::Number(number)) => self.push(
+                Severity::Error,
+                "format.incompatible_version",
+                format!(
+                    "This story uses legacy format version {number}. Narrator now uses semantic story-format versions and cannot safely open it. Please migrate the story to format {STORY_FORMAT_VERSION} first."
+                ),
+                &case.path,
+                version_pointer.clone(),
+                locate_scalar(&case.source, &number.to_string()),
+                Some(case.id.clone()),
+            ),
             Some(_) => self.push(
                 Severity::Error,
                 "format.version_type",
-                "`format_version` must be a positive integer".to_string(),
+                format!(
+                    "`case.format_version` must be a quoted semantic version such as \"{STORY_FORMAT_VERSION}\""
+                ),
                 &case.path,
-                Some(format!("{}/format_version", case.pointer)),
+                version_pointer.clone(),
                 None,
                 Some(case.id.clone()),
             ),
             None => self.push(
-                Severity::Warning,
+                Severity::Error,
                 "format.version_missing",
-                "add `case.format_version: 1` to make format evolution explicit".to_string(),
+                format!(
+                    "This story does not declare a semantic format version, so Narrator cannot safely open it. Please migrate it and add `case.format_version: \"{STORY_FORMAT_VERSION}\"`."
+                ),
                 &case.path,
-                Some(format!("{}/format_version", case.pointer)),
+                version_pointer,
                 None,
                 Some(case.id.clone()),
             ),
@@ -1103,7 +1147,7 @@ impl<'a> Validator<'a> {
                 );
             }
         }
-        if self.format_version == Some(2) {
+        if self.is_format_2() {
             match case
                 .mapping
                 .get(Value::String("initial_time".to_string()))
@@ -2380,7 +2424,7 @@ impl<'a> Validator<'a> {
             }
 
             let parameter_types = self.validate_command_parameters(command);
-            if self.format_version == Some(2) {
+            if self.is_format_2() {
                 self.validate_runtime_command_signature(command, &parameter_types);
             }
             self.validate_world_effects(command, &parameter_types);

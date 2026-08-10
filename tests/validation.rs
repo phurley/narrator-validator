@@ -9,7 +9,7 @@ use serde_yaml::{Mapping, Value};
 const VALID_STORY: &str = r#"
 case:
   id: case.example
-  format_version: 1
+  format_version: "1.0.0"
   entry_settings: [setting.foyer]
   exit_settings: [setting.foyer]
 solution:
@@ -84,7 +84,7 @@ triggers:
 const VALID_FORMAT_2_STORY: &str = r#"
 case:
   id: case.example
-  format_version: 2
+  format_version: "2.0.0"
   initial_time: "21:00"
   entry_settings: [setting.foyer]
   exit_settings: [setting.foyer]
@@ -314,7 +314,7 @@ fn story_files(source: String) -> Vec<SourceFile> {
 fn valid_repository_has_no_diagnostics() {
     let report = report(VALID_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.format_version, Some(1));
+    assert_eq!(report.format_version.as_deref(), Some("1.0.0"));
     assert!(report.diagnostics.is_empty());
 }
 
@@ -322,9 +322,55 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_2_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_2_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "0.18.0");
-    assert_eq!(report.format_version, Some(2));
+    assert_eq!(report.validator_version, "0.19.0");
+    assert_eq!(report.format_version.as_deref(), Some("2.0.0"));
     assert!(report.diagnostics.is_empty());
+}
+
+#[test]
+fn accepts_semantically_compatible_story_format_versions() {
+    for version in ["1.7.3", "2.4.1"] {
+        let source = if version.starts_with('1') {
+            VALID_STORY.replace("\"1.0.0\"", &format!("\"{version}\""))
+        } else {
+            VALID_FORMAT_2_STORY.replace("\"2.0.0\"", &format!("\"{version}\""))
+        };
+        let report = report(source);
+        assert!(report.valid, "{version}: {:#?}", report.diagnostics);
+        assert_eq!(report.format_version.as_deref(), Some(version));
+    }
+}
+
+#[test]
+fn rejects_older_and_newer_incompatible_story_formats_with_migration_guidance() {
+    for (version, expected_text) in [("0.9.0", "too old"), ("3.0.0", "newer")] {
+        let source = VALID_FORMAT_2_STORY.replace("\"2.0.0\"", &format!("\"{version}\""));
+        let report = report(source);
+        assert!(!report.valid);
+        assert_eq!(report.diagnostics.len(), 1);
+        assert_eq!(report.diagnostics[0].code, "format.incompatible_version");
+        assert!(report.diagnostics[0].message.contains(expected_text));
+    }
+}
+
+#[test]
+fn rejects_legacy_integer_story_formats_before_schema_validation() {
+    let report = report(VALID_FORMAT_2_STORY.replace("\"2.0.0\"", "2"));
+    assert!(!report.valid);
+    assert_eq!(report.diagnostics.len(), 1);
+    assert_eq!(report.diagnostics[0].code, "format.incompatible_version");
+    assert!(report.diagnostics[0]
+        .message
+        .contains("legacy format version 2"));
+}
+
+#[test]
+fn rejects_missing_story_format_with_friendly_migration_guidance() {
+    let report = report(VALID_STORY.replace("  format_version: \"1.0.0\"\n", ""));
+    assert!(!report.valid);
+    assert_eq!(report.diagnostics.len(), 1);
+    assert_eq!(report.diagnostics[0].code, "format.version_missing");
+    assert!(report.diagnostics[0].message.contains("cannot safely open"));
 }
 
 #[test]
@@ -2244,7 +2290,6 @@ fn ignores_id_shaped_text_inside_prose() {
 #[test]
 fn warnings_do_not_invalidate_a_repository() {
     let source = VALID_STORY
-        .replace("  format_version: 1\n", "")
         .replace("  entry_settings: [setting.foyer]\n", "")
         .replace("  exit_settings: [setting.foyer]\n", "");
     let report = report(source);

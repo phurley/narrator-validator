@@ -42,7 +42,7 @@ assert.ok(
 const dropReport = await validateRepository([
   {
     path: 'settings.yaml',
-    source: 'case:\n  id: case.smoke\n  format_version: 2\n',
+    source: 'case:\n  id: case.smoke\n  format_version: "2.0.0"\n',
   },
   {
     path: 'commands.yaml',

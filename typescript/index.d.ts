@@ -41,7 +41,7 @@ export interface Diagnostic {
 
 export interface ValidationReport {
   validator_version: string
-  format_version?: number
+  format_version?: string
   valid: boolean
   diagnostics: Diagnostic[]
 }

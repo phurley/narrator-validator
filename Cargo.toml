@@ -1,6 +1,6 @@
 [package]
 name = "narrator-validator"
-version = "0.18.0"
+version = "0.19.0"
 edition = "2021"
 rust-version = "1.80"
 description = "Shared semantic validator for Narrator story repositories"
@@ -23,6 +23,7 @@ wasm = ["dep:wasm-bindgen"]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
+semver = "1"
 wasm-bindgen = { version = "=0.2.100", optional = true }
 # serde_yaml's indexmap range otherwise resolves to an edition-2024 release
 # that Cargo 1.80 cannot parse. Keep the validator aligned with the backend's
