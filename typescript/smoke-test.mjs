@@ -39,4 +39,24 @@ assert.ok(
   ),
 )
 
+const dropReport = await validateRepository([
+  {
+    path: 'settings.yaml',
+    source: 'case:\n  id: case.smoke\n  format_version: 2\n',
+  },
+  {
+    path: 'commands.yaml',
+    source:
+      'commands:\n  - id: command.drop\n    name: Drop\n    parameters:\n      - name: item\n        type: entity\n        required: false\n',
+  },
+])
+assert.ok(
+  dropReport.diagnostics.some(
+    (diagnostic) =>
+      diagnostic.code === 'command.runtime_signature' &&
+      diagnostic.pointer === '/commands/0/parameters/0/required' &&
+      diagnostic.subject_id === 'command.drop',
+  ),
+)
+
 console.log('browser package smoke test passed')
