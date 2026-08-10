@@ -326,7 +326,7 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_2_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_2_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "0.13.0");
+    assert_eq!(report.validator_version, "0.14.0");
     assert_eq!(report.format_version, Some(2));
     assert!(report.diagnostics.is_empty());
 }
@@ -1259,7 +1259,7 @@ fn format_2_validates_fact_requirements_and_cycles() {
 }
 
 #[test]
-fn format_2_enforces_unclaimed_opening_facts_and_central_requirements() {
+fn format_2_enforces_automatic_opening_facts_and_central_requirements() {
     let source = VALID_FORMAT_2_STORY
         .replace(
             "        statement: The knife is present.",
@@ -1825,8 +1825,19 @@ fn rejects_legacy_trigger_conditions() {
 fn validates_optional_facts_and_deduction_inputs() {
     let source = VALID_FORMAT_2_STORY.to_string();
 
-    let report = report(source.clone());
-    assert!(report.valid, "{:#?}", report.diagnostics);
+    let valid_report = report(source.clone());
+    assert!(valid_report.valid, "{:#?}", valid_report.diagnostics);
+
+    let single_input = source.replace(
+        "inputs: [fact.knife_has_blood, fact.knife_connects_to_scene]",
+        "inputs: [fact.knife_has_blood]",
+    );
+    let single_input_report = report(single_input);
+    assert!(
+        single_input_report.valid,
+        "{:#?}",
+        single_input_report.diagnostics
+    );
 
     let malformed = source
         .replace(
@@ -1835,7 +1846,7 @@ fn validates_optional_facts_and_deduction_inputs() {
         )
         .replace(
             "inputs: [fact.knife_has_blood, fact.knife_connects_to_scene]",
-            "inputs: [fact.knife_has_blood]",
+            "inputs: []",
         )
         .replace("truth: true", "truth: perhaps");
     let result = codes(malformed);

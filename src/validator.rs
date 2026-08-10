@@ -1816,7 +1816,7 @@ impl<'a> Validator<'a> {
                     self.push(
                         Severity::Error,
                         "fact.initially_known_removed",
-                        "format 2 facts begin unclaimed; omit `requires` to make a fact available on the opening turn".to_string(),
+                        "format 2 facts enter the notebook automatically; omit `requires` to add a fact when the player joins".to_string(),
                         &fact.path,
                         Some(format!("{}/initially_known", fact.pointer)),
                         None,
@@ -2071,13 +2071,13 @@ impl<'a> Validator<'a> {
             }
             if let Some(inputs) = deduction.mapping.get(Value::String("inputs".to_string())) {
                 let valid = inputs.as_sequence().is_some_and(|values| {
-                    (2..=3).contains(&values.len()) && values.iter().all(Value::is_string)
+                    (1..=3).contains(&values.len()) && values.iter().all(Value::is_string)
                 });
                 if !valid {
                     self.push(
                         Severity::Error,
                         "deduction.inputs_type",
-                        "deduction `inputs` must contain two or three fact or deduction IDs"
+                        "deduction `inputs` must contain one to three fact or deduction IDs"
                             .to_string(),
                         &deduction.path,
                         Some(format!("{}/inputs", deduction.pointer)),

@@ -355,7 +355,7 @@ case:
   initial_time: "21:32"
 ```
 
-Gameplay deductions may define a player-facing `conclusion`, two or three
+Gameplay deductions may define a player-facing `conclusion`, one to three
 fact/deduction `inputs`, hidden boolean `truth`, `contradicted_by` references,
 and an optional structured `solves` answer. Deduction cycle detection follows
 both `requires` and deduction-valued `inputs`.
