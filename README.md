@@ -24,6 +24,13 @@ and game engine agree on where content lives:
 Other top-level metadata may remain in additional YAML files. The former
 `tags` section is removed; use flags for authored world state.
 
+Commands and triggers share one ordered world-effect contract. Canonical
+operations are `set_flag`, `move`, `transform`, `reveal`, `conceal`,
+`learn_fact`, `establish_deduction`, `describe`, `advance_time`, `win`, and
+`lose`. References use authored IDs, `player`, positional `paramN` bindings, or
+the matched `route`; delayed flag assignment uses `set_flag.after` rather than
+a second operation vocabulary.
+
 ## CLI
 
 ```sh
