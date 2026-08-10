@@ -219,35 +219,41 @@ Supported effects have these shapes:
 
 ```yaml
 effects:
+  - operation: set_flag
+    flag: flag.storm_started
+    value: true
   - operation: advance_time
     minutes: 15
+  - operation: advance_time
+    route: route
   - operation: move
     subjects: [player, character.guide, entity.lantern, param1]
     setting: setting.boathouse
   - operation: transform
     entity_from: entity.sealed_letter
     entity_to: entity.open_letter
+  - operation: reveal
+    entity: entity.letter_contents
+  - operation: conceal
+    entity: entity.letter_contents
   - operation: learn_fact
     fact_id: fact.letter_contents
   - operation: establish_deduction
     deduction_id: deduction.blackmail
   - operation: describe
     text: Thunder rolls across the island.
-  - operation: trigger
-    trigger_id: trigger.lockdown
   - operation: win
     text: The mystery is solved.
   - operation: lose
     text: The culprit escapes.
 ```
 
-`move.subjects` accepts `player`, character/entity IDs, and compatible
-parameters. Facts, triggers, narrative text, and durations are authored effect
-values because they are not action parameter types. Trigger-file effects
-continue to use their existing, separate `operation`/`target`/`value` contract.
-Runtime durations such as `advance_time.minutes` and route travel times must be
-positive whole minutes.
-The former `add_tag` and `remove_tag` action effects are invalid.
+Commands and triggers use these same effect shapes and positional parameter
+references. `move.subjects` accepts `player`, character/entity IDs, and
+compatible parameters. `advance_time` requires exactly one positive whole
+`minutes` value or a route reference; `route` means the route matched for the
+current action. Delayed trigger work uses `set_flag.after` and can only assign
+true because its completion is player-scoped.
 
 ## Flags and trigger gates
 
@@ -282,35 +288,28 @@ triggers:
     any_of: [character.guide, entity.weather_radio]
     all_of: [flag.storm_started]
     effects:
-      - operation: give
-        target: flag.boathouse_warning_heard
+      - operation: set_flag
+        flag: flag.boathouse_warning_heard
+        value: true
 ```
 
 `time.relation` is `before`, `at`, or `after`, and `time.value` is a quoted
 24-hour `HH:MM` value. The legacy free-form `conditions` list is invalid.
-Trigger command, description, `once`, effects, and nested facts retain their
-existing contracts.
-
-Executable format-2 trigger effects are `move`, `advance_time_by_route`,
-`claim`, `give`, `give_after`, `remove`, and `satisfy_requirement`. Their
-`target` and `value` operands are checked against the referenced command's
-named parameter types; `$actor` and `$fact` are available only to the
-operations that define them. Unknown operations, extra fields, missing values,
-and wrong-kind authored IDs are errors rather than runtime surprises.
-
-Delayed work uses flags. `give`, `give_after`, and `remove` target authored
-flags; `give_after` also needs a positive minute, hour, or turn delay:
+Unknown operations, extra fields, missing values, and wrong-kind operands are
+errors for both command and trigger authorship. Delayed flag assignment needs a
+positive minute, hour, or turn delay:
 
 ```yaml
-- operation: give_after
-  target: flag.knife_forensics_complete
-  value: 20m
+- operation: set_flag
+  flag: flag.knife_forensics_complete
+  value: true
+  after: 20m
 ```
 
 The resulting fact can require `flag.knife_forensics_complete`. Format 2 rejects
 clue sections, top-level fact sections, facts nested beneath unsupported owner
-types, `initially_known`, clue-based deduction `supported_by`, and the legacy
-`learn`/`discover` effects. Fact requirement cycles are also rejected.
+types, `initially_known`, and clue-based deduction `supported_by`. Fact
+requirement cycles are also rejected.
 
 Format 2 facts may include optional player-safe `narrative_detail`. When
 present, it must be a non-empty string and inherits the fact's requirements;

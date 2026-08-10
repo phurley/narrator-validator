@@ -287,7 +287,6 @@ impl<'a> Validator<'a> {
                     triggers.as_slice(),
                 ],
                 &clues,
-                &triggers,
             );
         }
         self.validate_graphs(
@@ -2170,7 +2169,6 @@ impl<'a> Validator<'a> {
         facts: &[Item],
         fact_owners: &[&[Item]],
         clues: &[Item],
-        triggers: &[Item],
     ) {
         let mut reachable = BTreeSet::new();
         reachable.extend(
@@ -2189,31 +2187,12 @@ impl<'a> Validator<'a> {
         for clue in clues {
             reachable.extend(string_list_field(&clue.mapping, "establishes"));
         }
-        for trigger in triggers {
-            for effect in trigger
-                .mapping
-                .get(Value::String("effects".to_string()))
-                .and_then(Value::as_sequence)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_mapping)
-            {
-                if matches!(
-                    string_field(effect, "operation"),
-                    Some("learn" | "learn_after")
-                ) {
-                    if let Some(target) = string_field(effect, "target") {
-                        reachable.insert(target.to_string());
-                    }
-                }
-            }
-        }
         for fact in facts.iter().filter(|fact| !reachable.contains(&fact.id)) {
             self.push(
                 Severity::Warning,
                 "fact.unreachable",
                 format!(
-                    "fact `{}` is neither initially known nor associated with a discoverable element, clue, or learning effect",
+                    "fact `{}` is neither initially known nor associated with a discoverable element or clue",
                     fact.id
                 ),
                 &fact.path,
@@ -3292,262 +3271,6 @@ impl<'a> Validator<'a> {
             self.validate_trigger_gate_list(trigger, "any_of");
             self.validate_trigger_gate_list(trigger, "all_of");
             self.validate_world_effects(trigger, &parameter_types);
-            /* Removed format-1 trigger effect validator. Both author types now
-             * pass through validate_world_effects above.
-            self.validate_trigger_mapping_list(
-                trigger,
-                "effects",
-                &["operation", "target"],
-                "trigger.effect",
-            );
-
-            if let Some(effects) = trigger
-                .mapping
-                .get(Value::String("effects".to_string()))
-                .and_then(Value::as_sequence)
-            {
-                for (index, effect) in effects.iter().enumerate() {
-                    let Some(effect) = effect.as_mapping() else {
-                        continue;
-                    };
-                    let invalid_value_type = effect
-                        .get(Value::String("value".to_string()))
-                        .is_some_and(|value| value.as_str().is_none());
-                    if invalid_value_type {
-                        self.push(
-                            Severity::Error,
-                            "trigger.effect_value_type",
-                            "trigger effect `value` must be a string when present".to_string(),
-                            &trigger.path,
-                            Some(format!("{}/effects/{index}/value", trigger.pointer)),
-                            None,
-                            Some(trigger.id.clone()),
-                        );
-                    }
-                    let Some(operation) = string_field(effect, "operation") else {
-                        continue;
-                    };
-                    let Some(target) = string_field(effect, "target") else {
-                        continue;
-                    };
-                    match operation {
-                        "learn" | "learn_after" | "discover" | "discover_after"
-                            if fact_claims_enabled =>
-                        {
-                            self.validate_trigger_effect_fields(
-                                trigger,
-                                index,
-                                effect,
-                                true,
-                                matches!(operation, "learn_after" | "discover_after"),
-                            );
-                            self.push(
-                                Severity::Error,
-                                "trigger.legacy_knowledge_effect",
-                                format!(
-                                    "format 2 derives fact availability from `requires`; `{operation}` is no longer used"
-                                ),
-                                &trigger.path,
-                                Some(format!("{}/effects/{index}/operation", trigger.pointer)),
-                                locate_scalar(&trigger.source, operation),
-                                Some(trigger.id.clone()),
-                            );
-                        }
-                        "learn" | "learn_after" => {
-                            self.validate_trigger_effect_fields(
-                                trigger,
-                                index,
-                                effect,
-                                true,
-                                operation == "learn_after",
-                            );
-                            self.validate_trigger_effect_operand(
-                                trigger,
-                                index,
-                                operation,
-                                "target",
-                                target,
-                                &[Kind::Fact],
-                                &[],
-                                true,
-                                &parameter_types,
-                            );
-                        }
-                        "discover" | "discover_after" => {
-                            self.validate_trigger_effect_fields(
-                                trigger,
-                                index,
-                                effect,
-                                true,
-                                operation == "discover_after",
-                            );
-                            self.validate_trigger_effect_operand(
-                                trigger,
-                                index,
-                                operation,
-                                "target",
-                                target,
-                                &[Kind::Clue],
-                                &[],
-                                true,
-                                &parameter_types,
-                            );
-                        }
-                        "move" => {
-                            self.validate_trigger_effect_fields(trigger, index, effect, true, true);
-                            self.validate_trigger_effect_operand(
-                                trigger,
-                                index,
-                                operation,
-                                "target",
-                                target,
-                                &[Kind::Character, Kind::Entity],
-                                &["$actor"],
-                                true,
-                                &parameter_types,
-                            );
-                            if let Some(value) = string_field(effect, "value") {
-                                self.validate_trigger_effect_operand(
-                                    trigger,
-                                    index,
-                                    operation,
-                                    "value",
-                                    value,
-                                    &[Kind::Setting],
-                                    &[],
-                                    true,
-                                    &parameter_types,
-                                );
-                            }
-                        }
-                        "advance_time_by_route" => {
-                            self.validate_trigger_effect_fields(trigger, index, effect, true, true);
-                            self.validate_trigger_effect_operand(
-                                trigger,
-                                index,
-                                operation,
-                                "target",
-                                target,
-                                &[],
-                                &["$actor"],
-                                false,
-                                &parameter_types,
-                            );
-                            if let Some(value) = string_field(effect, "value") {
-                                self.validate_trigger_effect_operand(
-                                    trigger,
-                                    index,
-                                    operation,
-                                    "value",
-                                    value,
-                                    &[Kind::Setting],
-                                    &[],
-                                    true,
-                                    &parameter_types,
-                                );
-                            }
-                        }
-                        "claim" => {
-                            self.validate_trigger_effect_fields(
-                                trigger, index, effect, false, false,
-                            );
-                            self.validate_trigger_effect_operand(
-                                trigger,
-                                index,
-                                operation,
-                                "target",
-                                target,
-                                &[Kind::Fact],
-                                &["$fact"],
-                                false,
-                                &parameter_types,
-                            );
-                        }
-                        "give" | "give_after" | "remove" => {
-                            self.validate_trigger_effect_fields(
-                                trigger,
-                                index,
-                                effect,
-                                operation == "give_after",
-                                operation == "give_after",
-                            );
-                            self.validate_trigger_effect_operand(
-                                trigger,
-                                index,
-                                operation,
-                                "target",
-                                target,
-                                &[Kind::Flag],
-                                &[],
-                                false,
-                                &parameter_types,
-                            );
-                        }
-                        "satisfy_requirement" => {
-                            self.validate_trigger_effect_fields(trigger, index, effect, true, true);
-                            self.validate_trigger_effect_operand(
-                                trigger,
-                                index,
-                                operation,
-                                "target",
-                                target,
-                                &[Kind::Route],
-                                &[],
-                                true,
-                                &parameter_types,
-                            );
-                            if let Some(value) = string_field(effect, "value") {
-                                self.validate_trigger_effect_operand(
-                                    trigger,
-                                    index,
-                                    operation,
-                                    "value",
-                                    value,
-                                    &[Kind::Entity],
-                                    &[],
-                                    true,
-                                    &parameter_types,
-                                );
-                            }
-                        }
-                        _ => self.push(
-                            Severity::Error,
-                            "trigger.effect_unknown_operation",
-                            format!("unknown trigger effect operation `{operation}`"),
-                            &trigger.path,
-                            Some(format!("{}/effects/{index}/operation", trigger.pointer)),
-                            locate_scalar(&trigger.source, operation),
-                            Some(trigger.id.clone()),
-                        ),
-                    }
-                    if matches!(operation, "learn_after" | "discover_after" | "give_after")
-                        && !invalid_value_type
-                    {
-                        match string_field(effect, "value") {
-                            Some(value) if valid_delay(value) => {}
-                            Some(_) => self.push(
-                                Severity::Error,
-                                "trigger.effect_delay_invalid",
-                                "delayed effects need a positive delay such as `20m`, `1h`, or `2turns`".to_string(),
-                                &trigger.path,
-                                Some(format!("{}/effects/{index}/value", trigger.pointer)),
-                                None,
-                                Some(trigger.id.clone()),
-                            ),
-                            None => self.push(
-                                Severity::Error,
-                                "trigger.effect_delay_missing",
-                                "delayed effects require a `value` delay".to_string(),
-                                &trigger.path,
-                                Some(format!("{}/effects/{index}/value", trigger.pointer)),
-                                None,
-                                Some(trigger.id.clone()),
-                            ),
-                        }
-                    }
-                }
-            }
-            */
         }
     }
 

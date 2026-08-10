@@ -1276,7 +1276,7 @@ fn format_2_enforces_automatic_opening_facts_and_central_requirements() {
 }
 
 #[test]
-fn format_2_validates_state_flags_and_delayed_give_effects() {
+fn format_2_validates_flags_and_delayed_assignment() {
     let invalid = VALID_FORMAT_2_STORY
         .replace(
             "  - id: flag.knife_analysis_complete\n    name: Knife analysis complete\n    description: Whether the delayed knife analysis has completed.\n    initial_state: false",
@@ -1301,6 +1301,18 @@ fn format_2_validates_state_flags_and_delayed_give_effects() {
             "{delay} must be rejected before runtime"
         );
     }
+}
+
+#[test]
+fn delayed_set_flag_rejects_false_assignment() {
+    let report = report(VALID_FORMAT_2_STORY.replace(
+        "        value: true\n        after: 20m",
+        "        value: false\n        after: 20m",
+    ));
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "effect.delay"
+            && diagnostic.pointer.as_deref() == Some("/triggers/0/effects/0/after")
+    }));
 }
 
 #[test]
