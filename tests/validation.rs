@@ -326,7 +326,7 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_2_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_2_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "0.14.0");
+    assert_eq!(report.validator_version, "0.15.0");
     assert_eq!(report.format_version, Some(2));
     assert!(report.diagnostics.is_empty());
 }
@@ -1377,6 +1377,140 @@ fn reports_parent_and_dependency_cycles() {
     let result = codes(source);
     assert!(result.contains(&"setting.parent_cycle".to_string()));
     assert!(result.contains(&"deduction.dependency_cycle".to_string()));
+}
+
+#[test]
+fn validates_entity_placement_visibility_and_portability() {
+    let source = VALID_FORMAT_2_STORY
+        .replace(
+            "  - id: entity.knife\n    initial:\n      container: setting.study",
+            "  - id: entity.knife\n    initial:\n      container: entity.box\n    physical:\n      portable: true\n    visibility:\n      requires: flag.knife_examined\n  - id: entity.box\n    initial:\n      container: setting.study\n  - id: entity.bookshelf\n    initial:\n      container: setting.study\n    visibility:\n      requires: [setting.study, entity.box, fact.knife_is_present, deduction.solution, flag.knife_examined, trigger.investigate_knife]",
+        );
+    let report = report(source);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+}
+
+#[test]
+fn rejects_invalid_entity_physical_and_visibility_shapes_at_exact_pointers() {
+    for (replacement, code, pointer) in [
+        (
+            "    physical: portable",
+            "entity.physical_type",
+            "/entities/0/physical",
+        ),
+        (
+            "    physical:\n      portable: sometimes",
+            "entity.portable_type",
+            "/entities/0/physical/portable",
+        ),
+        (
+            "    physical:\n      takeable: true",
+            "entity.physical_unknown_field",
+            "/entities/0/physical/takeable",
+        ),
+        (
+            "    visibility: hidden",
+            "entity.visibility_type",
+            "/entities/0/visibility",
+        ),
+        (
+            "    visibility:\n      requires: []",
+            "entity.visibility_requires_type",
+            "/entities/0/visibility/requires",
+        ),
+        (
+            "    visibility:\n      requires: [flag.knife_examined, 42]",
+            "entity.visibility_requirement_type",
+            "/entities/0/visibility/requires/1",
+        ),
+        (
+            "    visibility:\n      searchable: true",
+            "entity.visibility_unknown_field",
+            "/entities/0/visibility/searchable",
+        ),
+    ] {
+        let source = VALID_FORMAT_2_STORY.replace(
+            "    initial:\n      container: setting.study",
+            &format!("    initial:\n      container: setting.study\n{replacement}"),
+        );
+        let report = report(source);
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code && diagnostic.pointer.as_deref() == Some(pointer)
+            }),
+            "missing {code} at {pointer}: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
+fn rejects_unknown_ephemeral_and_duplicate_visibility_requirements() {
+    let source = VALID_FORMAT_2_STORY.replace(
+        "    initial:\n      container: setting.study",
+        "    initial:\n      container: setting.study\n    visibility:\n      requires: [flag.not_authored, command.investigate, flag.knife_examined, flag.knife_examined]",
+    );
+    let report = report(source);
+    for (code, pointer) in [
+        ("reference.unknown", "/entities/0/visibility/requires/0"),
+        ("reference.wrong_type", "/entities/0/visibility/requires/1"),
+        (
+            "list.duplicate_reference",
+            "/entities/0/visibility/requires/3",
+        ),
+    ] {
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code && diagnostic.pointer.as_deref() == Some(pointer)
+            }),
+            "missing {code} at {pointer}: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
+fn rejects_entity_container_type_and_cycles_at_the_container_pointer() {
+    let wrong_type =
+        report(VALID_FORMAT_2_STORY.replace("container: setting.study", "container: 42"));
+    assert!(wrong_type.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "entity.container_type"
+            && diagnostic.pointer.as_deref() == Some("/entities/0/initial/container")
+    }));
+
+    let cyclic = VALID_FORMAT_2_STORY
+        .replace("container: setting.study", "container: entity.box")
+        .replace(
+            "events:",
+            "  - id: entity.box\n    initial:\n      container: entity.knife\nevents:",
+        );
+    let report = report(cyclic);
+    let diagnostic = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "entity.containment_cycle")
+        .expect("entity containment cycle diagnostic");
+    assert_eq!(
+        diagnostic.pointer.as_deref(),
+        Some("/entities/1/initial/container")
+    );
+    assert_eq!(diagnostic.subject_id.as_deref(), Some("entity.box"));
+    assert!(diagnostic.range.is_some());
+}
+
+#[test]
+fn rejects_misplaced_entity_capability_booleans() {
+    for field in ["portable", "searchable", "investigatable", "takeable"] {
+        let source = VALID_FORMAT_2_STORY.replace(
+            "    initial:\n      container: setting.study",
+            &format!("    initial:\n      container: setting.study\n    {field}: true"),
+        );
+        let report = report(source);
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "entity.capability_field"
+                && diagnostic.pointer.as_deref() == Some(&format!("/entities/0/{field}"))
+        }));
+    }
 }
 
 #[test]

@@ -135,6 +135,49 @@ available. The engine evaluates requirements when a player turn begins and
 after an action resolves; the resolved command, arguments, and authored effects
 participate in that check.
 
+## Entity placement, visibility, and portability
+
+Entity state keeps four independent concepts separate:
+
+- An **active** entity is the current entity that exists in runtime state rather
+  than a form replaced by a transformation.
+- A **contained** entity has a current container. Author its starting placement
+  with `initial.container`; a setting, character, or another entity may be the
+  container, so containers can nest. Containment cycles are invalid.
+- A **visible** entity has every optional `visibility.requires` gate satisfied.
+  Omission means no additional visibility gate. One requirement ID or a
+  non-empty unique list is accepted; a list means all requirements must hold.
+- A **portable** entity has `physical.portable: true`. Omitting `physical`,
+  omitting `portable`, or explicitly setting it to false means non-portable.
+
+Visibility gates must be evaluable outside a turn: known facts or deductions,
+satisfied flags or triggers, the player's setting, or an entity the player
+owns. Command, character, event, route, clue, and testimony IDs are not
+persistent visibility requirements.
+
+```yaml
+entities:
+  - id: entity.display_box
+    name: Locked display box
+    initial:
+      container: setting.study
+
+  - id: entity.service_pistol
+    name: Service pistol
+    initial:
+      container: entity.display_box
+    physical:
+      portable: true
+    visibility:
+      requires: flag.display_box_open
+```
+
+Containment, visibility, and portability do not imply one another. In
+particular, an entity can be visible but non-portable, portable but hidden, or
+nested in another entity. Actions determine what players can do, so the entity
+contract intentionally has no `searchable`, `investigatable`, `takeable`, or
+other verb-shaped booleans.
+
 ## Actions and effects
 
 Actions remain in the `commands` section. Each action has an ID, name, optional

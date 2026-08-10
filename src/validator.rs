@@ -249,6 +249,7 @@ impl<'a> Validator<'a> {
         self.validate_event_values(&events);
         self.validate_route_values(&routes);
         self.validate_character_values(&characters, facts_enabled);
+        self.validate_entity_values(&entities);
         if !fact_claims_enabled {
             self.validate_clue_values(&clues, facts_enabled);
         }
@@ -1455,6 +1456,199 @@ impl<'a> Validator<'a> {
                             Some(character.id.clone()),
                         );
                     }
+                }
+            }
+        }
+    }
+
+    fn validate_entity_values(&mut self, entities: &[Item]) {
+        for entity in entities {
+            for field in ["portable", "searchable", "investigatable", "takeable"] {
+                if entity
+                    .mapping
+                    .contains_key(Value::String(field.to_string()))
+                {
+                    self.push(
+                        Severity::Error,
+                        "entity.capability_field",
+                        format!(
+                            "entity `{field}` is not supported; portability belongs at `physical.portable`, while actions are determined by commands and state"
+                        ),
+                        &entity.path,
+                        Some(format!("{}/{}", entity.pointer, escape_pointer(field))),
+                        None,
+                        Some(entity.id.clone()),
+                    );
+                }
+            }
+
+            if let Some(initial) = entity.mapping.get(Value::String("initial".to_string())) {
+                let pointer = format!("{}/initial", entity.pointer);
+                let Some(initial) = initial.as_mapping() else {
+                    self.push(
+                        Severity::Error,
+                        "entity.initial_type",
+                        "entity `initial` must be a mapping".to_string(),
+                        &entity.path,
+                        Some(pointer),
+                        None,
+                        Some(entity.id.clone()),
+                    );
+                    continue;
+                };
+                if initial
+                    .get(Value::String("container".to_string()))
+                    .is_some_and(|container| {
+                        !container
+                            .as_str()
+                            .is_some_and(|container| !container.trim().is_empty())
+                    })
+                {
+                    self.push(
+                        Severity::Error,
+                        "entity.container_type",
+                        "entity `initial.container` must be a non-empty setting, character, or entity ID"
+                            .to_string(),
+                        &entity.path,
+                        Some(format!("{pointer}/container")),
+                        None,
+                        Some(entity.id.clone()),
+                    );
+                }
+            }
+
+            if let Some(physical) = entity.mapping.get(Value::String("physical".to_string())) {
+                let pointer = format!("{}/physical", entity.pointer);
+                let Some(physical) = physical.as_mapping() else {
+                    self.push(
+                        Severity::Error,
+                        "entity.physical_type",
+                        "entity `physical` must be a mapping".to_string(),
+                        &entity.path,
+                        Some(pointer),
+                        None,
+                        Some(entity.id.clone()),
+                    );
+                    continue;
+                };
+                for key in physical.keys() {
+                    match key.as_str() {
+                        Some("portable") => {}
+                        Some(field) => self.push(
+                            Severity::Error,
+                            "entity.physical_unknown_field",
+                            format!("`{field}` is not a supported entity physical field"),
+                            &entity.path,
+                            Some(format!("{pointer}/{}", escape_pointer(field))),
+                            None,
+                            Some(entity.id.clone()),
+                        ),
+                        None => self.push(
+                            Severity::Error,
+                            "entity.physical_field",
+                            "entity physical field names must be strings".to_string(),
+                            &entity.path,
+                            Some(pointer.clone()),
+                            None,
+                            Some(entity.id.clone()),
+                        ),
+                    }
+                }
+                if physical
+                    .get(Value::String("portable".to_string()))
+                    .is_some_and(|portable| portable.as_bool().is_none())
+                {
+                    self.push(
+                        Severity::Error,
+                        "entity.portable_type",
+                        "entity `physical.portable` must be a boolean".to_string(),
+                        &entity.path,
+                        Some(format!("{pointer}/portable")),
+                        None,
+                        Some(entity.id.clone()),
+                    );
+                }
+            }
+
+            let Some(visibility) = entity.mapping.get(Value::String("visibility".to_string()))
+            else {
+                continue;
+            };
+            let pointer = format!("{}/visibility", entity.pointer);
+            let Some(visibility) = visibility.as_mapping() else {
+                self.push(
+                    Severity::Error,
+                    "entity.visibility_type",
+                    "entity `visibility` must be a mapping".to_string(),
+                    &entity.path,
+                    Some(pointer),
+                    None,
+                    Some(entity.id.clone()),
+                );
+                continue;
+            };
+            for key in visibility.keys() {
+                match key.as_str() {
+                    Some("requires") => {}
+                    Some(field) => self.push(
+                        Severity::Error,
+                        "entity.visibility_unknown_field",
+                        format!("`{field}` is not a supported entity visibility field"),
+                        &entity.path,
+                        Some(format!("{pointer}/{}", escape_pointer(field))),
+                        None,
+                        Some(entity.id.clone()),
+                    ),
+                    None => self.push(
+                        Severity::Error,
+                        "entity.visibility_field",
+                        "entity visibility field names must be strings".to_string(),
+                        &entity.path,
+                        Some(pointer.clone()),
+                        None,
+                        Some(entity.id.clone()),
+                    ),
+                }
+            }
+            let Some(requires) = visibility.get(Value::String("requires".to_string())) else {
+                continue;
+            };
+            let requires_pointer = format!("{pointer}/requires");
+            match requires {
+                Value::String(id) if !id.trim().is_empty() => {
+                    // Reference existence and persistence are checked centrally.
+                }
+                Value::Sequence(values) if !values.is_empty() => {
+                    values.iter().enumerate().for_each(|(index, value)| {
+                        let item_pointer = format!("{requires_pointer}/{index}");
+                        if value
+                            .as_str()
+                            .filter(|requirement| !requirement.trim().is_empty())
+                            .is_none()
+                        {
+                            self.push(
+                                Severity::Error,
+                                "entity.visibility_requirement_type",
+                                "entity visibility requirements must be non-empty IDs".to_string(),
+                                &entity.path,
+                                Some(item_pointer),
+                                None,
+                                Some(entity.id.clone()),
+                            );
+                        }
+                    })
+                }
+                _ => {
+                    self.push(
+                        Severity::Error,
+                        "entity.visibility_requires_type",
+                        "entity `visibility.requires` must be one ID or a non-empty list of unique IDs"
+                            .to_string(),
+                        &entity.path,
+                        Some(requires_pointer),
+                        None,
+                        Some(entity.id.clone()),
+                    );
                 }
             }
         }
@@ -3630,11 +3824,26 @@ impl<'a> Validator<'a> {
                     .map(|container| (item.id.clone(), vec![container.to_string()]))
             })
             .collect();
-        self.validate_cycles(
-            entity_containment,
-            "entity.containment_cycle",
-            "entity containment",
-        );
+        for cycle in find_cycles(&entity_containment) {
+            let subject = cycle.first().cloned();
+            let item = subject
+                .as_deref()
+                .and_then(|id| entities.iter().find(|item| item.id == id));
+            let container =
+                item.and_then(|item| nested_string_field(&item.mapping, &["initial", "container"]));
+            self.push(
+                Severity::Error,
+                "entity.containment_cycle",
+                format!(
+                    "entity containment contains a cycle: {}",
+                    cycle.join(" -> ")
+                ),
+                item.map_or("", |item| item.path.as_str()),
+                item.map(|item| format!("{}/initial/container", item.pointer)),
+                item.and_then(|item| container.and_then(|id| locate_scalar(&item.source, id))),
+                subject,
+            );
+        }
 
         if fact_claims_enabled {
             self.validate_cycles(
@@ -4030,6 +4239,14 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
     const FACT_OR_DEDUCTION: &[Kind] = &[Kind::Fact, Kind::Deduction];
     const COMMANDS: &[Kind] = &[Kind::Command];
     const CONTAINERS: &[Kind] = &[Kind::Setting, Kind::Character, Kind::Entity];
+    const PERSISTENT_REQUIREMENTS: &[Kind] = &[
+        Kind::Setting,
+        Kind::Entity,
+        Kind::Fact,
+        Kind::Deduction,
+        Kind::Flag,
+        Kind::Trigger,
+    ];
     const CONTENT_SOURCES: &[Kind] = &[Kind::Setting, Kind::Character, Kind::Entity, Kind::Event];
     const FACT_TOPICS: &[Kind] = &[
         Kind::Setting,
@@ -4067,6 +4284,7 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
         _ if (field == "requires" || parent == "requires") && pointer.contains("/facts/") => {
             Some(FACT_REQUIREMENTS)
         }
+        _ if is_entity_visibility_requirement_pointer(pointer) => Some(PERSISTENT_REQUIREMENTS),
         _ if is_character_testimony_list_pointer(pointer, "requires") => Some(FACT_REQUIREMENTS),
         _ if is_character_testimony_list_pointer(pointer, "reveals") => Some(FACTS),
         _ if is_fact_association_pointer(pointer) => Some(FACTS),
@@ -4083,6 +4301,23 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
         }
         _ => None,
     }
+}
+
+fn is_entity_visibility_requirement_pointer(pointer: &str) -> bool {
+    let parts = pointer
+        .trim_start_matches('/')
+        .split('/')
+        .collect::<Vec<_>>();
+    matches!(
+        parts.as_slice(),
+        ["entities", entity_index, "visibility", "requires"]
+            if entity_index.parse::<usize>().is_ok()
+    ) || matches!(
+        parts.as_slice(),
+        ["entities", entity_index, "visibility", "requires", requirement_index]
+            if entity_index.parse::<usize>().is_ok()
+                && requirement_index.parse::<usize>().is_ok()
+    )
 }
 
 fn is_character_testimony_list_pointer(pointer: &str, field: &str) -> bool {
