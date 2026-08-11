@@ -2540,13 +2540,12 @@ impl<'a> Validator<'a> {
                                 CommandParameterType::Deduction,
                             ]
                             && shape.min == 0
-                            && shape.max == 1
                     });
                 if !valid {
                     self.push(
                         Severity::Error,
                         "character.testimony_question_topic_type",
-                        "the canonical `topic` parameter must optionally accept character, setting, event, entity, or deduction".to_string(),
+                        "the canonical `topic` parameter must accept optional character, setting, event, entity, or deduction selections".to_string(),
                         &command.path,
                         Some(format!("{pointer}/types")),
                         None,
