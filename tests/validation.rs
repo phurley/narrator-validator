@@ -888,6 +888,18 @@ fn question_signature_accepts_optional_topics_in_authored_order() {
 }
 
 #[test]
+fn question_signature_accepts_canonical_union_topic_cardinality() {
+    let source = format_2_story_with_player_safe_character_behavior().replace(
+        "    parameters:\n      - name: character\n        type: character\n        required: true\n",
+        "    parameters:\n      - name: character\n        types: [character]\n        min: 1\n        max: 1\n      - name: topic\n        types: [character, setting, event, entity, deduction]\n        min: 0\n        max: 5\n",
+    );
+    let report = report(source);
+
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert!(report.diagnostics.is_empty());
+}
+
+#[test]
 fn omitted_and_empty_reveals_match_and_private_legacy_behavior_is_not_safe_content() {
     let source = format_2_story_with_character_fields(
         "    private:\n      goal: SENTINEL_PRIVATE_GOAL\n      testimony:\n        under_pressure: SENTINEL_PRIVATE_UNDER_PRESSURE\n        must_not_confirm: SENTINEL_HIDDEN_FACT\n    portrayal:\n      demeanor: Player-safe demeanor.\n    testimony:\n      - id: testimony.no_reveal_omitted\n        text: This entry reveals no fact.\n        requires: [command.question, character.culprit]\n      - id: testimony.no_reveal_empty\n        text: This entry also reveals no fact.\n        requires: [command.question, character.culprit]\n        reveals: []\n",
@@ -1773,6 +1785,47 @@ fn validates_runtime_command_signatures_and_unique_parameter_names() {
         "    description: Learn that the knife is present.\n    parameters:\n      - name: target\n        type: entity\n        required: true\n    effects:",
     ));
     assert!(reserved.contains(&"command.runtime_signature".to_string()));
+}
+
+#[test]
+fn validates_union_parameter_kinds_and_cardinality() {
+    let canonical = VALID_STORY.replace(
+        "        type: entity\n        required: true",
+        "        types: [entity, character, setting]\n        min: 1\n        max: 3",
+    );
+    let accepted = report(canonical.clone());
+    assert!(accepted.valid, "{:#?}", accepted.diagnostics);
+
+    for (source, code) in [
+        (
+            canonical.replace(
+                "types: [entity, character, setting]",
+                "types: [entity, entity]",
+            ),
+            "command.parameter_kind_duplicate",
+        ),
+        (
+            canonical.replace("types: [entity, character, setting]", "types: []"),
+            "command.parameter_types_empty",
+        ),
+        (
+            canonical.replace("min: 1\n        max: 3", "min: 4\n        max: 3"),
+            "command.parameter_cardinality",
+        ),
+        (
+            canonical.replace("max: 3", "max: nope"),
+            "command.parameter_cardinality_type",
+        ),
+        (
+            canonical.replace(
+                "types: [entity, character, setting]",
+                "type: entity\n        types: [entity]",
+            ),
+            "command.parameter_kind",
+        ),
+    ] {
+        assert!(codes(source).contains(&code.to_string()), "missing {code}");
+    }
 }
 
 #[test]
