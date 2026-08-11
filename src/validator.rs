@@ -1502,6 +1502,7 @@ impl<'a> Validator<'a> {
 
     fn validate_character_values(&mut self, characters: &[Item], facts_enabled: bool) {
         for character in characters {
+            self.validate_character_voice_id(character);
             self.validate_character_portrayal(character);
             self.validate_character_testimony(character);
 
@@ -1598,6 +1599,32 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
+        }
+    }
+
+    fn validate_character_voice_id(&mut self, character: &Item) {
+        let Some(voice_id) = character.mapping.get(Value::String("voice_id".to_string())) else {
+            return;
+        };
+        let valid = voice_id.as_str().is_some_and(|voice_id| {
+            !voice_id.is_empty()
+                && voice_id.len() <= 128
+                && voice_id.trim() == voice_id
+                && voice_id.chars().all(|character| {
+                    character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+                })
+        });
+        if !valid {
+            self.push(
+                Severity::Error,
+                "character.voice_id",
+                "character `voice_id` must be a 1–128 character ElevenLabs voice ID containing only ASCII letters, numbers, `-`, or `_`"
+                    .to_string(),
+                &character.path,
+                Some(format!("{}/voice_id", character.pointer)),
+                None,
+                Some(character.id.clone()),
+            );
         }
     }
 

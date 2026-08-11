@@ -456,6 +456,41 @@ fn accepts_player_safe_portrayal_and_ordered_testimony_for_all_characters() {
 }
 
 #[test]
+fn character_voice_id_is_optional_and_validates_elevenlabs_identifier_shape() {
+    let valid = report(format_2_story_with_character_fields(
+        "    voice_id: JBFqnCBsd6RMkjVDRZzb\n",
+    ));
+    assert!(
+        !valid
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "character.voice_id"),
+        "unexpected voice diagnostic: {:#?}",
+        valid.diagnostics
+    );
+
+    for invalid in ["''", "' voice-id'", "voice/id", "[]"] {
+        let report = report(format_2_story_with_character_fields(&format!(
+            "    voice_id: {invalid}\n"
+        )));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "character.voice_id"
+                && diagnostic.pointer.as_deref() == Some("/characters/1/voice_id")
+                && diagnostic.subject_id.as_deref() == Some("character.culprit")
+        }));
+    }
+
+    let too_long = "v".repeat(129);
+    let report = report(format_2_story_with_character_fields(&format!(
+        "    voice_id: {too_long}\n"
+    )));
+    assert!(report
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "character.voice_id"));
+}
+
+#[test]
 fn portrayal_may_be_absent_but_present_portrayal_must_be_supported_and_nonempty() {
     let absent = report(VALID_FORMAT_2_STORY);
     assert!(absent.valid, "{:#?}", absent.diagnostics);

@@ -374,6 +374,7 @@ Characters may define explicitly player-safe portrayal and ordered testimony:
 ```yaml
 characters:
   - id: character.mara_voss
+    voice_id: JBFqnCBsd6RMkjVDRZzb
     portrayal:
       demeanor: Controlled and professionally helpful.
       speech_style: Precise, restrained sentences.
@@ -383,6 +384,11 @@ characters:
         requires: [command.question, character.mara_voss, event.blackout]
         reveals: [fact.mara_claimed_generator_alibi]
 ```
+
+`voice_id` may be omitted. When present, it selects the character's
+ElevenLabs voice for generated dialogue and must be a 1–128 character ID made
+only from ASCII letters, numbers, `-`, or `_`. It is delivery metadata and is
+not exposed as player-safe story content.
 
 `portrayal` may be omitted. When present, it must be a non-empty mapping with
 only `demeanor` and/or `speech_style`, and each present value must be a
