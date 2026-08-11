@@ -382,13 +382,12 @@ meaning. Its entries must be unique existing fact IDs. Entry fields other than
 `id`, `text`, `requires`, and `reveals` are rejected.
 
 When at least one testimony entry is authored, `command.question` must first
-declare a parameter with exact `name: character`, `type: character`, and
-`required: true`. That first parameter is the testimony owner target used by
-the runtime. Any later parameters must be optional topics
-named `topic_character`, `topic_entity`, `topic_setting`, `topic_event`, or
-`topic_deduction`, with the matching parameter type. This makes owner binding
-and testimony selection deterministic rather than dependent on an ambiguous
-command shape.
+declare a required `character` parameter accepting exactly one character. The
+canonical second parameter is an optional `topic` union accepting character,
+entity, setting, event, and deduction selections; its authored maximum controls
+how many topics may accompany the question. Legacy individually typed optional
+topic parameters remain accepted during migration. The first parameter remains
+the testimony owner target, making owner binding deterministic.
 
 The validator proves the structure, reference kinds, uniqueness, and explicit
 question/target gates. It cannot prove that natural-language testimony is
