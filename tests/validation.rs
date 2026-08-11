@@ -22,9 +22,11 @@ settings:
     type: island
   - id: setting.foyer
     type: room
+    tag_id: 0
     parent: setting.world
   - id: setting.study
     type: room
+    tag_id: 1
     parent: setting.world
 routes:
   - id: route.foyer_study
@@ -34,9 +36,12 @@ routes:
     travel_minutes: 1
 characters:
   - id: character.victim
+    tag_id: 2
   - id: character.culprit
+    tag_id: 3
 entities:
   - id: entity.knife
+    tag_id: 4
     initial:
       container: setting.study
 events:
@@ -60,6 +65,7 @@ flags:
     initial_state: false
 commands:
   - id: command.examine
+    tag_id: 5
     name: Examine
     description: Inspect an entity.
     parameters:
@@ -99,9 +105,11 @@ settings:
     type: island
   - id: setting.foyer
     type: room
+    tag_id: 0
     parent: setting.world
   - id: setting.study
     type: room
+    tag_id: 1
     parent: setting.world
 routes:
   - id: route.foyer_study
@@ -111,9 +119,12 @@ routes:
     travel_minutes: 1
 characters:
   - id: character.victim
+    tag_id: 2
   - id: character.culprit
+    tag_id: 3
 entities:
   - id: entity.knife
+    tag_id: 4
     initial:
       container: setting.study
     facts:
@@ -149,12 +160,14 @@ flags:
     initial_state: false
 commands:
   - id: command.claim
+    tag_id: 5
     name: Claim
     description: Learn that the knife is present.
     effects:
       - operation: learn_fact
         fact_id: fact.knife_is_present
   - id: command.investigate
+    tag_id: 6
     name: Investigate
     description: Resolve the authored effects of investigating an entity.
     parameters:
@@ -218,12 +231,12 @@ fn codes(source: impl Into<String>) -> Vec<String> {
 fn format_2_story_with_narrative_details() -> String {
     VALID_FORMAT_2_STORY
         .replace(
-            "  - id: setting.foyer\n    type: room\n    parent: setting.world",
-            "  - id: setting.foyer\n    type: room\n    parent: setting.world\n    facts:\n      - id: fact.setting_detail\n        statement: A setting-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL",
+            "  - id: setting.foyer\n    type: room\n    tag_id: 0\n    parent: setting.world",
+            "  - id: setting.foyer\n    type: room\n    tag_id: 0\n    parent: setting.world\n    facts:\n      - id: fact.setting_detail\n        statement: A setting-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL",
         )
         .replace(
-            "  - id: character.culprit\nentities:",
-            "  - id: character.culprit\n    facts:\n      - id: fact.character_detail\n        statement: A character-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL\nentities:",
+            "  - id: character.culprit\n    tag_id: 3\nentities:",
+            "  - id: character.culprit\n    tag_id: 3\n    facts:\n      - id: fact.character_detail\n        statement: A character-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL\nentities:",
         )
         .replace(
             "        statement: The knife is present.",
@@ -256,12 +269,12 @@ fn format_2_story_with_entity_occurrence(occurred_at: &str) -> String {
 fn format_2_story_with_character_fields(fields: &str) -> String {
     VALID_FORMAT_2_STORY
         .replace(
-            "  - id: character.culprit\nentities:",
-            &format!("  - id: character.culprit\n{fields}entities:"),
+            "  - id: character.culprit\n    tag_id: 3\nentities:",
+            &format!("  - id: character.culprit\n    tag_id: 3\n{fields}entities:"),
         )
         .replace(
             "commands:\n",
-            "commands:\n  - id: command.question\n    name: Question\n    parameters:\n      - name: character\n        type: character\n        required: true\n",
+            "commands:\n  - id: command.question\n    tag_id: 7\n    name: Question\n    parameters:\n      - name: character\n        type: character\n        required: true\n",
         )
 }
 
@@ -322,9 +335,70 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_2_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_2_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "0.19.0");
+    assert_eq!(report.validator_version, "0.20.0");
     assert_eq!(report.format_version.as_deref(), Some("2.0.0"));
     assert!(report.diagnostics.is_empty());
+}
+
+#[test]
+fn requires_bounded_unique_tag_standard_41h12_ids_for_physical_cards() {
+    for (line, pointer, subject) in [
+        ("    tag_id: 0\n", "/settings/1/tag_id", "setting.foyer"),
+        (
+            "    tag_id: 2\n",
+            "/characters/0/tag_id",
+            "character.victim",
+        ),
+        ("    tag_id: 4\n", "/entities/0/tag_id", "entity.knife"),
+        ("    tag_id: 5\n", "/commands/0/tag_id", "command.claim"),
+    ] {
+        let report = report(VALID_FORMAT_2_STORY.replacen(line, "", 1));
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "tag_id.missing"
+                && diagnostic.pointer.as_deref() == Some(pointer)
+                && diagnostic.subject_id.as_deref() == Some(subject)
+        }));
+    }
+
+    for value in ["-1", "2115", "1.5", "not-a-number"] {
+        let report =
+            report(VALID_FORMAT_2_STORY.replacen("tag_id: 4", &format!("tag_id: {value}"), 1));
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "tag_id.invalid"
+                    && diagnostic.pointer.as_deref() == Some("/entities/0/tag_id")
+                    && diagnostic.subject_id.as_deref() == Some("entity.knife")
+            }),
+            "{value}: {:#?}",
+            report.diagnostics
+        );
+    }
+
+    let duplicate = report(VALID_FORMAT_2_STORY.replacen("tag_id: 4", "tag_id: 0", 1))
+        .diagnostics
+        .into_iter()
+        .find(|diagnostic| diagnostic.code == "tag_id.duplicate")
+        .expect("duplicate tag ID diagnostic");
+    assert_eq!(duplicate.pointer.as_deref(), Some("/entities/0/tag_id"));
+    assert_eq!(duplicate.related.len(), 1);
+    assert_eq!(
+        duplicate.related[0].pointer.as_deref(),
+        Some("/settings/1/tag_id")
+    );
+
+    let navigable_passage = report(
+        VALID_FORMAT_2_STORY
+            .replace("type: room\n    tag_id: 0", "type: passage")
+            .replacen("type: island", "type: island\n    navigable: false", 1),
+    );
+    assert!(navigable_passage.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "tag_id.missing"
+            && diagnostic.pointer.as_deref() == Some("/settings/1/tag_id")
+    }));
+    assert!(!navigable_passage.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "tag_id.missing"
+            && diagnostic.pointer.as_deref() == Some("/settings/0/tag_id")
+    }));
 }
 
 #[test]
@@ -600,7 +674,7 @@ fn testimony_rejects_every_non_question_command_gate_and_preserves_duplicate_dia
     )
     .replace(
         "  - id: command.claim",
-        "  - id: command.examine\n    name: Examine\n  - id: command.claim",
+        "  - id: command.examine\n    tag_id: 8\n    name: Examine\n  - id: command.claim",
     );
     let report = report(source);
 
@@ -1396,8 +1470,8 @@ fn reports_unknown_and_wrong_type_references() {
 #[test]
 fn reports_duplicate_ids_with_the_original_location() {
     let source = VALID_STORY.replace(
-        "character.culprit\nentities:",
-        "character.victim\nentities:",
+        "character.culprit\n    tag_id: 3\nentities:",
+        "character.victim\n    tag_id: 3\nentities:",
     );
     let report = report(source);
     let duplicate = report
@@ -1707,7 +1781,7 @@ fn take_and_drop_require_one_required_entity_parameter() {
         let accepted = report(VALID_FORMAT_2_STORY.replace(
             "commands:\n",
             &format!(
-                "commands:\n  - id: {command}\n    name: Inventory command\n    parameters:\n      - name: item\n        type: entity\n        required: true\n"
+                "commands:\n  - id: {command}\n    tag_id: 7\n    name: Inventory command\n    parameters:\n      - name: item\n        type: entity\n        required: true\n"
             ),
         ));
         assert!(accepted.valid, "{command}: {:#?}", accepted.diagnostics);
@@ -1733,7 +1807,7 @@ fn take_and_drop_require_one_required_entity_parameter() {
             let report = report(VALID_FORMAT_2_STORY.replace(
                 "commands:\n",
                 &format!(
-                    "commands:\n  - id: {command}\n    name: Inventory command\n{parameters}"
+                    "commands:\n  - id: {command}\n    tag_id: 7\n    name: Inventory command\n{parameters}"
                 ),
             ));
             let diagnostic = report

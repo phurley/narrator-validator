@@ -24,6 +24,13 @@ and game engine agree on where content lives:
 Other top-level metadata may remain in additional YAML files. The former
 `tags` section is removed; use flags for authored world state.
 
+Every entity, character, action (`commands` item), and navigable setting has a
+numeric `tag_id` identifying its physical `tagStandard41h12` card. Navigable
+settings are the story's room/location cards; container-only world settings do
+not need one. IDs range from 0 through 2114 and must be unique across all of
+those card types within a story. The same numeric IDs may be reused by another
+story.
+
 Commands and triggers share one ordered world-effect contract. Canonical
 operations are `set_flag`, `move`, `transform`, `reveal`, `conceal`,
 `learn_fact`, `establish_deduction`, `describe`, `advance_time`, `win`, and

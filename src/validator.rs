@@ -14,6 +14,8 @@ const MAX_REPOSITORY_BYTES: usize = 1024 * 1024;
 const MAX_FILE_BYTES: usize = 256 * 1024;
 const MAX_YAML_DEPTH: usize = 64;
 const MAX_YAML_NODES: usize = 100_000;
+// tagStandard41h12 defines 2,115 codes, numbered from zero.
+const TAG_STANDARD_41H12_MAX_ID: i64 = 2_114;
 
 const REQUIRED_SECTIONS: &[&str] = &[
     "case",
@@ -258,6 +260,7 @@ impl<'a> Validator<'a> {
         self.validate_solution();
         self.validate_references();
         self.validate_duplicate_lists();
+        self.validate_tag_ids(&settings, &characters, &entities, &commands);
         self.validate_event_values(&events);
         self.validate_route_values(&routes);
         self.validate_character_values(&characters, facts_enabled);
@@ -1289,6 +1292,93 @@ impl<'a> Validator<'a> {
                     locate_scalar(source, &id),
                     Some(id),
                 );
+            }
+        }
+    }
+
+    fn validate_tag_ids(
+        &mut self,
+        settings: &[Item],
+        characters: &[Item],
+        entities: &[Item],
+        commands: &[Item],
+    ) {
+        let mut seen = BTreeMap::<i64, (&Item, Option<SourceRange>)>::new();
+        let cards = settings
+            .iter()
+            .map(|item| {
+                let navigable = bool_field(&item.mapping, "navigable")
+                    .unwrap_or_else(|| string_field(&item.mapping, "type") != Some("island"));
+                (item, navigable)
+            })
+            .chain(characters.iter().map(|item| (item, true)))
+            .chain(entities.iter().map(|item| (item, true)))
+            .chain(commands.iter().map(|item| (item, true)));
+
+        for (item, required) in cards {
+            let pointer = format!("{}/tag_id", item.pointer);
+            let value = item.mapping.get(Value::String("tag_id".to_string()));
+            if value.is_none() && !required {
+                continue;
+            }
+            let Some(tag_id) = value.and_then(Value::as_i64) else {
+                self.push(
+                    Severity::Error,
+                    if value.is_some() {
+                        "tag_id.invalid"
+                    } else {
+                        "tag_id.missing"
+                    },
+                    if value.is_some() {
+                        format!(
+                            "`tag_id` must be a whole-number tagStandard41h12 ID from 0 through {TAG_STANDARD_41H12_MAX_ID}"
+                        )
+                    } else {
+                        format!("{} `{}` is missing a `tag_id`", card_kind(item), item.id)
+                    },
+                    &item.path,
+                    Some(pointer),
+                    None,
+                    Some(item.id.clone()),
+                );
+                continue;
+            };
+            let range = locate_item_field(&item.source, &item.id, "tag_id");
+            if !(0..=TAG_STANDARD_41H12_MAX_ID).contains(&tag_id) {
+                self.push(
+                    Severity::Error,
+                    "tag_id.invalid",
+                    format!(
+                        "`tag_id` {tag_id} is outside the tagStandard41h12 range 0 through {TAG_STANDARD_41H12_MAX_ID}"
+                    ),
+                    &item.path,
+                    Some(pointer),
+                    range,
+                    Some(item.id.clone()),
+                );
+                continue;
+            }
+            if let Some((first, first_range)) = seen.get(&tag_id) {
+                self.diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    code: "tag_id.duplicate".to_string(),
+                    message: format!(
+                        "tagStandard41h12 ID {tag_id} is assigned to both `{}` and `{}`",
+                        first.id, item.id
+                    ),
+                    path: item.path.clone(),
+                    pointer: Some(pointer),
+                    range,
+                    subject_id: Some(item.id.clone()),
+                    related: vec![RelatedLocation {
+                        message: format!("first assigned to `{}` here", first.id),
+                        path: first.path.clone(),
+                        pointer: Some(format!("{}/tag_id", first.pointer)),
+                        range: *first_range,
+                    }],
+                });
+            } else {
+                seen.insert(tag_id, (item, range));
             }
         }
     }
@@ -4400,6 +4490,16 @@ fn integer_field(mapping: &Mapping, field: &str) -> Option<i64> {
         .and_then(Value::as_i64)
 }
 
+fn card_kind(item: &Item) -> &'static str {
+    match id_prefix(&item.id) {
+        Some("setting") => "room",
+        Some("character") => "character",
+        Some("entity") => "entity",
+        Some("command") => "action",
+        _ => "card",
+    }
+}
+
 fn id_prefix(id: &str) -> Option<&str> {
     let (prefix, _) = id.split_once('.')?;
     Some(prefix)
@@ -4507,6 +4607,62 @@ fn locate_id(source: &str, id: &str) -> Option<SourceRange> {
             },
         })
     })
+}
+
+fn locate_item_field(source: &str, id: &str, field: &str) -> Option<SourceRange> {
+    let lines = source.lines().collect::<Vec<_>>();
+    let item_line = lines.iter().position(|line| {
+        let Some(key_index) = line.find("id:") else {
+            return false;
+        };
+        let prefix = line[..key_index].trim();
+        if !prefix.is_empty() && prefix != "-" {
+            return false;
+        }
+        line[key_index + 3..]
+            .trim_start()
+            .trim_start_matches(['\'', '"'])
+            .starts_with(id)
+    })?;
+    let item_key_column = lines[item_line].find("id:")?;
+
+    for (offset, line) in lines.iter().enumerate().skip(item_line + 1) {
+        let indentation = line.len() - line.trim_start().len();
+        if !line.trim().is_empty() && indentation < item_key_column {
+            break;
+        }
+        if indentation != item_key_column {
+            continue;
+        }
+        let trimmed = line.trim_start();
+        let Some(rest) = trimmed
+            .strip_prefix(field)
+            .and_then(|rest| rest.strip_prefix(':'))
+        else {
+            continue;
+        };
+        let value = rest.trim_start();
+        let spacing = rest.len() - value.len();
+        let quote_bytes = usize::from(value.starts_with(['\'', '"']));
+        let value_len = value
+            .trim_matches(['\'', '"'])
+            .split_whitespace()
+            .next()
+            .map(str::len)
+            .unwrap_or(0);
+        let column = indentation + field.len() + 1 + spacing + quote_bytes;
+        return Some(SourceRange {
+            start: Position {
+                line: offset + 1,
+                column: column + 1,
+            },
+            end: Position {
+                line: offset + 1,
+                column: column + value_len + 1,
+            },
+        });
+    }
+    None
 }
 
 fn point_range(position: Position) -> SourceRange {
