@@ -2468,26 +2468,44 @@ impl<'a> Validator<'a> {
                 Some(command.id.clone()),
             );
         }
-        if string_field(first, "type").and_then(CommandParameterType::parse)
-            != Some(CommandParameterType::Character)
+        let parameter_shapes = command_parameter_types(command);
+        let first_shape = parameter_shapes.first().and_then(Option::as_ref);
+        if !matches!(first_shape, Some(shape)
+            if shape.types == [CommandParameterType::Character]
+                && shape.min == 1
+                && shape.max == 1)
         {
             self.push(
                 Severity::Error,
                 "character.testimony_question_target_type",
                 "the first `command.question` parameter must have type `character`".to_string(),
                 &command.path,
-                Some(format!("{first_pointer}/type")),
+                Some(format!(
+                    "{first_pointer}/{}",
+                    if first.contains_key(Value::String("types".to_string())) {
+                        "types"
+                    } else {
+                        "type"
+                    }
+                )),
                 None,
                 Some(command.id.clone()),
             );
         }
-        if bool_field(first, "required") != Some(true) {
+        if !matches!(first_shape, Some(shape) if shape.min == 1 && shape.max == 1) {
             self.push(
                 Severity::Error,
                 "character.testimony_question_target_required",
                 "the first `command.question` character parameter must be required".to_string(),
                 &command.path,
-                Some(format!("{first_pointer}/required")),
+                Some(format!(
+                    "{first_pointer}/{}",
+                    if first.contains_key(Value::String("min".to_string())) {
+                        "min"
+                    } else {
+                        "required"
+                    }
+                )),
                 None,
                 Some(command.id.clone()),
             );
@@ -2508,6 +2526,35 @@ impl<'a> Validator<'a> {
                 );
                 continue;
             };
+            if string_field(parameter, "name") == Some("topic") {
+                let valid = parameter_shapes
+                    .get(index)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|shape| {
+                        shape.types
+                            == [
+                                CommandParameterType::Character,
+                                CommandParameterType::Setting,
+                                CommandParameterType::Event,
+                                CommandParameterType::Entity,
+                                CommandParameterType::Deduction,
+                            ]
+                            && shape.min == 0
+                            && shape.max == 1
+                    });
+                if !valid {
+                    self.push(
+                        Severity::Error,
+                        "character.testimony_question_topic_type",
+                        "the canonical `topic` parameter must optionally accept character, setting, event, entity, or deduction".to_string(),
+                        &command.path,
+                        Some(format!("{pointer}/types")),
+                        None,
+                        Some(command.id.clone()),
+                    );
+                }
+                continue;
+            }
             let expected_type = match string_field(parameter, "name") {
                 Some("topic_character") => Some(CommandParameterType::Character),
                 Some("topic_entity") => Some(CommandParameterType::Entity),
@@ -3436,22 +3483,25 @@ impl<'a> Validator<'a> {
             return;
         };
         let parameters = command
-            .and_then(|command| {
+            .map(|command| {
+                let shapes = command_parameter_types(command);
                 command
                     .mapping
                     .get(Value::String("parameters".to_string()))
                     .and_then(Value::as_sequence)
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                    .filter_map(|(index, parameter)| {
+                        let parameter = parameter.as_mapping()?;
+                        Some((
+                            string_field(parameter, "name")?.to_string(),
+                            shapes.get(index)?.as_ref()?.types.clone(),
+                        ))
+                    })
+                    .collect::<BTreeMap<_, _>>()
             })
-            .into_iter()
-            .flatten()
-            .filter_map(|parameter| {
-                let parameter = parameter.as_mapping()?;
-                Some((
-                    string_field(parameter, "name")?.to_string(),
-                    CommandParameterType::parse(string_field(parameter, "type")?)?,
-                ))
-            })
-            .collect::<BTreeMap<_, _>>();
+            .unwrap_or_default();
 
         for (raw_name, raw_reference) in bindings {
             let Some(name) = raw_name.as_str().filter(|name| !name.trim().is_empty()) else {
@@ -3467,7 +3517,7 @@ impl<'a> Validator<'a> {
                 continue;
             };
             let binding_pointer = format!("{pointer}/{}", escape_pointer(name));
-            let Some(expected) = parameters.get(name).copied() else {
+            let Some(expected) = parameters.get(name) else {
                 self.push(
                     Severity::Error,
                     "trigger.parameter_unknown",
@@ -3498,14 +3548,21 @@ impl<'a> Validator<'a> {
                 continue;
             };
             match self.definitions.get(reference) {
-                Some(definition) if definition.kind == expected.kind() => {}
+                Some(definition)
+                    if expected
+                        .iter()
+                        .any(|parameter_type| definition.kind == parameter_type.kind()) => {}
                 Some(definition) => self.push(
                     Severity::Error,
                     "reference.wrong_type",
                     format!(
                         "`{reference}` refers to a {}; parameter `{name}` expects {}",
                         definition.kind.name(),
-                        expected.name()
+                        expected
+                            .iter()
+                            .map(|parameter_type| parameter_type.name())
+                            .collect::<Vec<_>>()
+                            .join(" or ")
                     ),
                     &trigger.path,
                     Some(binding_pointer),
