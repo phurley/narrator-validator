@@ -322,7 +322,7 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_2_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_2_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "0.19.0");
+    assert_eq!(report.validator_version, "0.19.1");
     assert_eq!(report.format_version, Some(2));
     assert!(report.diagnostics.is_empty());
 }
@@ -760,6 +760,18 @@ fn question_signature_accepts_optional_topics_in_authored_order() {
     let source = format_2_story_with_player_safe_character_behavior().replace(
         "    parameters:\n      - name: character\n        type: character\n        required: true\n",
         "    parameters:\n      - name: character\n        type: character\n        required: true\n      - name: topic_character\n        type: character\n        required: false\n      - name: topic_entity\n        type: entity\n      - name: topic_setting\n        type: setting\n        required: false\n      - name: topic_event\n        type: event\n        required: false\n      - name: topic_deduction\n        type: deduction\n        required: false\n",
+    );
+    let report = report(source);
+
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert!(report.diagnostics.is_empty());
+}
+
+#[test]
+fn question_signature_accepts_one_canonical_union_topic() {
+    let source = format_2_story_with_player_safe_character_behavior().replace(
+        "    parameters:\n      - name: character\n        type: character\n        required: true\n",
+        "    parameters:\n      - name: character\n        types: [character]\n        min: 1\n        max: 1\n      - name: topic\n        types: [character, setting, event, entity, deduction]\n        min: 0\n        max: 1\n",
     );
     let report = report(source);
 
