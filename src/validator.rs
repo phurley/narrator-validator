@@ -161,6 +161,16 @@ struct Item {
     mapping: Mapping,
 }
 
+struct GraphInputs<'a> {
+    settings: &'a [Item],
+    entities: &'a [Item],
+    clues: &'a [Item],
+    facts: &'a [Item],
+    deductions: &'a [Item],
+    triggers: &'a [Item],
+    fact_claims_enabled: bool,
+}
+
 fn item_kind(item: &Item) -> Option<&'static str> {
     Some(item.kind.name())
 }
@@ -305,7 +315,7 @@ impl<'a> Validator<'a> {
         if !fact_claims_enabled {
             self.validate_clue_values(&clues, facts_enabled);
         }
-        self.validate_fact_values(&facts, fact_claims_enabled);
+        self.validate_fact_values(&facts, &commands, fact_claims_enabled);
         if fact_claims_enabled {
             self.validate_disallowed_fact_owners(&routes);
             self.validate_disallowed_fact_owners(&commands);
@@ -353,14 +363,15 @@ impl<'a> Validator<'a> {
                 &clues,
             );
         }
-        self.validate_graphs(
-            &settings,
-            &entities,
-            &clues,
-            &facts,
-            &deductions,
+        self.validate_graphs(GraphInputs {
+            settings: &settings,
+            entities: &entities,
+            clues: &clues,
+            facts: &facts,
+            deductions: &deductions,
+            triggers: &triggers,
             fact_claims_enabled,
-        );
+        });
         self.validate_navigation(&cases, &settings, &routes);
         self.validate_flag_values(&flags);
     }
@@ -1428,6 +1439,8 @@ impl<'a> Validator<'a> {
                 "requires",
                 "sources",
                 "occurred_at",
+                "on",
+                "when",
                 "author_notes",
             ],
         );
@@ -1477,6 +1490,9 @@ impl<'a> Validator<'a> {
                 "all_of",
                 "effects",
                 "facts",
+                "on",
+                "when",
+                "after",
                 "author_notes",
             ],
         );
@@ -2871,7 +2887,12 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn validate_fact_values(&mut self, facts: &[Item], fact_claims_enabled: bool) {
+    fn validate_fact_values(
+        &mut self,
+        facts: &[Item],
+        commands: &[Item],
+        fact_claims_enabled: bool,
+    ) {
         for fact in facts {
             if !string_field(&fact.mapping, "statement")
                 .is_some_and(|statement| !statement.trim().is_empty())
@@ -2933,20 +2954,29 @@ impl<'a> Validator<'a> {
             }
             if fact_claims_enabled {
                 self.validate_fact_occurred_at(fact);
-                if let Some(requires) = fact.mapping.get(Value::String("requires".to_string())) {
-                    if !is_nonempty_string_or_sequence(requires) {
-                        self.push(
-                            Severity::Error,
-                            "fact.requires_type",
-                            "fact `requires` must be one ID or a non-empty sequence of IDs"
-                                .to_string(),
-                            &fact.path,
-                            Some(format!("{}/requires", fact.pointer)),
-                            None,
-                            Some(fact.id.clone()),
-                        );
-                    }
+                if fact
+                    .mapping
+                    .contains_key(Value::String("requires".to_string()))
+                {
+                    self.push(
+                        Severity::Error,
+                        "fact.requires_removed",
+                        "fact `requires` has been replaced by structured `on` action matching and `when.all` persistent conditions".to_string(),
+                        &fact.path,
+                        Some(format!("{}/requires", fact.pointer)),
+                        None,
+                        Some(fact.id.clone()),
+                    );
                 }
+                let owner = self.fact_owner(fact);
+                self.validate_action_match(fact, owner.as_ref(), false, commands);
+                self.validate_persistent_when(
+                    &fact.mapping,
+                    &fact.path,
+                    &fact.pointer,
+                    &fact.id,
+                    owner.as_ref(),
+                );
             }
             for field in ["about", "sources"] {
                 if fact
@@ -4299,12 +4329,620 @@ impl<'a> Validator<'a> {
         }
     }
 
+    fn fact_owner(&self, fact: &Item) -> Option<Definition> {
+        let (owner_pointer, _) = fact.pointer.rsplit_once("/facts/")?;
+        self.definitions
+            .values()
+            .find(|definition| definition.pointer == owner_pointer)
+            .cloned()
+    }
+
+    fn validate_action_match(
+        &mut self,
+        item: &Item,
+        owner: Option<&Definition>,
+        required: bool,
+        commands: &[Item],
+    ) {
+        let Some(value) = item.mapping.get(Value::String("on".to_string())) else {
+            if required {
+                self.push(
+                    Severity::Error,
+                    "action_match.missing",
+                    "`on` must identify the command this trigger matches".to_string(),
+                    &item.path,
+                    Some(format!("{}/on", item.pointer)),
+                    None,
+                    Some(item.id.clone()),
+                );
+            }
+            return;
+        };
+        let pointer = format!("{}/on", item.pointer);
+        let Some(on) = value.as_mapping() else {
+            self.push(
+                Severity::Error,
+                "action_match.type",
+                "`on` must be a mapping with `command` and optional `parameters` or `actor`"
+                    .to_string(),
+                &item.path,
+                Some(pointer),
+                None,
+                Some(item.id.clone()),
+            );
+            return;
+        };
+        for key in on.keys().filter_map(Value::as_str) {
+            if !matches!(key, "command" | "parameters" | "actor") {
+                self.push(
+                    Severity::Error,
+                    "action_match.unknown_field",
+                    format!("unknown action-match field `{key}`"),
+                    &item.path,
+                    Some(format!("{pointer}/{}", escape_pointer(key))),
+                    None,
+                    Some(item.id.clone()),
+                );
+            }
+        }
+        let command_id = string_field(on, "command").filter(|id| !id.trim().is_empty());
+        let command = command_id.and_then(|id| {
+            self.definitions
+                .get(id)
+                .filter(|definition| definition.kind == Kind::Command)
+        });
+        if command_id.is_none() {
+            self.push(
+                Severity::Error,
+                "action_match.command",
+                "`on.command` must be a command ID".to_string(),
+                &item.path,
+                Some(format!("{pointer}/command")),
+                None,
+                Some(item.id.clone()),
+            );
+        } else if command.is_none() {
+            let id = command_id.unwrap();
+            let code = if self.definitions.contains_key(id) {
+                "reference.wrong_type"
+            } else {
+                "reference.unknown"
+            };
+            self.push(
+                Severity::Error,
+                code,
+                format!("`{id}` must refer to a command"),
+                &item.path,
+                Some(format!("{pointer}/command")),
+                locate_scalar(&item.source, id),
+                Some(id.to_string()),
+            );
+        }
+        if let Some(actor) = on.get(Value::String("actor".to_string())) {
+            let actor_pointer = format!("{pointer}/actor");
+            let Some(actor) = actor.as_str().filter(|id| !id.trim().is_empty()) else {
+                self.push(
+                    Severity::Error,
+                    "action_match.actor",
+                    "`on.actor` must be an authored character ID".to_string(),
+                    &item.path,
+                    Some(actor_pointer),
+                    None,
+                    Some(item.id.clone()),
+                );
+                return;
+            };
+            match self.definitions.get(actor) {
+                Some(definition) if definition.kind == Kind::Character => {}
+                Some(_) => self.push(
+                    Severity::Error,
+                    "reference.wrong_type",
+                    format!("`{actor}` must refer to a character actor"),
+                    &item.path,
+                    Some(actor_pointer),
+                    locate_scalar(&item.source, actor),
+                    Some(actor.to_string()),
+                ),
+                None => self.push(
+                    Severity::Error,
+                    "reference.unknown",
+                    format!("reference `{actor}` is not defined"),
+                    &item.path,
+                    Some(actor_pointer),
+                    locate_scalar(&item.source, actor),
+                    Some(actor.to_string()),
+                ),
+            }
+        }
+        let Some(raw_bindings) = on.get(Value::String("parameters".to_string())) else {
+            return;
+        };
+        let bindings_pointer = format!("{pointer}/parameters");
+        let Some(bindings) = raw_bindings.as_mapping() else {
+            self.push(
+                Severity::Error,
+                "action_match.parameters_type",
+                "`on.parameters` must map semantic command parameter names to an ID, `owner`, or a non-empty ID list".to_string(),
+                &item.path,
+                Some(bindings_pointer),
+                None,
+                Some(item.id.clone()),
+            );
+            return;
+        };
+        let parameter_shapes = command_id
+            .and_then(|id| commands.iter().find(|command| command.id == id))
+            .map(|command| {
+                let shapes = command_parameter_types(command);
+                command
+                    .mapping
+                    .get(Value::String("parameters".to_string()))
+                    .and_then(Value::as_sequence)
+                    .into_iter()
+                    .flatten()
+                    .enumerate()
+                    .filter_map(|(index, parameter)| {
+                        let parameter = parameter.as_mapping()?;
+                        Some((
+                            string_field(parameter, "name")?.to_string(),
+                            shapes.get(index)?.as_ref()?.clone(),
+                        ))
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default();
+        let mut owner_bound = false;
+        for (raw_name, raw_binding) in bindings {
+            let Some(name) = raw_name.as_str().filter(|name| !name.trim().is_empty()) else {
+                self.push(
+                    Severity::Error,
+                    "action_match.parameter_name",
+                    "action parameter binding names must be non-empty strings".to_string(),
+                    &item.path,
+                    Some(bindings_pointer.clone()),
+                    None,
+                    Some(item.id.clone()),
+                );
+                continue;
+            };
+            let binding_pointer = format!("{bindings_pointer}/{}", escape_pointer(name));
+            let Some(shape) = parameter_shapes.get(name) else {
+                self.push(
+                    Severity::Error,
+                    "action_match.parameter_unknown",
+                    format!(
+                        "`{name}` is not a parameter of `{}`",
+                        command_id.unwrap_or("the command")
+                    ),
+                    &item.path,
+                    Some(binding_pointer),
+                    None,
+                    Some(item.id.clone()),
+                );
+                continue;
+            };
+            let values: Vec<&str> = match raw_binding {
+                Value::String(value) if !value.trim().is_empty() => vec![value],
+                Value::Sequence(values)
+                    if !values.is_empty()
+                        && values.iter().all(|value| {
+                            value.as_str().is_some_and(|value| !value.trim().is_empty())
+                        }) =>
+                {
+                    values.iter().filter_map(Value::as_str).collect()
+                }
+                _ => {
+                    self.push(
+                        Severity::Error,
+                        "action_match.parameter_binding",
+                        format!("binding `{name}` must be an ID, `owner`, or a non-empty ID list"),
+                        &item.path,
+                        Some(binding_pointer),
+                        None,
+                        Some(item.id.clone()),
+                    );
+                    continue;
+                }
+            };
+            if values.len() > shape.max {
+                self.push(
+                    Severity::Error,
+                    "action_match.parameter_cardinality",
+                    format!(
+                        "binding `{name}` selects {} values, but the command accepts at most {}",
+                        values.len(),
+                        shape.max
+                    ),
+                    &item.path,
+                    Some(binding_pointer.clone()),
+                    None,
+                    Some(item.id.clone()),
+                );
+            }
+            let mut seen = HashSet::new();
+            for (index, reference) in values.iter().enumerate() {
+                owner_bound |= *reference == "owner";
+                let value_pointer = if values.len() == 1 && raw_binding.as_str().is_some() {
+                    binding_pointer.clone()
+                } else {
+                    format!("{binding_pointer}/{index}")
+                };
+                if !seen.insert(*reference) {
+                    self.push(
+                        Severity::Error,
+                        "list.duplicate_reference",
+                        format!("`{reference}` occurs more than once in this binding"),
+                        &item.path,
+                        Some(value_pointer),
+                        locate_scalar(&item.source, reference),
+                        Some((*reference).to_string()),
+                    );
+                    continue;
+                }
+                let actual_kind = if *reference == "owner" {
+                    owner.map(|definition| definition.kind)
+                } else {
+                    self.definitions
+                        .get(*reference)
+                        .map(|definition| definition.kind)
+                };
+                match actual_kind {
+                    Some(kind) if shape.types.iter().any(|expected| expected.kind() == kind) => {}
+                    Some(kind) => self.push(
+                        Severity::Error,
+                        "reference.wrong_type",
+                        format!(
+                            "`{reference}` is a {}; parameter `{name}` accepts {}",
+                            kind.name(),
+                            shape
+                                .types
+                                .iter()
+                                .map(|kind| kind.name())
+                                .collect::<Vec<_>>()
+                                .join(" or ")
+                        ),
+                        &item.path,
+                        Some(value_pointer),
+                        locate_scalar(&item.source, reference),
+                        Some((*reference).to_string()),
+                    ),
+                    None => self.push(
+                        Severity::Error,
+                        if *reference == "owner" {
+                            "action_match.owner_unavailable"
+                        } else {
+                            "reference.unknown"
+                        },
+                        if *reference == "owner" {
+                            "`owner` is available only for owner-nested facts".to_string()
+                        } else {
+                            format!("reference `{reference}` is not defined")
+                        },
+                        &item.path,
+                        Some(value_pointer),
+                        locate_scalar(&item.source, reference),
+                        Some((*reference).to_string()),
+                    ),
+                }
+            }
+        }
+        if owner.is_some() && !owner_bound {
+            self.push(
+                Severity::Error,
+                "fact.source_unbound",
+                "an action-discovered fact must bind one semantic parameter to its nesting `owner`; move the fact to its actual discovery source or use `owner`"
+                    .to_string(),
+                &item.path,
+                Some(bindings_pointer),
+                None,
+                Some(item.id.clone()),
+            );
+        }
+    }
+
+    fn validate_persistent_when(
+        &mut self,
+        mapping: &Mapping,
+        path: &str,
+        item_pointer: &str,
+        subject: &str,
+        owner: Option<&Definition>,
+    ) {
+        let Some(value) = mapping.get(Value::String("when".to_string())) else {
+            return;
+        };
+        let pointer = format!("{item_pointer}/when");
+        let Some(when) = value.as_mapping() else {
+            self.push(
+                Severity::Error,
+                "condition.type",
+                "`when` must be a mapping containing a non-empty `all` list".to_string(),
+                path,
+                Some(pointer),
+                None,
+                Some(subject.to_string()),
+            );
+            return;
+        };
+        for key in when.keys().filter_map(Value::as_str) {
+            if key != "all" {
+                self.push(
+                    Severity::Error,
+                    "condition.unknown_field",
+                    format!("unknown persistent-condition field `{key}`; use `when.all`"),
+                    path,
+                    Some(format!("{pointer}/{}", escape_pointer(key))),
+                    None,
+                    Some(subject.to_string()),
+                );
+            }
+        }
+        let Some(predicates) = when
+            .get(Value::String("all".to_string()))
+            .and_then(Value::as_sequence)
+            .filter(|values| !values.is_empty())
+        else {
+            self.push(
+                Severity::Error,
+                "condition.all_type",
+                "`when.all` must be a non-empty sequence of persistent predicate mappings"
+                    .to_string(),
+                path,
+                Some(format!("{pointer}/all")),
+                None,
+                Some(subject.to_string()),
+            );
+            return;
+        };
+        for (index, predicate) in predicates.iter().enumerate() {
+            let predicate_pointer = format!("{pointer}/all/{index}");
+            let Some(predicate) = predicate.as_mapping().filter(|mapping| mapping.len() == 1)
+            else {
+                self.push(
+                    Severity::Error,
+                    "condition.predicate_type",
+                    "each persistent predicate must be a mapping with exactly one of `at`, `owns`, `knows`, `flag`, `completed`, or `time`".to_string(),
+                    path,
+                    Some(predicate_pointer),
+                    None,
+                    Some(subject.to_string()),
+                );
+                continue;
+            };
+            let (raw_kind, operand) = predicate.iter().next().unwrap();
+            let Some(kind) = raw_kind.as_str() else {
+                self.push(
+                    Severity::Error,
+                    "condition.predicate_kind",
+                    "persistent predicate names must be strings".to_string(),
+                    path,
+                    Some(predicate_pointer),
+                    None,
+                    Some(subject.to_string()),
+                );
+                continue;
+            };
+            let operand_pointer = format!("{predicate_pointer}/{}", escape_pointer(kind));
+            if kind == "time" {
+                let Some(time) = operand.as_mapping() else {
+                    self.push(
+                        Severity::Error,
+                        "condition.time_type",
+                        "`time` must contain `relation` and quoted `value`".to_string(),
+                        path,
+                        Some(operand_pointer),
+                        None,
+                        Some(subject.to_string()),
+                    );
+                    continue;
+                };
+                if time.len() != 2
+                    || !string_field(time, "relation")
+                        .is_some_and(|value| matches!(value, "before" | "at" | "after"))
+                    || !string_field(time, "value").is_some_and(valid_time)
+                {
+                    self.push(
+                        Severity::Error,
+                        "condition.time_value",
+                        "`time` requires only `relation` (`before`, `at`, or `after`) and a quoted HH:MM `value`".to_string(),
+                        path,
+                        Some(operand_pointer),
+                        None,
+                        Some(subject.to_string()),
+                    );
+                }
+                continue;
+            }
+            let expected: &[Kind] = match kind {
+                "at" => &[Kind::Setting],
+                "owns" => &[Kind::Entity],
+                "knows" => &[Kind::Fact, Kind::Deduction],
+                "flag" => &[Kind::Flag],
+                "completed" => &[Kind::Trigger],
+                _ => {
+                    self.push(
+                        Severity::Error,
+                        "condition.predicate_kind",
+                        format!("`{kind}` is not a supported persistent predicate kind"),
+                        path,
+                        Some(operand_pointer),
+                        None,
+                        Some(subject.to_string()),
+                    );
+                    continue;
+                }
+            };
+            let Some(reference) = operand.as_str().filter(|id| !id.trim().is_empty()) else {
+                self.push(
+                    Severity::Error,
+                    "condition.predicate_operand",
+                    format!("`{kind}` must contain one authored ID"),
+                    path,
+                    Some(operand_pointer),
+                    None,
+                    Some(subject.to_string()),
+                );
+                continue;
+            };
+            let definition = if reference == "owner" {
+                owner
+            } else {
+                self.definitions.get(reference)
+            };
+            match definition {
+                Some(definition) if expected.contains(&definition.kind) => {}
+                Some(definition) => self.push(
+                    Severity::Error,
+                    "reference.wrong_type",
+                    format!(
+                        "`{reference}` is a {}; `{kind}` expects {}",
+                        definition.kind.name(),
+                        expected
+                            .iter()
+                            .map(|kind| kind.name())
+                            .collect::<Vec<_>>()
+                            .join(" or ")
+                    ),
+                    path,
+                    Some(operand_pointer),
+                    None,
+                    Some(reference.to_string()),
+                ),
+                None => self.push(
+                    Severity::Error,
+                    if reference == "owner" {
+                        "condition.owner_unavailable"
+                    } else {
+                        "reference.unknown"
+                    },
+                    if reference == "owner" {
+                        "`owner` is available only for owner-nested facts".to_string()
+                    } else {
+                        format!("reference `{reference}` is not defined")
+                    },
+                    path,
+                    Some(operand_pointer),
+                    None,
+                    Some(reference.to_string()),
+                ),
+            }
+        }
+    }
+
     fn validate_trigger_values(
         &mut self,
         triggers: &[Item],
         commands: &[Item],
-        _fact_claims_enabled: bool,
+        fact_claims_enabled: bool,
     ) {
+        if fact_claims_enabled {
+            let referenced_completions = self
+                .parsed
+                .iter()
+                .flat_map(|file| completed_trigger_references(&file.value))
+                .map(str::to_string)
+                .collect::<BTreeSet<_>>();
+            for trigger in triggers {
+                for field in [
+                    "command",
+                    "parameters",
+                    "time",
+                    "location",
+                    "any_of",
+                    "all_of",
+                ] {
+                    if trigger
+                        .mapping
+                        .contains_key(Value::String(field.to_string()))
+                    {
+                        self.push(
+                            Severity::Error,
+                            "trigger.legacy_match_field",
+                            format!(
+                                "trigger `{field}` has moved into structured `on` or `when.all`"
+                            ),
+                            &trigger.path,
+                            Some(format!("{}/{}", trigger.pointer, escape_pointer(field))),
+                            None,
+                            Some(trigger.id.clone()),
+                        );
+                    }
+                }
+                self.validate_action_match(trigger, None, true, commands);
+                self.validate_persistent_when(
+                    &trigger.mapping,
+                    &trigger.path,
+                    &trigger.pointer,
+                    &trigger.id,
+                    None,
+                );
+                let after = trigger
+                    .mapping
+                    .get(Value::String("after".to_string()))
+                    .and_then(Value::as_str);
+                if trigger
+                    .mapping
+                    .contains_key(Value::String("after".to_string()))
+                    && !after.is_some_and(valid_delay)
+                {
+                    self.push(
+                        Severity::Error,
+                        "trigger.after",
+                        "trigger `after` must be a positive delay such as `20m`, `1h`, or `2turns`"
+                            .to_string(),
+                        &trigger.path,
+                        Some(format!("{}/after", trigger.pointer)),
+                        None,
+                        Some(trigger.id.clone()),
+                    );
+                }
+                let has_effect = trigger
+                    .mapping
+                    .get(Value::String("effects".to_string()))
+                    .and_then(Value::as_sequence)
+                    .is_some_and(|effects| !effects.is_empty());
+                if after.is_some_and(valid_delay) && has_effect {
+                    self.push(
+                        Severity::Error,
+                        "trigger.delayed_effects",
+                        "trigger `after` currently delays nested result facts only; immediate `effects` must be omitted"
+                            .to_string(),
+                        &trigger.path,
+                        Some(format!("{}/effects", trigger.pointer)),
+                        None,
+                        Some(trigger.id.clone()),
+                    );
+                }
+                let has_result = trigger
+                    .mapping
+                    .get(Value::String("facts".to_string()))
+                    .and_then(Value::as_sequence)
+                    .is_some_and(|facts| !facts.is_empty());
+                if !has_effect
+                    && !has_result
+                    && !referenced_completions.contains(trigger.id.as_str())
+                {
+                    self.push(
+                        Severity::Error,
+                        "trigger.no_observable_result",
+                        "trigger must have an effect, a nested result fact, or a completion identity referenced by `completed`".to_string(),
+                        &trigger.path,
+                        Some(trigger.pointer.clone()),
+                        None,
+                        Some(trigger.id.clone()),
+                    );
+                }
+                let command = trigger
+                    .mapping
+                    .get(Value::String("on".to_string()))
+                    .and_then(Value::as_mapping)
+                    .and_then(|on| string_field(on, "command"))
+                    .and_then(|id| commands.iter().find(|command| command.id == id));
+                let parameter_types = command.map(command_parameter_types).unwrap_or_default();
+                self.validate_world_effects(trigger, &parameter_types);
+            }
+            return;
+        }
         for trigger in triggers {
             let command = string_field(&trigger.mapping, "command")
                 .and_then(|command_id| commands.iter().find(|command| command.id == command_id));
@@ -4621,15 +5259,16 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn validate_graphs(
-        &mut self,
-        settings: &[Item],
-        entities: &[Item],
-        clues: &[Item],
-        facts: &[Item],
-        deductions: &[Item],
-        fact_claims_enabled: bool,
-    ) {
+    fn validate_graphs(&mut self, inputs: GraphInputs<'_>) {
+        let GraphInputs {
+            settings,
+            entities,
+            clues,
+            facts,
+            deductions,
+            triggers,
+            fact_claims_enabled,
+        } = inputs;
         let setting_parents = settings
             .iter()
             .filter_map(|item| {
@@ -4681,6 +5320,11 @@ impl<'a> Validator<'a> {
                 fact_dependency_graph(facts),
                 "fact.requirement_cycle",
                 "fact requirement",
+            );
+            self.validate_cycles(
+                trigger_dependency_graph(triggers),
+                "trigger.reference_cycle",
+                "trigger completion dependency",
             );
         } else {
             self.validate_cycles(
@@ -5037,6 +5681,30 @@ fn collect_references(
     }
 }
 
+fn completed_trigger_references(value: &Value) -> Vec<&str> {
+    fn visit<'a>(value: &'a Value, key: Option<&str>, result: &mut Vec<&'a str>) {
+        match value {
+            Value::String(id) if key == Some("completed") => result.push(id),
+            Value::Sequence(values) => {
+                for value in values {
+                    visit(value, key, result);
+                }
+            }
+            Value::Mapping(values) => {
+                for (raw_key, value) in values {
+                    visit(value, raw_key.as_str(), result);
+                }
+            }
+            Value::Tagged(tagged) => visit(&tagged.value, key, result),
+            _ => {}
+        }
+    }
+
+    let mut result = Vec::new();
+    visit(value, None, &mut result);
+    result
+}
+
 fn is_reference_pointer(pointer: &str) -> bool {
     expected_kind(pointer).is_some()
 }
@@ -5289,12 +5957,39 @@ fn fact_dependency_graph(items: &[Item]) -> BTreeMap<String, Vec<String>> {
     items
         .iter()
         .map(|item| {
-            let dependencies = string_or_list_field(&item.mapping, "requires")
+            let dependencies = persistent_predicate_ids(&item.mapping, "knows")
                 .into_iter()
                 .filter(|id| id_prefix(id) == Some("fact"))
                 .collect();
             (item.id.clone(), dependencies)
         })
+        .collect()
+}
+
+fn trigger_dependency_graph(items: &[Item]) -> BTreeMap<String, Vec<String>> {
+    items
+        .iter()
+        .map(|item| {
+            (
+                item.id.clone(),
+                persistent_predicate_ids(&item.mapping, "completed"),
+            )
+        })
+        .collect()
+}
+
+fn persistent_predicate_ids(mapping: &Mapping, predicate: &str) -> Vec<String> {
+    mapping
+        .get(Value::String("when".to_string()))
+        .and_then(Value::as_mapping)
+        .and_then(|when| when.get(Value::String("all".to_string())))
+        .and_then(Value::as_sequence)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_mapping)
+        .filter_map(|condition| condition.get(Value::String(predicate.to_string())))
+        .filter_map(Value::as_str)
+        .map(str::to_string)
         .collect()
 }
 
@@ -5443,30 +6138,10 @@ fn string_list_field(mapping: &Mapping, field: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn string_or_list_field(mapping: &Mapping, field: &str) -> Vec<String> {
-    match mapping.get(Value::String(field.to_string())) {
-        Some(Value::String(value)) => vec![value.clone()],
-        Some(Value::Sequence(values)) => values
-            .iter()
-            .filter_map(Value::as_str)
-            .map(str::to_string)
-            .collect(),
-        _ => Vec::new(),
-    }
-}
-
 fn is_string_sequence(value: &Value) -> bool {
     value
         .as_sequence()
         .is_some_and(|values| values.iter().all(Value::is_string))
-}
-
-fn is_nonempty_string_or_sequence(value: &Value) -> bool {
-    match value {
-        Value::String(value) => !value.trim().is_empty(),
-        Value::Sequence(_) => is_nonempty_string_sequence(value, false),
-        _ => false,
-    }
 }
 
 fn is_nonempty_string_sequence(value: &Value, allow_empty_sequence: bool) -> bool {
