@@ -1441,10 +1441,23 @@ fn format_2_accepts_opening_action_persistent_and_delayed_fact_discovery() {
         )
         .replace(
             "    effects:\n      - operation: set_flag",
-            "    after: 20m\n    facts:\n      - id: fact.delayed_result\n        statement: The delayed result is ready.\n    effects:\n      - operation: set_flag",
+            "    after: 20m\n    facts:\n      - id: fact.delayed_result\n        statement: The delayed result is ready.\n    effects: []\n    ignored_effects:\n      - operation: set_flag",
         );
     let valid_report = report(source);
     assert!(valid_report.valid, "{:#?}", valid_report.diagnostics);
+}
+
+#[test]
+fn format_2_rejects_immediate_effects_on_a_delayed_trigger() {
+    let source = VALID_FORMAT_2_STORY.replace(
+        "    effects:\n      - operation: set_flag",
+        "    after: 20m\n    effects:\n      - operation: set_flag",
+    );
+    let result = report(source);
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "trigger.delayed_effects"
+            && diagnostic.pointer.as_deref() == Some("/triggers/0/effects")
+    }));
 }
 
 #[test]

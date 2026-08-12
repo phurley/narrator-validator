@@ -346,7 +346,7 @@ Unknown parameters, impossible owner/actor kinds, over-cardinality bindings,
 wrong-kind predicates, and triggers without an effect, nested result fact, or
 referenced completion identity are precise errors.
 
-Delay a trigger and all of its actor-scoped effects/results with `after`:
+Delay a trigger's actor-scoped nested result facts with `after`:
 
 ```yaml
 triggers:
@@ -363,7 +363,9 @@ triggers:
 ```
 
 This replaces disposable completion flags whose only purpose was to unlock one
-result fact. Format 2 rejects clue sections, top-level fact sections, facts
+result fact. Delayed triggers cannot also declare immediate `effects`; model a
+delayed observation as nested facts, and use a separate immediate trigger when
+a world effect is required. Format 2 rejects clue sections, top-level fact sections, facts
 nested beneath unsupported owner types, `initially_known`, and clue-based
 deduction `supported_by`. Fact and trigger-completion dependency cycles are
 reported deterministically.

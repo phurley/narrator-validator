@@ -4125,10 +4125,14 @@ impl<'a> Validator<'a> {
                     &trigger.id,
                     None,
                 );
-                if trigger
+                let after = trigger
                     .mapping
                     .get(Value::String("after".to_string()))
-                    .is_some_and(|value| !value.as_str().is_some_and(valid_delay))
+                    .and_then(Value::as_str);
+                if trigger
+                    .mapping
+                    .contains_key(Value::String("after".to_string()))
+                    && !after.is_some_and(valid_delay)
                 {
                     self.push(
                         Severity::Error,
@@ -4146,6 +4150,18 @@ impl<'a> Validator<'a> {
                     .get(Value::String("effects".to_string()))
                     .and_then(Value::as_sequence)
                     .is_some_and(|effects| !effects.is_empty());
+                if after.is_some_and(valid_delay) && has_effect {
+                    self.push(
+                        Severity::Error,
+                        "trigger.delayed_effects",
+                        "trigger `after` currently delays nested result facts only; immediate `effects` must be omitted"
+                            .to_string(),
+                        &trigger.path,
+                        Some(format!("{}/effects", trigger.pointer)),
+                        None,
+                        Some(trigger.id.clone()),
+                    );
+                }
                 let has_result = trigger
                     .mapping
                     .get(Value::String("facts".to_string()))
