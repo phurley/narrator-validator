@@ -566,6 +566,46 @@ fact/deduction `inputs`, hidden boolean `truth`, `contradicted_by` references,
 and an optional structured `solves` answer. Deduction cycle detection follows
 both `requires` and deduction-valued `inputs`.
 
+## Points and terminal states
+
+Settings, entities, deductions, and commands may define an authoritative point
+award:
+
+```yaml
+points:
+  value: 10
+  max_claim_count: 1
+  requires: [setting.library, entity.brass_key]
+```
+
+`value` and `max_claim_count` are positive whole numbers; the claim count
+defaults to one. Requirements are optional persistent setting, entity, fact,
+deduction, flag, or trigger references. The runtime evaluates them against the
+post-transition player state and tracks claims per player and authored source.
+Point awards on routes, characters, events, or triggers are rejected.
+
+Generic terminal outcomes live in the canonical root file `win_states.yaml`:
+
+```yaml
+win_states:
+  - id: win.escape
+    name: Escaped the house
+    requires: [flag.front_door_unlocked]
+    minimum_points: 50
+    text: You force the front door open and reach the road.
+```
+
+Win-state sequence order is semantic: the runtime selects the first satisfied
+state when several match on the same turn. Each state needs a globally unique
+`win.*` ID, a player-facing name and completion text, and at least one
+persistent requirement or positive point threshold. `minimum_points` defaults
+to zero. Requirements and unmatched alternatives remain author-only.
+
+A story may omit the murder-specific `solution` block when it defines at least
+one generic win state. Existing mysteries may retain `solution` as metadata and
+migrate by making their final deduction a win-state requirement. Stories with
+no generic win states retain the legacy `command.solve` terminal behavior.
+
 ## Initial rules
 
 The first pass checks:
@@ -580,6 +620,8 @@ The first pass checks:
 - player-safe character portrayal and testimony shape, identity, gate, and
   reveal references;
 - versioned clue or nested-fact knowledge models and two- or three-input deductions;
+- point-award owners, positive values, claim limits, and persistent requirements;
+- canonical ordered win states, thresholds, terminal configuration, and references;
 - setting-parent, entity-containment, fact/clue, and deduction cycles;
 - route endpoints, travel duration, reachability, and exitability;
 - explicit entry/exit settings when supplied, with a compatibility fallback

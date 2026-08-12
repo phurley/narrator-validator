@@ -333,6 +333,7 @@ fn story_files(source: String) -> Vec<SourceFile> {
         let path = match key.as_str() {
             Some("case" | "solution") => "case.yaml",
             Some("settings" | "routes") => "settings.yaml",
+            Some("win_states") => "win_states.yaml",
             Some("characters") => "characters.yaml",
             Some("entities") => "entities.yaml",
             Some("events") => "events.yaml",
@@ -370,7 +371,7 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_2_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_2_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "0.21.0");
+    assert_eq!(report.validator_version, "0.22.0");
     assert_eq!(report.format_version.as_deref(), Some("3.0.0"));
     assert!(report.diagnostics.is_empty());
 }
@@ -621,6 +622,81 @@ fn rejects_missing_story_format_with_friendly_migration_guidance() {
     assert_eq!(report.diagnostics.len(), 1);
     assert_eq!(report.diagnostics[0].code, "format.version_missing");
     assert!(report.diagnostics[0].message.contains("cannot safely open"));
+}
+
+#[test]
+fn generic_win_states_allow_a_non_murder_story_and_preserve_authored_precedence() {
+    let source = VALID_FORMAT_2_STORY
+        .replace(
+            "solution:\n  victim: character.victim\n  culprit: character.culprit\n  weapon: entity.knife\n  location: setting.study\n  deduction: deduction.solution\n",
+            "",
+        )
+        .replace(
+            "settings:\n",
+            "win_states:\n  - id: win.escape\n    name: Escaped the house\n    requires: [flag.knife_examined, entity.knife]\n    minimum_points: 50\n    text: You reach the road.\n  - id: win.solve\n    name: Solved the case\n    requires: [deduction.solution]\n    minimum_points: 20\n    text: You explain the answer.\nsettings:\n",
+        );
+    let report = report(source);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+}
+
+#[test]
+fn win_states_validate_shape_requirement_kinds_and_thresholds() {
+    let source = VALID_FORMAT_2_STORY.replace(
+        "settings:\n",
+        "win_states:\n  - id: win.invalid\n    name: ''\n    requires: [character.victim, setting.unknown]\n    minimum_points: -1\n    text: ''\n    secret: never expose this\nsettings:\n",
+    );
+    let report = report(source);
+    let diagnostics = report
+        .diagnostics
+        .iter()
+        .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.pointer.as_deref()))
+        .collect::<Vec<_>>();
+    for expected in [
+        ("win_states.name", Some("/win_states/0/name")),
+        ("win_states.text", Some("/win_states/0/text")),
+        (
+            "win_states.minimum_points",
+            Some("/win_states/0/minimum_points"),
+        ),
+        ("win_states.unknown_field", Some("/win_states/0/secret")),
+        ("reference.wrong_type", Some("/win_states/0/requires/0")),
+        ("reference.unknown", Some("/win_states/0/requires/1")),
+    ] {
+        assert!(
+            diagnostics.contains(&expected),
+            "missing {expected:?}: {diagnostics:#?}"
+        );
+    }
+}
+
+#[test]
+fn repository_requires_a_generic_or_legacy_terminal_configuration() {
+    let source = VALID_FORMAT_2_STORY.replace(
+        "solution:\n  victim: character.victim\n  culprit: character.culprit\n  weapon: entity.knife\n  location: setting.study\n  deduction: deduction.solution\n",
+        "",
+    );
+    let report = report(source);
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "win_states.missing_terminal_configuration"
+            && diagnostic.pointer.as_deref() == Some("/win_states")
+    }));
+}
+
+#[test]
+fn win_states_must_use_the_canonical_root_filename() {
+    let source = SourceFile {
+        path: "goals.yaml".to_string(),
+        source: "win_states:\n  - id: win.escape\n    name: Escape\n    text: You escape.\n"
+            .to_string(),
+    };
+    let mut files = story_files(VALID_FORMAT_2_STORY.to_string());
+    files.push(source);
+    let report = validate(&files);
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "schema.noncanonical_filename"
+            && diagnostic.path == "goals.yaml"
+            && diagnostic.pointer.as_deref() == Some("/win_states")
+    }));
 }
 
 #[test]
