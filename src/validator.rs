@@ -1348,6 +1348,7 @@ impl<'a> Validator<'a> {
                 "description",
                 "parent",
                 "facts",
+                "points",
                 "author_notes",
             ],
         );
@@ -1395,6 +1396,7 @@ impl<'a> Validator<'a> {
                 "visibility",
                 "initial",
                 "facts",
+                "points",
                 "author_notes",
             ],
         );
@@ -1436,6 +1438,7 @@ impl<'a> Validator<'a> {
                 "contradicted_by",
                 "requires",
                 "solves",
+                "points",
                 "author_notes",
             ],
         );
@@ -1452,6 +1455,7 @@ impl<'a> Validator<'a> {
                 "description",
                 "parameters",
                 "effects",
+                "points",
                 "author_notes",
             ],
         );
