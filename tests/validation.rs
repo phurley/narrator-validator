@@ -133,10 +133,15 @@ entities:
       - id: fact.knife_has_blood
         statement: The knife carries the victim's blood.
         about: [entity.knife, character.victim]
-        requires: flag.knife_analysis_complete
+        when:
+          all:
+            - flag: flag.knife_analysis_complete
       - id: fact.knife_connects_to_scene
         statement: The knife connects the culprit to the study.
-        requires: [fact.knife_is_present, entity.knife]
+        when:
+          all:
+            - knows: fact.knife_is_present
+            - owns: entity.knife
 events:
   - id: event.murder
     day: 0
@@ -208,7 +213,10 @@ commands:
 triggers:
   - id: trigger.investigate_knife
     name: Investigate the knife
-    command: command.investigate
+    on:
+      command: command.investigate
+      parameters:
+        target: entity.knife
     effects:
       - operation: set_flag
         flag: flag.knife_analysis_complete
@@ -335,7 +343,7 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_2_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_2_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "0.20.1");
+    assert_eq!(report.validator_version, "0.21.0");
     assert_eq!(report.format_version.as_deref(), Some("2.0.0"));
     assert!(report.diagnostics.is_empty());
 }
@@ -1268,15 +1276,15 @@ fn format_2_requires_a_runtime_clock_and_whole_minute_effects() {
 fn validates_runtime_trigger_effect_contracts() {
     let invalid = VALID_FORMAT_2_STORY
         .replace(
-            "    command: command.investigate\n    effects:",
-            "    command: command.investigate\n    time:\n      relation: after\n      value: \"99:00\"\n    effects:",
+            "    effects:",
+            "    when:\n      all:\n        - time:\n            relation: after\n            value: \"99:00\"\n    effects:",
         )
         .replace(
             "      - operation: set_flag\n        flag: flag.knife_analysis_complete\n        value: true\n        after: 20m",
             "      - operation: move\n        subjects: [player]\n        setting: param1\n        surprise: true\n      - operation: rewrite_reality\n        flag: flag.knife_analysis_complete",
         );
     let result = codes(invalid);
-    assert!(result.contains(&"trigger.time_value".to_string()));
+    assert!(result.contains(&"condition.time_value".to_string()));
     assert!(result.contains(&"command.effect_parameter_type".to_string()));
     assert!(result.contains(&"command.effect_unknown_field".to_string()));
     assert!(result.contains(&"command.effect_unknown_operation".to_string()));
@@ -1405,20 +1413,169 @@ fn format_2_allows_empty_fact_lists_and_rejects_non_mapping_facts() {
 #[test]
 fn format_2_validates_fact_requirements_and_cycles() {
     let malformed = VALID_FORMAT_2_STORY
-        .replace("requires: flag.knife_analysis_complete", "requires: []")
         .replace(
-            "requires: [fact.knife_is_present, entity.knife]",
-            "requires: [fact.knife_is_present, case.example]",
+            "          all:\n            - flag: flag.knife_analysis_complete",
+            "          all: []",
+        )
+        .replace(
+            "            - owns: entity.knife",
+            "            - owns: case.example",
         );
     let result = codes(malformed);
-    assert!(result.contains(&"fact.requires_type".to_string()));
+    assert!(result.contains(&"condition.all_type".to_string()));
     assert!(result.contains(&"reference.wrong_type".to_string()));
 
     let cyclic = VALID_FORMAT_2_STORY.replace(
         "        statement: The knife is present.",
-        "        statement: The knife is present.\n        requires: fact.knife_connects_to_scene",
+        "        statement: The knife is present.\n        when:\n          all:\n            - knows: fact.knife_connects_to_scene",
     );
     assert!(codes(cyclic).contains(&"fact.requirement_cycle".to_string()));
+}
+
+#[test]
+fn format_2_accepts_opening_action_persistent_and_delayed_fact_discovery() {
+    let source = VALID_FORMAT_2_STORY
+        .replace(
+            "        statement: The knife is present.",
+            "        statement: The knife is present.\n        on:\n          command: command.investigate\n          parameters:\n            target: owner",
+        )
+        .replace(
+            "    effects:\n      - operation: set_flag",
+            "    after: 20m\n    facts:\n      - id: fact.delayed_result\n        statement: The delayed result is ready.\n    effects:\n      - operation: set_flag",
+        );
+    let valid_report = report(source);
+    assert!(valid_report.valid, "{:#?}", valid_report.diagnostics);
+}
+
+#[test]
+fn action_matches_validate_semantic_roles_unions_cardinality_actor_and_owner() {
+    let source = VALID_FORMAT_2_STORY
+        .replace(
+            "triggers:",
+            "  - id: command.compare\n    tag_id: 7\n    name: Compare\n    parameters:\n      - name: evidence\n        types: [entity, setting]\n        min: 1\n        max: 2\n    effects: []\ntriggers:",
+        )
+        .replace(
+            "      command: command.investigate",
+            "      command: command.compare",
+        )
+        .replace(
+            "        target: entity.knife",
+            "        evidence: [entity.knife, setting.study]",
+        )
+        .replace(
+            "      parameters:\n        evidence: [entity.knife, setting.study]",
+            "      actor: character.culprit\n      parameters:\n        evidence: [entity.knife, setting.study]",
+        );
+    let valid_report = report(source);
+    assert!(valid_report.valid, "{:#?}", valid_report.diagnostics);
+
+    for (replacement, code, pointer) in [
+        (
+            "        missing: entity.knife",
+            "action_match.parameter_unknown",
+            "/triggers/0/on/parameters/missing",
+        ),
+        (
+            "        target: character.culprit",
+            "reference.wrong_type",
+            "/triggers/0/on/parameters/target",
+        ),
+        (
+            "        target: [entity.knife, entity.knife, entity.knife]",
+            "action_match.parameter_cardinality",
+            "/triggers/0/on/parameters/target",
+        ),
+    ] {
+        let invalid = VALID_FORMAT_2_STORY.replace("        target: entity.knife", replacement);
+        assert!(report(invalid).diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == code && diagnostic.pointer.as_deref() == Some(pointer)
+        }));
+    }
+
+    let bad_actor = report(VALID_FORMAT_2_STORY.replace(
+        "      command: command.investigate",
+        "      command: command.investigate\n      actor: entity.knife",
+    ));
+    assert!(bad_actor.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "reference.wrong_type"
+            && diagnostic.pointer.as_deref() == Some("/triggers/0/on/actor")
+    }));
+}
+
+#[test]
+fn persistent_conditions_validate_every_role_and_reject_ambiguous_or_wrong_kinds() {
+    let valid = VALID_FORMAT_2_STORY.replace(
+        "            - flag: flag.knife_analysis_complete",
+        "            - at: setting.study\n            - owns: entity.knife\n            - knows: fact.knife_is_present\n            - knows: deduction.solution\n            - flag: flag.knife_analysis_complete\n            - completed: trigger.investigate_knife\n            - time:\n                relation: after\n                value: \"21:00\"",
+    );
+    let valid_report = report(valid);
+    assert!(valid_report.valid, "{:#?}", valid_report.diagnostics);
+
+    for (predicate, code) in [
+        ("near: setting.study", "condition.predicate_kind"),
+        ("at: entity.knife", "reference.wrong_type"),
+        ("owns: character.culprit", "reference.wrong_type"),
+        ("knows: entity.knife", "reference.wrong_type"),
+        ("flag: fact.knife_is_present", "reference.wrong_type"),
+        ("completed: command.investigate", "reference.wrong_type"),
+        ("time: soon", "condition.time_type"),
+    ] {
+        let invalid = VALID_FORMAT_2_STORY.replace(
+            "            - flag: flag.knife_analysis_complete",
+            &format!("            - {predicate}"),
+        );
+        assert!(
+            report(invalid)
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == code),
+            "{predicate} should produce {code}"
+        );
+    }
+}
+
+#[test]
+fn format_2_rejects_legacy_noop_and_cyclic_triggers_deterministically() {
+    let legacy = report(VALID_FORMAT_2_STORY.replace(
+        "    on:\n      command: command.investigate\n      parameters:\n        target: entity.knife",
+        "    command: command.investigate",
+    ));
+    assert!(
+        legacy
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "trigger.legacy_match_field"),
+        "{:#?}",
+        legacy.diagnostics
+    );
+
+    let noop = report(VALID_FORMAT_2_STORY.replace(
+        "    effects:\n      - operation: set_flag\n        flag: flag.knife_analysis_complete\n        value: true\n        after: 20m",
+        "    effects: []",
+    ));
+    assert!(noop
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "trigger.no_observable_result"));
+
+    let cyclic = VALID_FORMAT_2_STORY
+        .replace(
+            "triggers:\n  - id: trigger.investigate_knife",
+            "triggers:\n  - id: trigger.prior\n    name: Prior\n    on:\n      command: command.investigate\n    when:\n      all:\n        - completed: trigger.investigate_knife\n  - id: trigger.investigate_knife",
+        )
+        .replace(
+            "    effects:\n      - operation: set_flag",
+            "    when:\n      all:\n        - completed: trigger.prior\n    effects:\n      - operation: set_flag",
+        );
+    let cycles: Vec<_> = report(cyclic)
+        .diagnostics
+        .into_iter()
+        .filter(|diagnostic| diagnostic.code == "trigger.reference_cycle")
+        .collect();
+    assert_eq!(cycles.len(), 1);
+    assert!(cycles[0]
+        .message
+        .contains("trigger.investigate_knife -> trigger.prior -> trigger.investigate_knife"));
 }
 
 #[test]

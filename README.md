@@ -138,9 +138,17 @@ may omit `facts`, use an empty list, or contain any number of fact objects.
 Every fact has a stable `fact.*` ID and a non-empty `statement`; optional
 `about` and `sources` fields retain additional typed authoring context.
 
-A fact with no `requires` field becomes available on the opening player turn.
-Otherwise, `requires` is one ID or a non-empty list of IDs, all of which must be
-present:
+A fact's nesting owner is its discovery source. `about` remains relationship
+metadata and never changes discovery. An ordinary fact with neither `on` nor
+`when` becomes available on the opening player turn. A fact referenced by
+testimony `reveals` is learned only from that testimony, and a fact nested under
+a trigger is learned when that trigger completes (or, when the trigger has
+`after`, when its delayed result completes).
+
+`on` matches the current action by command and semantic parameter name. Within
+an owner-nested fact, `owner` means the enclosing character, entity, setting, or
+event, so the source ID need not be repeated. `when.all` contains only durable
+state predicates:
 
 ```yaml
 entities:
@@ -149,17 +157,23 @@ entities:
     facts:
       - id: fact.manual_cutoff
         statement: The generator was cut off manually.
-        requires: [command.examine, entity.generator_controller]
+        on:
+          command: command.examine
+          parameters:
+            target: owner
 
       - id: fact.blackout_was_staged
         statement: Someone staged the blackout.
-        requires: fact.manual_cutoff
+        when:
+          all:
+            - knows: fact.manual_cutoff
 ```
 
-A `fact.*` requirement means that fact has been learned, not merely made
-available. The engine evaluates requirements when a player turn begins and
-after an action resolves; the resolved command, arguments, and authored effects
-participate in that check.
+Persistent predicates are explicit mappings: `at` takes a setting, `owns` an
+entity, `knows` a fact or deduction, `flag` a flag, `completed` a trigger, and
+`time` a `relation`/`value` mapping. The engine evaluates them when a player
+joins and after actions or delayed work resolve. `on` and `when` may be combined;
+both must match. Format 2 rejects the former fact `requires` ID bag.
 
 ## Entity placement, visibility, and portability
 
@@ -295,24 +309,30 @@ flags:
     initial_state: false
 ```
 
-Triggers may restrict when and where they apply and which world subjects make
-them eligible. Omitting `time` means anytime. Omitting `location`, using an
-empty string, or using a blank YAML value means all locations. `any_of` and
-`all_of` accept character, entity, and flag IDs:
+Triggers use the same boundary. `on` matches only the current action.
+`when.all` evaluates only durable player/world state. An optional `on.actor`
+names an authored character actor explicitly; a character ID is never inferred
+from a selected-card bag. Parameter bindings accept one ID or a non-empty list
+and are checked against the command parameter's semantic union and maximum
+cardinality:
 
 ```yaml
 triggers:
   - id: trigger.boathouse_warning
     name: Boathouse warning
     description: Warn players once the storm reaches the occupied boathouse.
-    command: command.enter
+    on:
+      command: command.enter
+      parameters:
+        destination: setting.boathouse
     once: true
-    time:
-      relation: after
-      value: "21:00"
-    location: setting.boathouse
-    any_of: [character.guide, entity.weather_radio]
-    all_of: [flag.storm_started]
+    when:
+      all:
+        - at: setting.boathouse
+        - flag: flag.storm_started
+        - time:
+            relation: after
+            value: "21:00"
     effects:
       - operation: set_flag
         flag: flag.boathouse_warning_heard
@@ -320,22 +340,33 @@ triggers:
 ```
 
 `time.relation` is `before`, `at`, or `after`, and `time.value` is a quoted
-24-hour `HH:MM` value. The legacy free-form `conditions` list is invalid.
-Unknown operations, extra fields, missing values, and wrong-kind operands are
-errors for both command and trigger authorship. Delayed flag assignment needs a
-positive minute, hour, or turn delay:
+24-hour `HH:MM` value. Legacy top-level `command`, `parameters`, `time`,
+`location`, `any_of`, `all_of`, and `conditions` are invalid in format 2.
+Unknown parameters, impossible owner/actor kinds, over-cardinality bindings,
+wrong-kind predicates, and triggers without an effect, nested result fact, or
+referenced completion identity are precise errors.
+
+Delay a trigger and all of its actor-scoped effects/results with `after`:
 
 ```yaml
-- operation: set_flag
-  flag: flag.knife_forensics_complete
-  value: true
-  after: 20m
+triggers:
+  - id: trigger.knife_forensics
+    name: Knife forensics
+    on:
+      command: command.investigate
+      parameters:
+        target: entity.diving_knife
+    after: 20m
+    facts:
+      - id: fact.knife_forensics
+        statement: The knife was cleaned with marine degreaser.
 ```
 
-The resulting fact can require `flag.knife_forensics_complete`. Format 2 rejects
-clue sections, top-level fact sections, facts nested beneath unsupported owner
-types, `initially_known`, and clue-based deduction `supported_by`. Fact
-requirement cycles are also rejected.
+This replaces disposable completion flags whose only purpose was to unlock one
+result fact. Format 2 rejects clue sections, top-level fact sections, facts
+nested beneath unsupported owner types, `initially_known`, and clue-based
+deduction `supported_by`. Fact and trigger-completion dependency cycles are
+reported deterministically.
 
 Format 2 facts may include optional player-safe `narrative_detail`. When
 present, it must be a non-empty string and inherits the fact's requirements;
@@ -346,7 +377,10 @@ facts:
   - id: fact.knife_was_recently_washed
     statement: The diving knife was recently washed.
     narrative_detail: Fresh scratches mark the blade beneath its polished surface.
-    requires: [command.examine, entity.diving_knife]
+    on:
+      command: command.examine
+      parameters:
+        target: owner
 ```
 
 Facts may also carry an explicit occurrence time when the fact statement itself
@@ -414,8 +448,10 @@ how many topics may accompany the question. Legacy individually typed optional
 topic parameters remain accepted during migration. The first parameter remains
 the testimony owner target, making owner binding deterministic.
 
-The validator proves the structure, reference kinds, uniqueness, and explicit
-question/target gates. It cannot prove that natural-language testimony is
+`reveals` is authoritative: a revealed fact does not repeat the question owner,
+topic, or command gates in its own discovery fields. The validator proves the
+structure, reference kinds, uniqueness, and explicit question/target gates. It
+cannot prove that natural-language testimony is
 semantically consistent with the statements of its revealed facts; authors and
 story review remain responsible for that consistency. Legacy goals, motives,
 secrets, methods, cover stories, and earlier behavior notes belong beneath
@@ -449,8 +485,8 @@ The first pass checks:
 - globally unique, kind-prefixed IDs;
 - known typed and untyped references;
 - duplicate values in reference lists;
-- required flag metadata and typed trigger time/location/subject gates;
-- deterministic format-2 initial time and executable trigger-effect shapes;
+- required flag metadata and typed trigger action/persistent-condition gates;
+- deterministic format-2 initial time, trigger delay, and executable effect shapes;
 - player-safe character portrayal and testimony shape, identity, gate, and
   reveal references;
 - versioned clue or nested-fact knowledge models and two- or three-input deductions;
@@ -473,3 +509,17 @@ case:
   exit_settings:
     - setting.main_lodge
 ```
+
+## Format 2 discovery migration examples
+
+- Lena testimony keeps its ordered question/topic gates on the testimony entry;
+  its fact is listed only in `reveals` and has no duplicate discovery gate.
+- Mara access-log facts use `on.command: command.examine`, bind the semantic
+  target parameter to `owner`, and put durable controller visibility under
+  `when.all: [{ flag: flag.controller_contents_revealed }]`.
+- Tunnel unlock triggers bind `on.parameters.item` to the staff key and the
+  target role to the tunnel entrance. Characters are not placed in an
+  alternative selected-ID bag when `command.use` cannot select them.
+- Delayed forensic triggers move their delay to trigger `after` and nest the
+  result fact under that trigger; the one-use completion flag and fact
+  requirement are removed.
