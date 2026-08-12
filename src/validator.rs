@@ -27,8 +27,9 @@ const REQUIRED_SECTIONS: &[&str] = &[
     "events",
     "deductions",
     "flags",
+    "cards",
 ];
-const SINGLE_SECTIONS: &[&str] = &["clues", "commands", "triggers"];
+const SINGLE_SECTIONS: &[&str] = &["clues", "commands", "triggers", "cards"];
 const CANONICAL_SECTION_FILES: &[(&str, &str)] = &[
     ("case", "settings.yaml"),
     ("solution", "settings.yaml"),
@@ -42,6 +43,7 @@ const CANONICAL_SECTION_FILES: &[(&str, &str)] = &[
     ("flags", "flags.yaml"),
     ("commands", "commands.yaml"),
     ("triggers", "triggers.yaml"),
+    ("cards", "deck.yaml"),
 ];
 
 #[derive(Debug)]
@@ -267,7 +269,8 @@ impl<'a> Validator<'a> {
         self.validate_solution();
         self.validate_references();
         self.validate_duplicate_lists();
-        self.validate_tag_ids(&settings, &characters, &entities, &commands);
+        self.validate_deck();
+        self.validate_legacy_inline_tag_ids(&settings, &characters, &entities, &commands);
         self.validate_event_values(&events);
         self.validate_route_values(&routes);
         self.validate_character_values(&characters, facts_enabled);
@@ -1303,89 +1306,192 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn validate_tag_ids(
+    fn validate_legacy_inline_tag_ids(
         &mut self,
         settings: &[Item],
         characters: &[Item],
         entities: &[Item],
         commands: &[Item],
     ) {
-        let mut seen = BTreeMap::<i64, (&Item, Option<SourceRange>)>::new();
-        let cards = settings
+        for item in settings
             .iter()
-            .map(|item| {
-                let navigable = bool_field(&item.mapping, "navigable")
-                    .unwrap_or_else(|| string_field(&item.mapping, "type") != Some("island"));
-                (item, navigable)
-            })
-            .chain(characters.iter().map(|item| (item, true)))
-            .chain(entities.iter().map(|item| (item, true)))
-            .chain(commands.iter().map(|item| (item, true)));
-
-        for (item, required) in cards {
+            .chain(characters)
+            .chain(entities)
+            .chain(commands)
+        {
             let pointer = format!("{}/tag_id", item.pointer);
             let value = item.mapping.get(Value::String("tag_id".to_string()));
-            if value.is_none() && !required {
+            if value.is_none() {
                 continue;
             }
-            let Some(tag_id) = value.and_then(Value::as_i64) else {
-                self.push(
-                    Severity::Error,
-                    if value.is_some() {
-                        "tag_id.invalid"
-                    } else {
-                        "tag_id.missing"
-                    },
-                    if value.is_some() {
-                        format!(
-                            "`tag_id` must be a whole-number tagStandard41h12 ID from 0 through {TAG_STANDARD_41H12_MAX_ID}"
-                        )
-                    } else {
-                        format!("{} `{}` is missing a `tag_id`", card_kind(item), item.id)
-                    },
-                    &item.path,
-                    Some(pointer),
-                    None,
-                    Some(item.id.clone()),
-                );
+            let range = locate_item_field(&item.source, &item.id, "tag_id");
+            self.push(
+                Severity::Error,
+                "deck.legacy_inline_tag_id",
+                format!(
+                    "legacy inline `tag_id` on `{}` must move to `deck.yaml` as `{{ tag_id: {}, subject: {} }}`",
+                    item.id,
+                    value.and_then(Value::as_i64).map_or("…".to_string(), |id| id.to_string()),
+                    item.id
+                ),
+                &item.path,
+                Some(pointer),
+                range,
+                Some(item.id.clone()),
+            );
+        }
+    }
+
+    fn validate_deck(&mut self) {
+        let Some(locations) = self.sections.get("cards").cloned() else {
+            return;
+        };
+        let mut seen_tags = BTreeMap::<i64, (String, String, Option<SourceRange>)>::new();
+        let mut seen_subjects = BTreeMap::<String, (String, String, Option<SourceRange>)>::new();
+        for (path, section_pointer) in locations {
+            let Some(file) = self.parsed.iter().find(|file| file.path == path) else {
                 continue;
             };
-            let range = locate_item_field(&item.source, &item.id, "tag_id");
-            if !(0..=TAG_STANDARD_41H12_MAX_ID).contains(&tag_id) {
-                self.push(
-                    Severity::Error,
-                    "tag_id.invalid",
-                    format!(
-                        "`tag_id` {tag_id} is outside the tagStandard41h12 range 0 through {TAG_STANDARD_41H12_MAX_ID}"
-                    ),
-                    &item.path,
-                    Some(pointer),
-                    range,
-                    Some(item.id.clone()),
-                );
+            let source = file.source.to_string();
+            let root = file.value.as_mapping().expect("root mappings were checked");
+            let Some(cards) = root
+                .get(Value::String("cards".to_string()))
+                .and_then(Value::as_sequence)
+            else {
+                // The ordinary section-shape validation emits the primary diagnostic.
                 continue;
-            }
-            if let Some((first, first_range)) = seen.get(&tag_id) {
-                self.diagnostics.push(Diagnostic {
-                    severity: Severity::Error,
-                    code: "tag_id.duplicate".to_string(),
-                    message: format!(
-                        "tagStandard41h12 ID {tag_id} is assigned to both `{}` and `{}`",
-                        first.id, item.id
-                    ),
-                    path: item.path.clone(),
-                    pointer: Some(pointer),
-                    range,
-                    subject_id: Some(item.id.clone()),
-                    related: vec![RelatedLocation {
-                        message: format!("first assigned to `{}` here", first.id),
-                        path: first.path.clone(),
-                        pointer: Some(format!("{}/tag_id", first.pointer)),
-                        range: *first_range,
-                    }],
-                });
-            } else {
-                seen.insert(tag_id, (item, range));
+            };
+            let cards = cards.clone();
+            for (index, value) in cards.iter().enumerate() {
+                let pointer = format!("{section_pointer}/{index}");
+                let Some(card) = value.as_mapping() else {
+                    self.push(
+                        Severity::Error,
+                        "deck.entry_type",
+                        "deck entries must be mappings with `tag_id` and `subject`".to_string(),
+                        &path,
+                        Some(pointer),
+                        None,
+                        None,
+                    );
+                    continue;
+                };
+                let tag_pointer = format!("{pointer}/tag_id");
+                let tag_value = card.get(Value::String("tag_id".to_string()));
+                let tag_id = tag_value.and_then(Value::as_i64);
+                if tag_id.is_none() {
+                    self.push(
+                        Severity::Error,
+                        "deck.tag_id_invalid",
+                        format!("deck `tag_id` must be a whole number from 0 through {TAG_STANDARD_41H12_MAX_ID}"),
+                        &path,
+                        Some(tag_pointer.clone()),
+                        None,
+                        None,
+                    );
+                } else if !((0..=TAG_STANDARD_41H12_MAX_ID).contains(&tag_id.unwrap())) {
+                    self.push(
+                        Severity::Error,
+                        "deck.tag_id_out_of_range",
+                        format!("deck `tag_id` {} is outside the tagStandard41h12 range 0 through {TAG_STANDARD_41H12_MAX_ID}", tag_id.unwrap()),
+                        &path,
+                        Some(tag_pointer.clone()),
+                        None,
+                        None,
+                    );
+                }
+
+                let subject_pointer = format!("{pointer}/subject");
+                let subject = string_field(card, "subject").map(str::to_string);
+                if subject.is_none() {
+                    self.push(
+                        Severity::Error,
+                        "deck.subject_invalid",
+                        "deck `subject` must be a canonical setting, character, entity, or command ID".to_string(),
+                        &path,
+                        Some(subject_pointer.clone()),
+                        None,
+                        None,
+                    );
+                } else if let Some(subject) = subject.as_ref() {
+                    match self.definitions.get(subject) {
+                        None => self.push(
+                            Severity::Error,
+                            "deck.subject_unknown",
+                            format!("deck subject `{subject}` is not defined by this story"),
+                            &path,
+                            Some(subject_pointer.clone()),
+                            locate_scalar(&source, subject),
+                            Some(subject.clone()),
+                        ),
+                        Some(definition)
+                            if !matches!(
+                                definition.kind,
+                                Kind::Setting | Kind::Character | Kind::Entity | Kind::Command
+                            ) =>
+                        {
+                            self.push(
+                                Severity::Error,
+                                "deck.subject_unsupported",
+                                format!("{} `{subject}` cannot be bound to a physical card; use a setting, character, entity, or command", definition.kind.name()),
+                                &path,
+                                Some(subject_pointer.clone()),
+                                locate_scalar(&source, subject),
+                                Some(subject.clone()),
+                            );
+                        }
+                        Some(_) => {}
+                    }
+                }
+
+                if let Some(tag_id) =
+                    tag_id.filter(|id| (0..=TAG_STANDARD_41H12_MAX_ID).contains(id))
+                {
+                    let range = None;
+                    if let Some((first_subject, first_pointer, first_range)) =
+                        seen_tags.get(&tag_id)
+                    {
+                        self.diagnostics.push(Diagnostic {
+                            severity: Severity::Error,
+                            code: "deck.tag_id_duplicate".to_string(),
+                            message: format!("tagStandard41h12 ID {tag_id} is assigned to both `{first_subject}` and `{}`", subject.as_deref().unwrap_or("an invalid subject")),
+                            path: path.clone(),
+                            pointer: Some(tag_pointer),
+                            range,
+                            subject_id: subject.clone(),
+                            related: vec![RelatedLocation { message: format!("first assigned to `{first_subject}` here"), path: path.clone(), pointer: Some(first_pointer.clone()), range: *first_range }],
+                        });
+                    } else {
+                        seen_tags.insert(
+                            tag_id,
+                            (subject.clone().unwrap_or_default(), tag_pointer, range),
+                        );
+                    }
+                }
+                if let Some(subject) = subject {
+                    let range = locate_scalar(&source, &subject);
+                    if let Some((first_path, first_pointer, first_range)) =
+                        seen_subjects.get(&subject)
+                    {
+                        self.diagnostics.push(Diagnostic {
+                            severity: Severity::Error,
+                            code: "deck.subject_duplicate".to_string(),
+                            message: format!("deck subject `{subject}` is bound more than once"),
+                            path: path.clone(),
+                            pointer: Some(subject_pointer),
+                            range,
+                            subject_id: Some(subject.clone()),
+                            related: vec![RelatedLocation {
+                                message: "first bound here".to_string(),
+                                path: first_path.clone(),
+                                pointer: Some(first_pointer.clone()),
+                                range: *first_range,
+                            }],
+                        });
+                    } else {
+                        seen_subjects.insert(subject, (path.clone(), subject_pointer, range));
+                    }
+                }
             }
         }
     }
@@ -4737,16 +4843,6 @@ fn integer_field(mapping: &Mapping, field: &str) -> Option<i64> {
     mapping
         .get(Value::String(field.to_string()))
         .and_then(Value::as_i64)
-}
-
-fn card_kind(item: &Item) -> &'static str {
-    match id_prefix(&item.id) {
-        Some("setting") => "room",
-        Some("character") => "character",
-        Some("entity") => "entity",
-        Some("command") => "action",
-        _ => "card",
-    }
 }
 
 fn id_prefix(id: &str) -> Option<&str> {

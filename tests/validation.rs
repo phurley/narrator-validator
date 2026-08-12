@@ -22,11 +22,9 @@ settings:
     type: island
   - id: setting.foyer
     type: room
-    tag_id: 0
     parent: setting.world
   - id: setting.study
     type: room
-    tag_id: 1
     parent: setting.world
 routes:
   - id: route.foyer_study
@@ -36,12 +34,9 @@ routes:
     travel_minutes: 1
 characters:
   - id: character.victim
-    tag_id: 2
   - id: character.culprit
-    tag_id: 3
 entities:
   - id: entity.knife
-    tag_id: 4
     initial:
       container: setting.study
 events:
@@ -65,7 +60,6 @@ flags:
     initial_state: false
 commands:
   - id: command.examine
-    tag_id: 5
     name: Examine
     description: Inspect an entity.
     parameters:
@@ -85,6 +79,19 @@ triggers:
     any_of: [character.culprit, entity.knife]
     all_of: [flag.knife_examined]
     effects: []
+cards:
+  - tag_id: 0
+    subject: setting.foyer
+  - tag_id: 1
+    subject: setting.study
+  - tag_id: 2
+    subject: character.victim
+  - tag_id: 3
+    subject: character.culprit
+  - tag_id: 4
+    subject: entity.knife
+  - tag_id: 5
+    subject: command.examine
 "#;
 
 const VALID_FORMAT_2_STORY: &str = r#"
@@ -105,11 +112,9 @@ settings:
     type: island
   - id: setting.foyer
     type: room
-    tag_id: 0
     parent: setting.world
   - id: setting.study
     type: room
-    tag_id: 1
     parent: setting.world
 routes:
   - id: route.foyer_study
@@ -119,12 +124,9 @@ routes:
     travel_minutes: 1
 characters:
   - id: character.victim
-    tag_id: 2
   - id: character.culprit
-    tag_id: 3
 entities:
   - id: entity.knife
-    tag_id: 4
     initial:
       container: setting.study
     facts:
@@ -160,14 +162,12 @@ flags:
     initial_state: false
 commands:
   - id: command.claim
-    tag_id: 5
     name: Claim
     description: Learn that the knife is present.
     effects:
       - operation: learn_fact
         fact_id: fact.knife_is_present
   - id: command.investigate
-    tag_id: 6
     name: Investigate
     description: Resolve the authored effects of investigating an entity.
     parameters:
@@ -214,6 +214,21 @@ triggers:
         flag: flag.knife_analysis_complete
         value: true
         after: 20m
+cards:
+  - tag_id: 0
+    subject: setting.foyer
+  - tag_id: 1
+    subject: setting.study
+  - tag_id: 2
+    subject: character.victim
+  - tag_id: 3
+    subject: character.culprit
+  - tag_id: 4
+    subject: entity.knife
+  - tag_id: 5
+    subject: command.claim
+  - tag_id: 6
+    subject: command.investigate
 "#;
 
 fn report(source: impl Into<String>) -> narrator_validator::ValidationReport {
@@ -231,12 +246,12 @@ fn codes(source: impl Into<String>) -> Vec<String> {
 fn format_2_story_with_narrative_details() -> String {
     VALID_FORMAT_2_STORY
         .replace(
-            "  - id: setting.foyer\n    type: room\n    tag_id: 0\n    parent: setting.world",
-            "  - id: setting.foyer\n    type: room\n    tag_id: 0\n    parent: setting.world\n    facts:\n      - id: fact.setting_detail\n        statement: A setting-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL",
+            "  - id: setting.foyer\n    type: room\n    parent: setting.world",
+            "  - id: setting.foyer\n    type: room\n    parent: setting.world\n    facts:\n      - id: fact.setting_detail\n        statement: A setting-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL",
         )
         .replace(
-            "  - id: character.culprit\n    tag_id: 3\nentities:",
-            "  - id: character.culprit\n    tag_id: 3\n    facts:\n      - id: fact.character_detail\n        statement: A character-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL\nentities:",
+            "  - id: character.culprit\nentities:",
+            "  - id: character.culprit\n    facts:\n      - id: fact.character_detail\n        statement: A character-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL\nentities:",
         )
         .replace(
             "        statement: The knife is present.",
@@ -269,12 +284,12 @@ fn format_2_story_with_entity_occurrence(occurred_at: &str) -> String {
 fn format_2_story_with_character_fields(fields: &str) -> String {
     VALID_FORMAT_2_STORY
         .replace(
-            "  - id: character.culprit\n    tag_id: 3\nentities:",
-            &format!("  - id: character.culprit\n    tag_id: 3\n{fields}entities:"),
+            "  - id: character.culprit\nentities:",
+            &format!("  - id: character.culprit\n{fields}entities:"),
         )
         .replace(
             "commands:\n",
-            "commands:\n  - id: command.question\n    tag_id: 7\n    name: Question\n    parameters:\n      - name: character\n        type: character\n        required: true\n",
+            "commands:\n  - id: command.question\n    name: Question\n    parameters:\n      - name: character\n        type: character\n        required: true\n",
         )
 }
 
@@ -309,6 +324,7 @@ fn story_files(source: String) -> Vec<SourceFile> {
             Some("flags") => "flags.yaml",
             Some("commands") => "commands.yaml",
             Some("triggers") => "triggers.yaml",
+            Some("cards") => "deck.yaml",
             _ => "story.yaml",
         };
         documents.entry(path).or_default().insert(key, value);
@@ -335,39 +351,24 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_2_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_2_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "0.20.1");
+    assert_eq!(report.validator_version, "0.21.0");
     assert_eq!(report.format_version.as_deref(), Some("2.0.0"));
     assert!(report.diagnostics.is_empty());
 }
 
 #[test]
-fn requires_bounded_unique_tag_standard_41h12_ids_for_physical_cards() {
-    for (line, pointer, subject) in [
-        ("    tag_id: 0\n", "/settings/1/tag_id", "setting.foyer"),
-        (
-            "    tag_id: 2\n",
-            "/characters/0/tag_id",
-            "character.victim",
-        ),
-        ("    tag_id: 4\n", "/entities/0/tag_id", "entity.knife"),
-        ("    tag_id: 5\n", "/commands/0/tag_id", "command.claim"),
+fn validates_physical_deck_bindings() {
+    for (value, code) in [
+        ("-1", "deck.tag_id_out_of_range"),
+        ("2115", "deck.tag_id_out_of_range"),
+        ("1.5", "deck.tag_id_invalid"),
+        ("not-a-number", "deck.tag_id_invalid"),
     ] {
-        let report = report(VALID_FORMAT_2_STORY.replacen(line, "", 1));
-        assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "tag_id.missing"
-                && diagnostic.pointer.as_deref() == Some(pointer)
-                && diagnostic.subject_id.as_deref() == Some(subject)
-        }));
-    }
-
-    for value in ["-1", "2115", "1.5", "not-a-number"] {
         let report =
             report(VALID_FORMAT_2_STORY.replacen("tag_id: 4", &format!("tag_id: {value}"), 1));
         assert!(
             report.diagnostics.iter().any(|diagnostic| {
-                diagnostic.code == "tag_id.invalid"
-                    && diagnostic.pointer.as_deref() == Some("/entities/0/tag_id")
-                    && diagnostic.subject_id.as_deref() == Some("entity.knife")
+                diagnostic.code == code && diagnostic.pointer.as_deref() == Some("/cards/4/tag_id")
             }),
             "{value}: {:#?}",
             report.diagnostics
@@ -377,27 +378,44 @@ fn requires_bounded_unique_tag_standard_41h12_ids_for_physical_cards() {
     let duplicate = report(VALID_FORMAT_2_STORY.replacen("tag_id: 4", "tag_id: 0", 1))
         .diagnostics
         .into_iter()
-        .find(|diagnostic| diagnostic.code == "tag_id.duplicate")
+        .find(|diagnostic| diagnostic.code == "deck.tag_id_duplicate")
         .expect("duplicate tag ID diagnostic");
-    assert_eq!(duplicate.pointer.as_deref(), Some("/entities/0/tag_id"));
-    assert_eq!(duplicate.related.len(), 1);
+    assert_eq!(duplicate.pointer.as_deref(), Some("/cards/4/tag_id"));
     assert_eq!(
         duplicate.related[0].pointer.as_deref(),
-        Some("/settings/1/tag_id")
+        Some("/cards/0/tag_id")
     );
 
-    let navigable_passage = report(
-        VALID_FORMAT_2_STORY
-            .replace("type: room\n    tag_id: 0", "type: passage")
-            .replacen("type: island", "type: island\n    navigable: false", 1),
-    );
-    assert!(navigable_passage.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "tag_id.missing"
-            && diagnostic.pointer.as_deref() == Some("/settings/1/tag_id")
-    }));
-    assert!(!navigable_passage.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "tag_id.missing"
-            && diagnostic.pointer.as_deref() == Some("/settings/0/tag_id")
+    for (subject, code) in [
+        ("entity.unknown", "deck.subject_unknown"),
+        ("event.murder", "deck.subject_unsupported"),
+    ] {
+        let report = report(VALID_FORMAT_2_STORY.replacen(
+            "subject: entity.knife",
+            &format!("subject: {subject}"),
+            1,
+        ));
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code && diagnostic.pointer.as_deref() == Some("/cards/4/subject")
+            }),
+            "{subject}: {:#?}",
+            report.diagnostics
+        );
+    }
+
+    let uncarded =
+        report(VALID_FORMAT_2_STORY.replace("  - tag_id: 4\n    subject: entity.knife\n", ""));
+    assert!(uncarded.valid, "{:#?}", uncarded.diagnostics);
+
+    let legacy = report(VALID_FORMAT_2_STORY.replace(
+        "  - id: entity.knife\n",
+        "  - id: entity.knife\n    tag_id: 42\n",
+    ));
+    assert!(legacy.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "deck.legacy_inline_tag_id"
+            && diagnostic.pointer.as_deref() == Some("/entities/0/tag_id")
+            && diagnostic.message.contains("deck.yaml")
     }));
 }
 
@@ -709,7 +727,7 @@ fn testimony_rejects_every_non_question_command_gate_and_preserves_duplicate_dia
     )
     .replace(
         "  - id: command.claim",
-        "  - id: command.examine\n    tag_id: 8\n    name: Examine\n  - id: command.claim",
+        "  - id: command.examine\n    name: Examine\n  - id: command.claim",
     );
     let report = report(source);
 
@@ -1517,8 +1535,8 @@ fn reports_unknown_and_wrong_type_references() {
 #[test]
 fn reports_duplicate_ids_with_the_original_location() {
     let source = VALID_STORY.replace(
-        "character.culprit\n    tag_id: 3\nentities:",
-        "character.victim\n    tag_id: 3\nentities:",
+        "character.culprit\nentities:",
+        "character.victim\nentities:",
     );
     let report = report(source);
     let duplicate = report
@@ -1869,7 +1887,7 @@ fn take_and_drop_require_one_required_entity_parameter() {
         let accepted = report(VALID_FORMAT_2_STORY.replace(
             "commands:\n",
             &format!(
-                "commands:\n  - id: {command}\n    tag_id: 7\n    name: Inventory command\n    parameters:\n      - name: item\n        type: entity\n        required: true\n"
+                "commands:\n  - id: {command}\n    name: Inventory command\n    parameters:\n      - name: item\n        type: entity\n        required: true\n"
             ),
         ));
         assert!(accepted.valid, "{command}: {:#?}", accepted.diagnostics);
@@ -1895,7 +1913,7 @@ fn take_and_drop_require_one_required_entity_parameter() {
             let report = report(VALID_FORMAT_2_STORY.replace(
                 "commands:\n",
                 &format!(
-                    "commands:\n  - id: {command}\n    tag_id: 7\n    name: Inventory command\n{parameters}"
+                    "commands:\n  - id: {command}\n    name: Inventory command\n{parameters}"
                 ),
             ));
             let diagnostic = report
@@ -2420,10 +2438,13 @@ fn validates_deduction_solution_shape() {
 
 #[test]
 fn commands_and_triggers_remain_optional() {
-    let source = VALID_STORY
+    let semantic = VALID_STORY
         .split("commands:\n")
         .next()
         .expect("story before optional sections");
+    let source = format!(
+        "{semantic}cards:\n  - tag_id: 0\n    subject: setting.foyer\n  - tag_id: 1\n    subject: setting.study\n  - tag_id: 2\n    subject: character.victim\n  - tag_id: 3\n    subject: character.culprit\n  - tag_id: 4\n    subject: entity.knife\n"
+    );
     let report = report(source);
     assert!(report.valid, "{:#?}", report.diagnostics);
 }

@@ -19,17 +19,27 @@ and game engine agree on where content lives:
 - `settings.yaml`: `case`, `solution`, `settings`, and `routes`
 - `characters.yaml`, `entities.yaml`, `events.yaml`, `deductions.yaml`,
   `flags.yaml`, `commands.yaml`, and `triggers.yaml`: the matching section
+- `deck.yaml`: the physical `cards` bindings for one printed deck edition
 - `clues.yaml`: legacy format-1 `clues`
 
 Other top-level metadata may remain in additional YAML files. The former
 `tags` section is removed; use flags for authored world state.
 
-Every entity, character, action (`commands` item), and navigable setting has a
-numeric `tag_id` identifying its physical `tagStandard41h12` card. Navigable
-settings are the story's room/location cards; container-only world settings do
-not need one. IDs range from 0 through 2114 and must be unique across all of
-those card types within a story. The same numeric IDs may be reused by another
-story.
+Physical cards are separate from semantic story objects. `deck.yaml` contains
+one `cards` sequence whose entries bind a numeric `tag_id` to a canonical
+setting, character, entity, or command `subject`:
+
+```yaml
+cards:
+  - tag_id: 13
+    subject: entity.diving_knife
+```
+
+IDs range from 0 through 2114 and must be unique within the deck. Subjects may
+also be bound only once. Story objects do not require a card, and an alternate
+printed edition can replace only `deck.yaml` while reusing every semantic story
+file. Standard command cards bind their existing `command.*` definitions; the
+deck never copies command behavior.
 
 Commands and triggers share one ordered world-effect contract. Canonical
 operations are `set_flag`, `move`, `transform`, `reveal`, `conceal`,
