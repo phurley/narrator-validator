@@ -41,8 +41,9 @@ assert.ok(
 
 const dropReport = await validateRepository([
   {
-    path: 'settings.yaml',
-    source: 'case:\n  id: case.smoke\n  format_version: "2.0.0"\n',
+    path: 'case.yaml',
+    source:
+      'case:\n  id: case.smoke\n  format_version: "3.0.0"\n  title: Smoke test\n  initial_time: "21:00"\n  players:\n    min: 1\n    max: 4\n',
   },
   {
     path: 'commands.yaml',
