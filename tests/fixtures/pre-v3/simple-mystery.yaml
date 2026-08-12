@@ -1,0 +1,9 @@
+case:
+  id: case.last_bell_at_briar_house
+  format_version: "2.0.0"
+  intended_players: 1-4
+solution:
+  culprit: character.lena_ortiz
+settings:
+  - id: setting.study
+    type: room

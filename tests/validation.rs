@@ -90,7 +90,10 @@ triggers:
 const VALID_FORMAT_2_STORY: &str = r#"
 case:
   id: case.example
-  format_version: "2.0.0"
+  format_version: "3.0.0"
+  players:
+    min: 1
+    max: 4
   initial_time: "21:00"
   entry_settings: [setting.foyer]
   exit_settings: [setting.foyer]
@@ -103,13 +106,17 @@ solution:
 settings:
   - id: setting.world
     type: island
+    navigable: false
+    description: The world containing the playable rooms.
   - id: setting.foyer
     type: room
     tag_id: 0
+    description: The entry foyer.
     parent: setting.world
   - id: setting.study
     type: room
     tag_id: 1
+    description: The study where the mystery occurred.
     parent: setting.world
 routes:
   - id: route.foyer_study
@@ -120,11 +127,14 @@ routes:
 characters:
   - id: character.victim
     tag_id: 2
+    description: The victim at the center of the mystery.
   - id: character.culprit
     tag_id: 3
+    description: A suspect with a carefully guarded secret.
 entities:
   - id: entity.knife
     tag_id: 4
+    description: A knife found in the study.
     initial:
       container: setting.study
     facts:
@@ -231,12 +241,12 @@ fn codes(source: impl Into<String>) -> Vec<String> {
 fn format_2_story_with_narrative_details() -> String {
     VALID_FORMAT_2_STORY
         .replace(
-            "  - id: setting.foyer\n    type: room\n    tag_id: 0\n    parent: setting.world",
-            "  - id: setting.foyer\n    type: room\n    tag_id: 0\n    parent: setting.world\n    facts:\n      - id: fact.setting_detail\n        statement: A setting-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL",
+            "  - id: setting.foyer\n    type: room\n    tag_id: 0\n    description: The entry foyer.\n    parent: setting.world",
+            "  - id: setting.foyer\n    type: room\n    tag_id: 0\n    description: The entry foyer.\n    parent: setting.world\n    facts:\n      - id: fact.setting_detail\n        statement: A setting-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL",
         )
         .replace(
-            "  - id: character.culprit\n    tag_id: 3\nentities:",
-            "  - id: character.culprit\n    tag_id: 3\n    facts:\n      - id: fact.character_detail\n        statement: A character-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL\nentities:",
+            "  - id: character.culprit\n    tag_id: 3\n    description: A suspect with a carefully guarded secret.\nentities:",
+            "  - id: character.culprit\n    tag_id: 3\n    description: A suspect with a carefully guarded secret.\n    facts:\n      - id: fact.character_detail\n        statement: A character-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL\nentities:",
         )
         .replace(
             "        statement: The knife is present.",
@@ -269,8 +279,8 @@ fn format_2_story_with_entity_occurrence(occurred_at: &str) -> String {
 fn format_2_story_with_character_fields(fields: &str) -> String {
     VALID_FORMAT_2_STORY
         .replace(
-            "  - id: character.culprit\n    tag_id: 3\nentities:",
-            &format!("  - id: character.culprit\n    tag_id: 3\n{fields}entities:"),
+            "  - id: character.culprit\n    tag_id: 3\n    description: A suspect with a carefully guarded secret.\nentities:",
+            &format!("  - id: character.culprit\n    tag_id: 3\n    description: A suspect with a carefully guarded secret.\n{fields}entities:"),
         )
         .replace(
             "commands:\n",
@@ -298,7 +308,8 @@ fn story_files(source: String) -> Vec<SourceFile> {
     let mut documents: BTreeMap<&str, Mapping> = BTreeMap::new();
     for (key, value) in root {
         let path = match key.as_str() {
-            Some("case" | "solution" | "settings" | "routes") => "settings.yaml",
+            Some("case" | "solution") => "case.yaml",
+            Some("settings" | "routes") => "settings.yaml",
             Some("characters") => "characters.yaml",
             Some("entities") => "entities.yaml",
             Some("events") => "events.yaml",
@@ -336,7 +347,7 @@ fn valid_format_2_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_2_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
     assert_eq!(report.validator_version, "0.21.0");
-    assert_eq!(report.format_version.as_deref(), Some("2.0.0"));
+    assert_eq!(report.format_version.as_deref(), Some("3.0.0"));
     assert!(report.diagnostics.is_empty());
 }
 
@@ -386,11 +397,8 @@ fn requires_bounded_unique_tag_standard_41h12_ids_for_physical_cards() {
         Some("/settings/1/tag_id")
     );
 
-    let navigable_passage = report(
-        VALID_FORMAT_2_STORY
-            .replace("type: room\n    tag_id: 0", "type: passage")
-            .replacen("type: island", "type: island\n    navigable: false", 1),
-    );
+    let navigable_passage =
+        report(VALID_FORMAT_2_STORY.replace("type: room\n    tag_id: 0", "type: passage"));
     assert!(navigable_passage.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "tag_id.missing"
             && diagnostic.pointer.as_deref() == Some("/settings/1/tag_id")
@@ -403,11 +411,11 @@ fn requires_bounded_unique_tag_standard_41h12_ids_for_physical_cards() {
 
 #[test]
 fn accepts_semantically_compatible_story_format_versions() {
-    for version in ["1.7.3", "2.4.1"] {
+    for version in ["1.7.3", "3.4.1"] {
         let source = if version.starts_with('1') {
             VALID_STORY.replace("\"1.0.0\"", &format!("\"{version}\""))
         } else {
-            VALID_FORMAT_2_STORY.replace("\"2.0.0\"", &format!("\"{version}\""))
+            VALID_FORMAT_2_STORY.replace("\"3.0.0\"", &format!("\"{version}\""))
         };
         let report = report(source);
         assert!(report.valid, "{version}: {:#?}", report.diagnostics);
@@ -417,8 +425,12 @@ fn accepts_semantically_compatible_story_format_versions() {
 
 #[test]
 fn rejects_older_and_newer_incompatible_story_formats_with_migration_guidance() {
-    for (version, expected_text) in [("0.9.0", "too old"), ("3.0.0", "newer")] {
-        let source = VALID_FORMAT_2_STORY.replace("\"2.0.0\"", &format!("\"{version}\""));
+    for (version, expected_text) in [
+        ("0.9.0", "too old"),
+        ("2.0.0", "pre-migration"),
+        ("4.0.0", "newer"),
+    ] {
+        let source = VALID_FORMAT_2_STORY.replace("\"3.0.0\"", &format!("\"{version}\""));
         let report = report(source);
         assert!(!report.valid);
         assert_eq!(report.diagnostics.len(), 1);
@@ -428,8 +440,135 @@ fn rejects_older_and_newer_incompatible_story_formats_with_migration_guidance() 
 }
 
 #[test]
+fn pre_v3_demo_layouts_fail_once_with_focused_migration_guidance() {
+    for fixture in ["simple-mystery.yaml", "island-retreat.yaml"] {
+        let report = validate(&[SourceFile {
+            path: "settings.yaml".to_string(),
+            source: fs::read_to_string(format!("tests/fixtures/pre-v3/{fixture}"))
+                .expect("migration fixture"),
+        }]);
+        assert!(!report.valid, "{fixture}");
+        assert_eq!(
+            report.diagnostics.len(),
+            1,
+            "{fixture}: {:#?}",
+            report.diagnostics
+        );
+        assert_eq!(report.diagnostics[0].code, "format.incompatible_version");
+        assert_eq!(
+            report.diagnostics[0].pointer.as_deref(),
+            Some("/case/format_version")
+        );
+        assert!(report.diagnostics[0].message.contains("case.yaml"));
+        assert!(report.diagnostics[0]
+            .message
+            .contains("typed player limits"));
+    }
+}
+
+#[test]
+fn format_3_rejects_unknown_fields_on_every_known_item_kind() {
+    let mutations = [
+        ("    max: 4\n", "    max: 4\n  titel: typo\n", "case.unknown_field", "/case/titel"),
+        ("  deduction: deduction.solution\n", "  deduction: deduction.solution\n  methd: typo\n", "solution.unknown_field", "/solution/methd"),
+        ("    description: The entry foyer.\n", "    description: The entry foyer.\n    parnt: setting.world\n", "setting.unknown_field", "/settings/1/parnt"),
+        ("    travel_minutes: 1\n", "    travel_minutes: 1\n    travle_minutes: 1\n", "route.unknown_field", "/routes/0/travle_minutes"),
+        ("    description: The victim at the center of the mystery.\n", "    description: The victim at the center of the mystery.\n    ocupation: author only\n", "character.unknown_field", "/characters/0/ocupation"),
+        ("    description: A knife found in the study.\n", "    description: A knife found in the study.\n    examinined: hidden prose\n", "entity.unknown_field", "/entities/0/examinined"),
+        ("    duration_minutes: 0\n", "    duration_minutes: 0\n    sumar: hidden prose\n", "event.unknown_field", "/events/0/sumar"),
+        ("        statement: The knife is present.\n", "        statement: The knife is present.\n        narative_detail: typo\n", "fact.unknown_field", "/entities/0/facts/0/narative_detail"),
+        ("    truth: true\n", "    truth: true\n    conclsion_note: typo\n", "deduction.unknown_field", "/deductions/0/conclsion_note"),
+        ("    initial_state: false\n", "    initial_state: false\n    initital_state: false\n", "flag.unknown_field", "/flags/0/initital_state"),
+        ("    name: Claim\n", "    name: Claim\n    alaises: [claim]\n", "command.unknown_field", "/commands/0/alaises"),
+        ("    name: Investigate the knife\n", "    name: Investigate the knife\n    conditons: []\n", "trigger.unknown_field", "/triggers/0/conditons"),
+    ];
+    for (needle, replacement, code, pointer) in mutations {
+        let report = report(VALID_FORMAT_2_STORY.replacen(needle, replacement, 1));
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code && diagnostic.pointer.as_deref() == Some(pointer)
+            }),
+            "missing {code} at {pointer}: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
+fn format_3_requires_typed_player_limits_and_baseline_safe_descriptions() {
+    for (players, code, pointer) in [
+        ("1-4", "case.players_type", "/case/players"),
+        ("{min: 0, max: 4}", "case.players_min", "/case/players/min"),
+        ("{min: 5, max: 4}", "case.players_order", "/case/players"),
+        (
+            "{min: 1, max: many}",
+            "case.players_max",
+            "/case/players/max",
+        ),
+    ] {
+        let source = VALID_FORMAT_2_STORY.replace(
+            "  players:\n    min: 1\n    max: 4",
+            &format!("  players: {players}"),
+        );
+        let report = report(source);
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code && diagnostic.pointer.as_deref() == Some(pointer)
+            }),
+            "{players}: {:#?}",
+            report.diagnostics
+        );
+    }
+
+    for (line, code, pointer) in [
+        (
+            "    description: The entry foyer.\n",
+            "setting.description",
+            "/settings/1/description",
+        ),
+        (
+            "    description: The victim at the center of the mystery.\n",
+            "character.description",
+            "/characters/0/description",
+        ),
+        (
+            "    description: A knife found in the study.\n",
+            "entity.description",
+            "/entities/0/description",
+        ),
+    ] {
+        let report = report(VALID_FORMAT_2_STORY.replacen(line, "", 1));
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code && diagnostic.pointer.as_deref() == Some(pointer)
+            }),
+            "{code}: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
+fn format_3_separates_narrator_guidance_from_open_author_notes() {
+    let accepted = report(VALID_FORMAT_2_STORY.replace(
+        "    description: A suspect with a carefully guarded secret.\n",
+        "    description: A suspect with a carefully guarded secret.\n    narrator_guidance:\n      goal: Keep the truth hidden.\n      testimony_guidance:\n        default: Give the safe ordered testimony.\n    author_notes:\n      research_link: https://example.invalid/private\n",
+    ));
+    assert!(accepted.valid, "{:#?}", accepted.diagnostics);
+
+    let rejected = report(VALID_FORMAT_2_STORY.replace(
+        "    description: A suspect with a carefully guarded secret.\n",
+        "    description: A suspect with a carefully guarded secret.\n    narrator_guidance:\n      testimony: Ambiguous private testimony.\n",
+    ));
+    assert!(rejected.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "narrator_guidance.unknown_field"
+            && diagnostic.pointer.as_deref() == Some("/characters/1/narrator_guidance/testimony")
+    }));
+}
+
+#[test]
 fn rejects_legacy_integer_story_formats_before_schema_validation() {
-    let report = report(VALID_FORMAT_2_STORY.replace("\"2.0.0\"", "2"));
+    let report = report(VALID_FORMAT_2_STORY.replace("\"3.0.0\"", "2"));
     assert!(!report.valid);
     assert_eq!(report.diagnostics.len(), 1);
     assert_eq!(report.diagnostics[0].code, "format.incompatible_version");
@@ -1033,9 +1172,9 @@ fn question_signature_accepts_canonical_union_topic_cardinality() {
 }
 
 #[test]
-fn omitted_and_empty_reveals_match_and_private_legacy_behavior_is_not_safe_content() {
+fn omitted_and_empty_reveals_match_and_narrator_guidance_is_not_safe_content() {
     let source = format_2_story_with_character_fields(
-        "    private:\n      goal: SENTINEL_PRIVATE_GOAL\n      testimony:\n        under_pressure: SENTINEL_PRIVATE_UNDER_PRESSURE\n        must_not_confirm: SENTINEL_HIDDEN_FACT\n    portrayal:\n      demeanor: Player-safe demeanor.\n    testimony:\n      - id: testimony.no_reveal_omitted\n        text: This entry reveals no fact.\n        requires: [command.question, character.culprit]\n      - id: testimony.no_reveal_empty\n        text: This entry also reveals no fact.\n        requires: [command.question, character.culprit]\n        reveals: []\n",
+        "    narrator_guidance:\n      goal: SENTINEL_PRIVATE_GOAL\n      testimony_guidance:\n        under_pressure: SENTINEL_PRIVATE_UNDER_PRESSURE\n        must_not_confirm: SENTINEL_HIDDEN_FACT\n    portrayal:\n      demeanor: Player-safe demeanor.\n    testimony:\n      - id: testimony.no_reveal_omitted\n        text: This entry reveals no fact.\n        requires: [command.question, character.culprit]\n      - id: testimony.no_reveal_empty\n        text: This entry also reveals no fact.\n        requires: [command.question, character.culprit]\n        reveals: []\n",
     );
     let report = report(source);
 

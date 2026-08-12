@@ -1,0 +1,9 @@
+case:
+  id: case.last_tide_at_larkspur_cay
+  format_version: "2.0.0"
+  intended_players: 2-6
+solution:
+  culprit: character.mara_voss
+settings:
+  - id: setting.larkspur_cay
+    type: island

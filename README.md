@@ -16,7 +16,8 @@ annotation.
 Known top-level sections use canonical root filenames so the validator, editor,
 and game engine agree on where content lives:
 
-- `settings.yaml`: `case`, `solution`, `settings`, and `routes`
+- `case.yaml`: `case` and `solution`
+- `settings.yaml`: `settings` and `routes`
 - `characters.yaml`, `entities.yaml`, `events.yaml`, `deductions.yaml`,
   `flags.yaml`, `commands.yaml`, and `triggers.yaml`: the matching section
 - `clues.yaml`: legacy format-1 `clues`
@@ -120,18 +121,93 @@ It builds the pinned validator revision and emits native GitHub annotations.
 ## Story format versions
 
 Every story declares a quoted semantic version at `case.format_version`.
-This validator authors format `2.0.0` and accepts story formats in the range
-`>=1.0.0, <3.0.0`. Minor and patch releases remain compatible within their
-major format. A breaking story-contract change increments the major version.
+This validator authors format `3.0.0`. Format 3 minor and patch releases remain
+compatible within the major format. The format-1 validation path remains for
+legacy repositories, while format-2 repositories stop with focused migration
+guidance before the strict format-3 schema runs.
 
 Legacy integer versions, missing versions, and versions outside the supported
 range stop validation with migration guidance before version-specific schema
 rules run. This prevents an older story from producing a misleading cascade of
 unrelated field errors.
 
+## Format 3 document and disclosure contract
+
+Format 3 makes document placement, field ownership, and disclosure boundaries
+explicit. `case.yaml` owns the case metadata and mystery answer; `settings.yaml`
+owns only the world settings and routes. A case declares typed player limits:
+
+```yaml
+case:
+  id: case.last_tide
+  format_version: "3.0.0"
+  players:
+    min: 2
+    max: 6
+```
+
+Every character, entity, and setting has one baseline player-safe
+`description`. Discoveries that are not safe at first sight belong in a gated
+fact's `narrative_detail`; duplicate `examined` and `forensic` prose is not part
+of the contract. A container setting uses `navigable: false` explicitly. Its
+descriptive `type` (for example `island`) remains independent of navigation.
+
+| Boundary | Namespace or field | Named consumer |
+| --- | --- | --- |
+| Player-safe baseline | `description`, `portrayal`, ordered `testimony` | runtime safe-story and narration projections; author cards |
+| Gated player-safe detail | nested fact `statement` and `narrative_detail` | notebook and fact-aware narration projections |
+| Private narrator guidance | `narrator_guidance` | private authoring/narrator source projection; never safe-story output |
+| Mechanical state | IDs, tags, placement, routes, gates, effects, times, truth, and solution references | validator and deterministic game engine |
+| Author-only material | `author_notes` | raw authoring projection only; never runtime or narration input |
+
+`solution.narrator_guidance` accepts `motive`, `method`, and `proof_summary`.
+Character `narrator_guidance` accepts `goal`, `secret`, `motive`, `method`,
+`cover_story`, and `testimony_guidance`. The last name deliberately cannot be
+confused with player-safe ordered `testimony`. `author_notes` is the explicit
+open namespace for research, demographics, drafting reminders, and other
+material with no runtime projection.
+
+Known item mappings reject unknown fields with an exact JSON pointer. This
+includes cases, solutions, settings, routes, characters, entities, events,
+facts, deductions, flags, commands, triggers, and testimony entries. These
+compact examples show every item kind and its canonical fields:
+
+```yaml
+# case.yaml
+case: { id: case.example, format_version: "3.0.0", players: { min: 1, max: 4 }, initial_time: "20:00", entry_settings: [setting.study], exit_settings: [setting.study] }
+solution: { culprit: character.suspect, weapon: entity.knife, location: setting.study, time: "20:15", deduction: deduction.solution }
+
+# settings.yaml
+settings:
+  - { id: setting.world, type: island, navigable: false, name: The island, description: A storm-bound island. }
+  - { id: setting.study, tag_id: 0, type: room, name: Study, description: A book-lined study., parent: setting.world }
+routes: []
+
+# characters.yaml
+characters:
+  - id: character.suspect
+    tag_id: 1
+    name: Alex Vale
+    description: A composed guest in a rain-dark coat.
+    narrator_guidance: { goal: Keep the missing hour private. }
+    testimony: [{ id: testimony.alibi, text: Alex says they remained in the lounge., requires: [command.question, character.suspect] }]
+    facts: [{ id: fact.alibi, statement: Alex claimed to remain in the lounge., requires: [command.question, character.suspect] }]
+
+# entities.yaml / events.yaml / deductions.yaml / flags.yaml
+entities: [{ id: entity.knife, tag_id: 2, type: object, name: Knife, description: A polished display knife., initial: { container: setting.study } }]
+events: [{ id: event.murder, day: 0, time: "20:15", duration_minutes: 0, location: setting.study, participants: [character.suspect] }]
+deductions: [{ id: deduction.solution, conclusion: Alex used the knife., inputs: [fact.alibi], truth: true }]
+flags: [{ id: flag.power_out, name: Power out, description: The power has failed., initial_state: false }]
+
+# commands.yaml / triggers.yaml
+commands: [{ id: command.question, tag_id: 3, name: Question, parameters: [{ name: character, types: [character], min: 1, max: 1 }] }]
+triggers: [{ id: trigger.blackout, name: Blackout, command: command.question, effects: [{ operation: set_flag, flag: flag.power_out, value: true }] }]
+```
+
 ## Facts and deductions
 
-Validator 0.7 supports the format-2 notebook and action-effect model. Format 2
+Format 3 retains the nested notebook and action-effect model introduced by
+format 2. It
 removes clues and the standalone `facts.yml` section. Facts are nested beneath
 the character, entity, setting, event, or trigger they belong to. Each owner
 may omit `facts`, use an empty list, or contain any number of fact objects.
@@ -332,12 +408,12 @@ positive minute, hour, or turn delay:
   after: 20m
 ```
 
-The resulting fact can require `flag.knife_forensics_complete`. Format 2 rejects
+The resulting fact can require `flag.knife_forensics_complete`. Format 3 rejects
 clue sections, top-level fact sections, facts nested beneath unsupported owner
 types, `initially_known`, and clue-based deduction `supported_by`. Fact
 requirement cycles are also rejected.
 
-Format 2 facts may include optional player-safe `narrative_detail`. When
+Format 3 facts may include optional player-safe `narrative_detail`. When
 present, it must be a non-empty string and inherits the fact's requirements;
 it has no separate visibility gate:
 
@@ -417,21 +493,23 @@ the testimony owner target, making owner binding deterministic.
 The validator proves the structure, reference kinds, uniqueness, and explicit
 question/target gates. It cannot prove that natural-language testimony is
 semantically consistent with the statements of its revealed facts; authors and
-story review remain responsible for that consistency. Legacy goals, motives,
-secrets, methods, cover stories, and earlier behavior notes belong beneath
-`private` and are never converted into player-safe portrayal or testimony.
+story review remain responsible for that consistency. Goals, motives, secrets,
+methods, cover stories, and private behavioral direction belong beneath
+`narrator_guidance`; unordered private accounts belong beneath
+`testimony_guidance`. They are never converted into player-safe portrayal or
+ordered testimony.
 
 Format 1 remains supported for existing repositories, including its required
 `clues` section and optional 0.3 fact extensions.
 
-Format 2 cases require a quoted `case.initial_time` in 24-hour `HH:MM` form.
+Format 3 cases require a quoted `case.initial_time` in 24-hour `HH:MM` form.
 This initializes the authoritative shared clock used by time gates, route
 travel, and delayed effects:
 
 ```yaml
 case:
   id: case.last_tide
-  format_version: "2.0.0"
+  format_version: "3.0.0"
   initial_time: "21:32"
 ```
 
@@ -450,7 +528,7 @@ The first pass checks:
 - known typed and untyped references;
 - duplicate values in reference lists;
 - required flag metadata and typed trigger time/location/subject gates;
-- deterministic format-2 initial time and executable trigger-effect shapes;
+- deterministic format-3 initial time and executable trigger-effect shapes;
 - player-safe character portrayal and testimony shape, identity, gate, and
   reveal references;
 - versioned clue or nested-fact knowledge models and two- or three-input deductions;
@@ -460,16 +538,21 @@ The first pass checks:
   that requires all navigable settings to be strongly connected;
 - solution reference types and basic event time/duration values.
 
-Repositories without an explicit navigation contract remain accepted with
-migration warnings. A semantic format version is required. Compatibility mode
-treats a setting with `type: island` as non-navigable. New repositories should
-add:
+Format 3 repositories require an explicit navigation contract and a semantic
+format version. Container-only settings are explicitly non-navigable; their
+descriptive category does not change navigation behavior:
 
 ```yaml
 case:
-  format_version: "2.0.0"
+  format_version: "3.0.0"
   entry_settings:
     - setting.main_lodge
   exit_settings:
     - setting.main_lodge
+
+settings:
+  - id: setting.larkspur_cay
+    type: island
+    navigable: false
+    description: A storm-bound coral island.
 ```
