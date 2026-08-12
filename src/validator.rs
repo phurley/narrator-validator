@@ -158,6 +158,16 @@ struct Item {
     mapping: Mapping,
 }
 
+struct GraphInputs<'a> {
+    settings: &'a [Item],
+    entities: &'a [Item],
+    clues: &'a [Item],
+    facts: &'a [Item],
+    deductions: &'a [Item],
+    triggers: &'a [Item],
+    fact_claims_enabled: bool,
+}
+
 #[derive(Debug, Clone)]
 struct Route {
     id: String,
@@ -323,15 +333,15 @@ impl<'a> Validator<'a> {
                 &clues,
             );
         }
-        self.validate_graphs(
-            &settings,
-            &entities,
-            &clues,
-            &facts,
-            &deductions,
-            &triggers,
+        self.validate_graphs(GraphInputs {
+            settings: &settings,
+            entities: &entities,
+            clues: &clues,
+            facts: &facts,
+            deductions: &deductions,
+            triggers: &triggers,
             fact_claims_enabled,
-        );
+        });
         self.validate_navigation(&cases, &settings, &routes);
         self.validate_flag_values(&flags);
     }
@@ -4608,16 +4618,16 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn validate_graphs(
-        &mut self,
-        settings: &[Item],
-        entities: &[Item],
-        clues: &[Item],
-        facts: &[Item],
-        deductions: &[Item],
-        triggers: &[Item],
-        fact_claims_enabled: bool,
-    ) {
+    fn validate_graphs(&mut self, inputs: GraphInputs<'_>) {
+        let GraphInputs {
+            settings,
+            entities,
+            clues,
+            facts,
+            deductions,
+            triggers,
+            fact_claims_enabled,
+        } = inputs;
         let setting_parents = settings
             .iter()
             .filter_map(|item| {
