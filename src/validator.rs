@@ -1,12 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 
-use semver::{Version, VersionReq};
+use semver::Version;
 use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
 
 use crate::{
     Diagnostic, Position, RelatedLocation, Severity, SourceFile, SourceRange, ValidationReport,
-    STORY_FORMAT_VERSION, SUPPORTED_STORY_FORMATS, VALIDATOR_VERSION,
+    STORY_FORMAT_VERSION, VALIDATOR_VERSION,
 };
 
 const MAX_REPOSITORY_FILES: usize = 512;
@@ -27,11 +27,12 @@ const REQUIRED_SECTIONS: &[&str] = &[
     "events",
     "deductions",
     "flags",
+    "cards",
 ];
-const SINGLE_SECTIONS: &[&str] = &["clues", "commands", "triggers"];
+const SINGLE_SECTIONS: &[&str] = &["clues", "commands", "triggers", "cards"];
 const CANONICAL_SECTION_FILES: &[(&str, &str)] = &[
-    ("case", "settings.yaml"),
-    ("solution", "settings.yaml"),
+    ("case", "case.yaml"),
+    ("solution", "case.yaml"),
     ("settings", "settings.yaml"),
     ("routes", "settings.yaml"),
     ("characters", "characters.yaml"),
@@ -42,6 +43,7 @@ const CANONICAL_SECTION_FILES: &[(&str, &str)] = &[
     ("flags", "flags.yaml"),
     ("commands", "commands.yaml"),
     ("triggers", "triggers.yaml"),
+    ("cards", "deck.yaml"),
 ];
 
 #[derive(Debug)]
@@ -151,6 +153,7 @@ struct Definition {
 
 #[derive(Debug, Clone)]
 struct Item {
+    kind: Kind,
     id: String,
     path: String,
     source: String,
@@ -166,6 +169,10 @@ struct GraphInputs<'a> {
     deductions: &'a [Item],
     triggers: &'a [Item],
     fact_claims_enabled: bool,
+}
+
+fn item_kind(item: &Item) -> Option<&'static str> {
+    Some(item.kind.name())
 }
 
 #[derive(Debug, Clone)]
@@ -232,7 +239,13 @@ impl<'a> Validator<'a> {
     fn is_format_2(&self) -> bool {
         self.format_version
             .as_ref()
-            .is_some_and(|version| version.major == 2)
+            .is_some_and(|version| version.major >= 2)
+    }
+
+    fn is_format_3(&self) -> bool {
+        self.format_version
+            .as_ref()
+            .is_some_and(|version| version.major == 3)
     }
 
     fn run(&mut self) {
@@ -241,13 +254,13 @@ impl<'a> Validator<'a> {
         }
         self.parse_files();
         self.index_sections();
-        self.validate_section_filenames();
 
         let cases = self.items("case", Kind::Case, false);
         self.validate_case(&cases);
         if !self.format_compatible {
             return;
         }
+        self.validate_section_filenames();
         self.validate_sections();
         let settings = self.items("settings", Kind::Setting, true);
         let routes = self.items("routes", Kind::Route, true);
@@ -274,10 +287,27 @@ impl<'a> Validator<'a> {
         self.nested_testimonies(&characters);
         let facts_enabled = !facts.is_empty();
 
+        if self.is_format_3() {
+            self.validate_strict_field_contract(
+                &cases,
+                &settings,
+                &routes,
+                &characters,
+                &entities,
+                &events,
+                &facts,
+                &deductions,
+                &flags,
+                &commands,
+                &triggers,
+            );
+        }
+
         self.validate_solution();
         self.validate_references();
         self.validate_duplicate_lists();
-        self.validate_tag_ids(&settings, &characters, &entities, &commands);
+        self.validate_deck();
+        self.validate_legacy_inline_tag_ids(&settings, &characters, &entities, &commands);
         self.validate_event_values(&events);
         self.validate_route_values(&routes);
         self.validate_character_values(&characters, facts_enabled);
@@ -800,6 +830,7 @@ impl<'a> Validator<'a> {
                     self.definitions.insert(id.clone(), definition);
                 }
                 result.push(Item {
+                    kind,
                     id,
                     path: path.clone(),
                     source: source.clone(),
@@ -908,6 +939,7 @@ impl<'a> Validator<'a> {
                         self.definitions.insert(id.clone(), definition);
                     }
                     result.push(Item {
+                        kind: Kind::Fact,
                         id,
                         path: owner.path.clone(),
                         source: owner.source.clone(),
@@ -1035,12 +1067,14 @@ impl<'a> Validator<'a> {
         {
             Some(Value::String(raw_version)) => match Version::parse(raw_version) {
                 Ok(version) => {
-                    let supported = VersionReq::parse(SUPPORTED_STORY_FORMATS)
-                        .expect("supported story format range is valid");
-                    self.format_compatible = supported.matches(&version);
+                    self.format_compatible = version.major == 1 || version.major == 3;
                     self.format_version = Some(version.clone());
                     if !self.format_compatible {
-                        let message = if version
+                        let message = if version.major == 2 {
+                            format!(
+                                "This story uses pre-migration format {version}. Please migrate it to story format {STORY_FORMAT_VERSION}; move `case` and `solution` to `case.yaml`, adopt the strict disclosure contract, and update the typed player limits before opening it."
+                            )
+                        } else if version
                             < Version::parse("1.0.0").expect("minimum story format is valid")
                         {
                             format!(
@@ -1108,6 +1142,9 @@ impl<'a> Validator<'a> {
                 Some(case.id.clone()),
             ),
         }
+        if !self.format_compatible {
+            return;
+        }
         for field in ["entry_settings", "exit_settings"] {
             if let Some(value) = case.mapping.get(Value::String(field.to_string())) {
                 if !is_string_sequence(value) {
@@ -1122,6 +1159,9 @@ impl<'a> Validator<'a> {
                     );
                 }
             }
+        }
+        if self.is_format_3() {
+            self.validate_player_limits(case);
         }
         if case
             .mapping
@@ -1205,6 +1245,496 @@ impl<'a> Validator<'a> {
                     None,
                     Some(case.id.clone()),
                 ),
+            }
+        }
+    }
+
+    fn validate_player_limits(&mut self, case: &Item) {
+        let pointer = format!("{}/players", case.pointer);
+        let Some(value) = case.mapping.get(Value::String("players".to_string())) else {
+            self.push(
+                Severity::Error,
+                "case.players_missing",
+                "format 3 requires structured `case.players` limits with `min` and `max`"
+                    .to_string(),
+                &case.path,
+                Some(pointer),
+                None,
+                Some(case.id.clone()),
+            );
+            return;
+        };
+        let Some(players) = value.as_mapping() else {
+            self.push(
+                Severity::Error,
+                "case.players_type",
+                "`case.players` must be a mapping with positive whole-number `min` and `max`"
+                    .to_string(),
+                &case.path,
+                Some(pointer),
+                None,
+                Some(case.id.clone()),
+            );
+            return;
+        };
+        self.validate_mapping_fields(
+            players,
+            &["min", "max"],
+            "case.players",
+            &case.path,
+            &case.source,
+            &pointer,
+            Some(&case.id),
+        );
+        let min = players
+            .get(Value::String("min".to_string()))
+            .and_then(Value::as_i64);
+        let max = players
+            .get(Value::String("max".to_string()))
+            .and_then(Value::as_i64);
+        for (field, value) in [("min", min), ("max", max)] {
+            if !value.is_some_and(|value| value > 0 && usize::try_from(value).is_ok()) {
+                self.push(
+                    Severity::Error,
+                    &format!("case.players_{field}"),
+                    format!("`case.players.{field}` must be a positive whole number"),
+                    &case.path,
+                    Some(format!("{pointer}/{field}")),
+                    None,
+                    Some(case.id.clone()),
+                );
+            }
+        }
+        if min.zip(max).is_some_and(|(min, max)| min > max) {
+            self.push(
+                Severity::Error,
+                "case.players_order",
+                "`case.players.min` cannot exceed `case.players.max`".to_string(),
+                &case.path,
+                Some(pointer),
+                None,
+                Some(case.id.clone()),
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn validate_strict_field_contract(
+        &mut self,
+        cases: &[Item],
+        settings: &[Item],
+        routes: &[Item],
+        characters: &[Item],
+        entities: &[Item],
+        events: &[Item],
+        facts: &[Item],
+        deductions: &[Item],
+        flags: &[Item],
+        commands: &[Item],
+        triggers: &[Item],
+    ) {
+        self.validate_item_fields(
+            cases,
+            &[
+                "id",
+                "format_version",
+                "title",
+                "genre",
+                "tone",
+                "players",
+                "estimated_duration_minutes",
+                "entry_settings",
+                "exit_settings",
+                "initial_time",
+                "premise",
+                "opening",
+                "author_notes",
+            ],
+        );
+        self.validate_item_fields(
+            settings,
+            &[
+                "id",
+                "tag_id",
+                "type",
+                "navigable",
+                "name",
+                "description",
+                "parent",
+                "facts",
+                "points",
+                "author_notes",
+            ],
+        );
+        self.validate_item_fields(
+            routes,
+            &[
+                "id",
+                "from",
+                "to",
+                "bidirectional",
+                "travel_minutes",
+                "hidden",
+                "requires",
+                "author_notes",
+            ],
+        );
+        self.validate_item_fields(
+            characters,
+            &[
+                "id",
+                "tag_id",
+                "name",
+                "voice_id",
+                "role",
+                "age",
+                "occupation",
+                "description",
+                "portrayal",
+                "testimony",
+                "narrator_guidance",
+                "knowledge",
+                "facts",
+                "author_notes",
+            ],
+        );
+        self.validate_item_fields(
+            entities,
+            &[
+                "id",
+                "tag_id",
+                "type",
+                "name",
+                "description",
+                "physical",
+                "visibility",
+                "initial",
+                "facts",
+                "points",
+                "author_notes",
+            ],
+        );
+        self.validate_item_fields(
+            events,
+            &[
+                "id",
+                "day",
+                "time",
+                "duration_minutes",
+                "location",
+                "participants",
+                "summary",
+                "facts",
+                "author_notes",
+            ],
+        );
+        self.validate_item_fields(
+            facts,
+            &[
+                "id",
+                "statement",
+                "narrative_detail",
+                "category",
+                "about",
+                "requires",
+                "sources",
+                "occurred_at",
+                "on",
+                "when",
+                "author_notes",
+            ],
+        );
+        self.validate_item_fields(
+            deductions,
+            &[
+                "id",
+                "conclusion",
+                "inputs",
+                "truth",
+                "contradicted_by",
+                "requires",
+                "solves",
+                "points",
+                "author_notes",
+            ],
+        );
+        self.validate_item_fields(
+            flags,
+            &["id", "name", "description", "initial_state", "author_notes"],
+        );
+        self.validate_item_fields(
+            commands,
+            &[
+                "id",
+                "tag_id",
+                "name",
+                "description",
+                "parameters",
+                "effects",
+                "points",
+                "author_notes",
+            ],
+        );
+        self.validate_item_fields(
+            triggers,
+            &[
+                "id",
+                "name",
+                "description",
+                "command",
+                "once",
+                "time",
+                "location",
+                "parameters",
+                "any_of",
+                "all_of",
+                "effects",
+                "facts",
+                "on",
+                "when",
+                "after",
+                "author_notes",
+            ],
+        );
+
+        for items in [
+            cases, settings, routes, characters, entities, events, facts, deductions, flags,
+            commands, triggers,
+        ] {
+            for item in items {
+                self.validate_optional_namespace(item, "author_notes", None);
+            }
+        }
+        for character in characters {
+            self.validate_optional_namespace(
+                character,
+                "narrator_guidance",
+                Some(&[
+                    "goal",
+                    "secret",
+                    "motive",
+                    "method",
+                    "cover_story",
+                    "testimony_guidance",
+                ]),
+            );
+        }
+        for item in settings.iter().chain(characters).chain(entities) {
+            if !string_field(&item.mapping, "description")
+                .is_some_and(|description| !description.trim().is_empty())
+            {
+                self.push(
+                    Severity::Error,
+                    &format!("{}.description", item_kind(item).unwrap_or("item")),
+                    "format 3 requires one non-empty baseline player-safe `description`"
+                        .to_string(),
+                    &item.path,
+                    Some(format!("{}/description", item.pointer)),
+                    None,
+                    Some(item.id.clone()),
+                );
+            }
+        }
+        for setting in settings {
+            if setting
+                .mapping
+                .get(Value::String("navigable".to_string()))
+                .is_some_and(|value| value.as_bool().is_none())
+            {
+                self.push(
+                    Severity::Error,
+                    "setting.navigable_type",
+                    "setting `navigable` must be a boolean".to_string(),
+                    &setting.path,
+                    Some(format!("{}/navigable", setting.pointer)),
+                    None,
+                    Some(setting.id.clone()),
+                );
+            }
+        }
+        for entity in entities {
+            if let Some(initial) = entity
+                .mapping
+                .get(Value::String("initial".to_string()))
+                .and_then(Value::as_mapping)
+            {
+                self.validate_mapping_fields(
+                    initial,
+                    &["container"],
+                    "entity.initial",
+                    &entity.path,
+                    &entity.source,
+                    &format!("{}/initial", entity.pointer),
+                    Some(&entity.id),
+                );
+            }
+        }
+        for deduction in deductions {
+            if let Some(solves) = deduction
+                .mapping
+                .get(Value::String("solves".to_string()))
+                .and_then(Value::as_mapping)
+            {
+                self.validate_mapping_fields(
+                    solves,
+                    &["culprit", "weapon", "location", "time"],
+                    "deduction.solves",
+                    &deduction.path,
+                    &deduction.source,
+                    &format!("{}/solves", deduction.pointer),
+                    Some(&deduction.id),
+                );
+            }
+        }
+        self.validate_solution_contract();
+    }
+
+    fn validate_item_fields(&mut self, items: &[Item], allowed: &[&str]) {
+        for item in items {
+            self.validate_mapping_fields(
+                &item.mapping,
+                allowed,
+                item_kind(item).unwrap_or("item"),
+                &item.path,
+                &item.source,
+                &item.pointer,
+                Some(&item.id),
+            );
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn validate_mapping_fields(
+        &mut self,
+        mapping: &Mapping,
+        allowed: &[&str],
+        namespace: &str,
+        path: &str,
+        source: &str,
+        pointer: &str,
+        subject_id: Option<&str>,
+    ) {
+        for key in mapping.keys() {
+            let Some(key) = key.as_str() else {
+                self.push(
+                    Severity::Error,
+                    &format!("{namespace}.field"),
+                    format!("{namespace} field names must be strings"),
+                    path,
+                    Some(pointer.to_string()),
+                    None,
+                    subject_id.map(str::to_string),
+                );
+                continue;
+            };
+            if !allowed.contains(&key) {
+                self.push(
+                    Severity::Error,
+                    &format!("{namespace}.unknown_field"),
+                    format!("`{key}` is not supported by format 3 {namespace}"),
+                    path,
+                    Some(format!("{pointer}/{}", escape_pointer(key))),
+                    locate_scalar(source, key),
+                    subject_id.map(str::to_string),
+                );
+            }
+        }
+    }
+
+    fn validate_optional_namespace(&mut self, item: &Item, field: &str, allowed: Option<&[&str]>) {
+        let Some(value) = item.mapping.get(Value::String(field.to_string())) else {
+            return;
+        };
+        let pointer = format!("{}/{}", item.pointer, escape_pointer(field));
+        let Some(mapping) = value.as_mapping() else {
+            self.push(
+                Severity::Error,
+                &format!("{field}.type"),
+                format!("`{field}` must be a mapping namespace"),
+                &item.path,
+                Some(pointer),
+                None,
+                Some(item.id.clone()),
+            );
+            return;
+        };
+        if let Some(allowed) = allowed {
+            self.validate_mapping_fields(
+                mapping,
+                allowed,
+                field,
+                &item.path,
+                &item.source,
+                &pointer,
+                Some(&item.id),
+            );
+        }
+    }
+
+    fn validate_solution_contract(&mut self) {
+        let solutions = self
+            .parsed
+            .iter()
+            .filter_map(|file| {
+                file.value
+                    .as_mapping()?
+                    .get(Value::String("solution".to_string()))?
+                    .as_mapping()
+                    .map(|solution| {
+                        (
+                            file.path.to_string(),
+                            file.source.to_string(),
+                            solution.clone(),
+                        )
+                    })
+            })
+            .collect::<Vec<_>>();
+        for (path, source, solution) in solutions {
+            self.validate_mapping_fields(
+                &solution,
+                &[
+                    "victim",
+                    "culprit",
+                    "weapon",
+                    "location",
+                    "time",
+                    "deduction",
+                    "narrator_guidance",
+                    "author_notes",
+                ],
+                "solution",
+                &path,
+                &source,
+                "/solution",
+                None,
+            );
+            for namespace in ["narrator_guidance", "author_notes"] {
+                let Some(value) = solution.get(Value::String(namespace.to_string())) else {
+                    continue;
+                };
+                let Some(mapping) = value.as_mapping() else {
+                    self.push(
+                        Severity::Error,
+                        &format!("solution.{namespace}_type"),
+                        format!("solution `{namespace}` must be a mapping namespace"),
+                        &path,
+                        Some(format!("/solution/{namespace}")),
+                        None,
+                        None,
+                    );
+                    continue;
+                };
+                if namespace == "narrator_guidance" {
+                    self.validate_mapping_fields(
+                        mapping,
+                        &["motive", "method", "proof_summary"],
+                        "solution.narrator_guidance",
+                        &path,
+                        &source,
+                        "/solution/narrator_guidance",
+                        None,
+                    );
+                }
             }
         }
     }
@@ -1326,89 +1856,200 @@ impl<'a> Validator<'a> {
         }
     }
 
-    fn validate_tag_ids(
+    fn validate_legacy_inline_tag_ids(
         &mut self,
         settings: &[Item],
         characters: &[Item],
         entities: &[Item],
         commands: &[Item],
     ) {
-        let mut seen = BTreeMap::<i64, (&Item, Option<SourceRange>)>::new();
-        let cards = settings
+        for item in settings
             .iter()
-            .map(|item| {
-                let navigable = bool_field(&item.mapping, "navigable")
-                    .unwrap_or_else(|| string_field(&item.mapping, "type") != Some("island"));
-                (item, navigable)
-            })
-            .chain(characters.iter().map(|item| (item, true)))
-            .chain(entities.iter().map(|item| (item, true)))
-            .chain(commands.iter().map(|item| (item, true)));
-
-        for (item, required) in cards {
+            .chain(characters)
+            .chain(entities)
+            .chain(commands)
+        {
             let pointer = format!("{}/tag_id", item.pointer);
             let value = item.mapping.get(Value::String("tag_id".to_string()));
-            if value.is_none() && !required {
+            if value.is_none() {
                 continue;
             }
-            let Some(tag_id) = value.and_then(Value::as_i64) else {
+            let range = locate_item_field(&item.source, &item.id, "tag_id");
+            self.push(
+                Severity::Error,
+                "deck.legacy_inline_tag_id",
+                format!(
+                    "legacy inline `tag_id` on `{}` must move to `deck.yaml` as `{{ tag_id: {}, subject: {} }}`",
+                    item.id,
+                    value.and_then(Value::as_i64).map_or("…".to_string(), |id| id.to_string()),
+                    item.id
+                ),
+                &item.path,
+                Some(pointer),
+                range,
+                Some(item.id.clone()),
+            );
+        }
+    }
+
+    fn validate_deck(&mut self) {
+        let Some(locations) = self.sections.get("cards").cloned() else {
+            return;
+        };
+        let mut seen_tags = BTreeMap::<i64, (String, String, Option<SourceRange>)>::new();
+        let mut seen_subjects = BTreeMap::<String, (String, String, Option<SourceRange>)>::new();
+        for (path, section_pointer) in locations {
+            let Some(file) = self.parsed.iter().find(|file| file.path == path) else {
+                continue;
+            };
+            let source = file.source.to_string();
+            let root = file.value.as_mapping().expect("root mappings were checked");
+            let Some(cards_value) = root.get(Value::String("cards".to_string())) else {
+                continue;
+            };
+            let Some(cards) = cards_value.as_sequence() else {
                 self.push(
                     Severity::Error,
-                    if value.is_some() {
-                        "tag_id.invalid"
-                    } else {
-                        "tag_id.missing"
-                    },
-                    if value.is_some() {
-                        format!(
-                            "`tag_id` must be a whole-number tagStandard41h12 ID from 0 through {TAG_STANDARD_41H12_MAX_ID}"
-                        )
-                    } else {
-                        format!("{} `{}` is missing a `tag_id`", card_kind(item), item.id)
-                    },
-                    &item.path,
-                    Some(pointer),
+                    "schema.section_type",
+                    "`cards` must be a sequence".to_string(),
+                    &path,
+                    Some(section_pointer),
                     None,
-                    Some(item.id.clone()),
+                    None,
                 );
                 continue;
             };
-            let range = locate_item_field(&item.source, &item.id, "tag_id");
-            if !(0..=TAG_STANDARD_41H12_MAX_ID).contains(&tag_id) {
-                self.push(
-                    Severity::Error,
-                    "tag_id.invalid",
-                    format!(
-                        "`tag_id` {tag_id} is outside the tagStandard41h12 range 0 through {TAG_STANDARD_41H12_MAX_ID}"
-                    ),
-                    &item.path,
-                    Some(pointer),
-                    range,
-                    Some(item.id.clone()),
-                );
-                continue;
-            }
-            if let Some((first, first_range)) = seen.get(&tag_id) {
-                self.diagnostics.push(Diagnostic {
-                    severity: Severity::Error,
-                    code: "tag_id.duplicate".to_string(),
-                    message: format!(
-                        "tagStandard41h12 ID {tag_id} is assigned to both `{}` and `{}`",
-                        first.id, item.id
-                    ),
-                    path: item.path.clone(),
-                    pointer: Some(pointer),
-                    range,
-                    subject_id: Some(item.id.clone()),
-                    related: vec![RelatedLocation {
-                        message: format!("first assigned to `{}` here", first.id),
-                        path: first.path.clone(),
-                        pointer: Some(format!("{}/tag_id", first.pointer)),
-                        range: *first_range,
-                    }],
-                });
-            } else {
-                seen.insert(tag_id, (item, range));
+            let cards = cards.clone();
+            for (index, value) in cards.iter().enumerate() {
+                let pointer = format!("{section_pointer}/{index}");
+                let Some(card) = value.as_mapping() else {
+                    self.push(
+                        Severity::Error,
+                        "deck.entry_type",
+                        "deck entries must be mappings with `tag_id` and `subject`".to_string(),
+                        &path,
+                        Some(pointer),
+                        None,
+                        None,
+                    );
+                    continue;
+                };
+                let tag_pointer = format!("{pointer}/tag_id");
+                let tag_value = card.get(Value::String("tag_id".to_string()));
+                let tag_id = tag_value.and_then(Value::as_i64);
+                if tag_id.is_none() {
+                    self.push(
+                        Severity::Error,
+                        "deck.tag_id_invalid",
+                        format!("deck `tag_id` must be a whole number from 0 through {TAG_STANDARD_41H12_MAX_ID}"),
+                        &path,
+                        Some(tag_pointer.clone()),
+                        None,
+                        None,
+                    );
+                } else if !((0..=TAG_STANDARD_41H12_MAX_ID).contains(&tag_id.unwrap())) {
+                    self.push(
+                        Severity::Error,
+                        "deck.tag_id_out_of_range",
+                        format!("deck `tag_id` {} is outside the tagStandard41h12 range 0 through {TAG_STANDARD_41H12_MAX_ID}", tag_id.unwrap()),
+                        &path,
+                        Some(tag_pointer.clone()),
+                        None,
+                        None,
+                    );
+                }
+
+                let subject_pointer = format!("{pointer}/subject");
+                let subject = string_field(card, "subject").map(str::to_string);
+                if subject.is_none() {
+                    self.push(
+                        Severity::Error,
+                        "deck.subject_invalid",
+                        "deck `subject` must be a canonical setting, character, entity, or command ID".to_string(),
+                        &path,
+                        Some(subject_pointer.clone()),
+                        None,
+                        None,
+                    );
+                } else if let Some(subject) = subject.as_ref() {
+                    match self.definitions.get(subject) {
+                        None => self.push(
+                            Severity::Error,
+                            "deck.subject_unknown",
+                            format!("deck subject `{subject}` is not defined by this story"),
+                            &path,
+                            Some(subject_pointer.clone()),
+                            locate_scalar(&source, subject),
+                            Some(subject.clone()),
+                        ),
+                        Some(definition)
+                            if !matches!(
+                                definition.kind,
+                                Kind::Setting | Kind::Character | Kind::Entity | Kind::Command
+                            ) =>
+                        {
+                            self.push(
+                                Severity::Error,
+                                "deck.subject_unsupported",
+                                format!("{} `{subject}` cannot be bound to a physical card; use a setting, character, entity, or command", definition.kind.name()),
+                                &path,
+                                Some(subject_pointer.clone()),
+                                locate_scalar(&source, subject),
+                                Some(subject.clone()),
+                            );
+                        }
+                        Some(_) => {}
+                    }
+                }
+
+                if let Some(tag_id) =
+                    tag_id.filter(|id| (0..=TAG_STANDARD_41H12_MAX_ID).contains(id))
+                {
+                    let range = None;
+                    if let Some((first_subject, first_pointer, first_range)) =
+                        seen_tags.get(&tag_id)
+                    {
+                        self.diagnostics.push(Diagnostic {
+                            severity: Severity::Error,
+                            code: "deck.tag_id_duplicate".to_string(),
+                            message: format!("tagStandard41h12 ID {tag_id} is assigned to both `{first_subject}` and `{}`", subject.as_deref().unwrap_or("an invalid subject")),
+                            path: path.clone(),
+                            pointer: Some(tag_pointer),
+                            range,
+                            subject_id: subject.clone(),
+                            related: vec![RelatedLocation { message: format!("first assigned to `{first_subject}` here"), path: path.clone(), pointer: Some(first_pointer.clone()), range: *first_range }],
+                        });
+                    } else {
+                        seen_tags.insert(
+                            tag_id,
+                            (subject.clone().unwrap_or_default(), tag_pointer, range),
+                        );
+                    }
+                }
+                if let Some(subject) = subject {
+                    let range = locate_scalar(&source, &subject);
+                    if let Some((first_path, first_pointer, first_range)) =
+                        seen_subjects.get(&subject)
+                    {
+                        self.diagnostics.push(Diagnostic {
+                            severity: Severity::Error,
+                            code: "deck.subject_duplicate".to_string(),
+                            message: format!("deck subject `{subject}` is bound more than once"),
+                            path: path.clone(),
+                            pointer: Some(subject_pointer),
+                            range,
+                            subject_id: Some(subject.clone()),
+                            related: vec![RelatedLocation {
+                                message: "first bound here".to_string(),
+                                path: first_path.clone(),
+                                pointer: Some(first_pointer.clone()),
+                                range: *first_range,
+                            }],
+                        });
+                    } else {
+                        seen_subjects.insert(subject, (path.clone(), subject_pointer, range));
+                    }
+                }
             }
         }
     }
@@ -5522,16 +6163,6 @@ fn integer_field(mapping: &Mapping, field: &str) -> Option<i64> {
     mapping
         .get(Value::String(field.to_string()))
         .and_then(Value::as_i64)
-}
-
-fn card_kind(item: &Item) -> &'static str {
-    match id_prefix(&item.id) {
-        Some("setting") => "room",
-        Some("character") => "character",
-        Some("entity") => "entity",
-        Some("command") => "action",
-        _ => "card",
-    }
 }
 
 fn id_prefix(id: &str) -> Option<&str> {
