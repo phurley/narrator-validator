@@ -358,6 +358,14 @@ fn valid_format_2_repository_has_no_diagnostics() {
 
 #[test]
 fn validates_physical_deck_bindings() {
+    let malformed = report(VALID_FORMAT_2_STORY.replace(
+        "cards:\n  - tag_id: 0\n    subject: setting.foyer\n  - tag_id: 1\n    subject: setting.study\n  - tag_id: 2\n    subject: character.victim\n  - tag_id: 3\n    subject: character.culprit\n  - tag_id: 4\n    subject: entity.knife\n  - tag_id: 5\n    subject: command.claim\n  - tag_id: 6\n    subject: command.investigate\n",
+        "cards: not-a-sequence\n",
+    ));
+    assert!(malformed.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "schema.section_type" && diagnostic.pointer.as_deref() == Some("/cards")
+    }));
+
     for (value, code) in [
         ("-1", "deck.tag_id_out_of_range"),
         ("2115", "deck.tag_id_out_of_range"),

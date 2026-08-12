@@ -1354,11 +1354,19 @@ impl<'a> Validator<'a> {
             };
             let source = file.source.to_string();
             let root = file.value.as_mapping().expect("root mappings were checked");
-            let Some(cards) = root
-                .get(Value::String("cards".to_string()))
-                .and_then(Value::as_sequence)
-            else {
-                // The ordinary section-shape validation emits the primary diagnostic.
+            let Some(cards_value) = root.get(Value::String("cards".to_string())) else {
+                continue;
+            };
+            let Some(cards) = cards_value.as_sequence() else {
+                self.push(
+                    Severity::Error,
+                    "schema.section_type",
+                    "`cards` must be a sequence".to_string(),
+                    &path,
+                    Some(section_pointer),
+                    None,
+                    None,
+                );
                 continue;
             };
             let cards = cards.clone();
