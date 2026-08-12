@@ -19,7 +19,6 @@ const TAG_STANDARD_41H12_MAX_ID: i64 = 2_114;
 
 const REQUIRED_SECTIONS: &[&str] = &[
     "case",
-    "solution",
     "settings",
     "routes",
     "characters",
@@ -29,10 +28,18 @@ const REQUIRED_SECTIONS: &[&str] = &[
     "flags",
     "cards",
 ];
-const SINGLE_SECTIONS: &[&str] = &["clues", "commands", "triggers", "cards"];
+const SINGLE_SECTIONS: &[&str] = &[
+    "solution",
+    "win_states",
+    "clues",
+    "commands",
+    "triggers",
+    "cards",
+];
 const CANONICAL_SECTION_FILES: &[(&str, &str)] = &[
     ("case", "case.yaml"),
     ("solution", "case.yaml"),
+    ("win_states", "win_states.yaml"),
     ("settings", "settings.yaml"),
     ("routes", "settings.yaml"),
     ("characters", "characters.yaml"),
@@ -68,6 +75,7 @@ enum Kind {
     Command,
     Trigger,
     Testimony,
+    WinState,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -135,6 +143,7 @@ impl Kind {
             Self::Command => "command",
             Self::Trigger => "trigger",
             Self::Testimony => "testimony",
+            Self::WinState => "win",
         }
     }
 
@@ -272,6 +281,7 @@ impl<'a> Validator<'a> {
         let flags = self.items("flags", Kind::Flag, true);
         let commands = self.items("commands", Kind::Command, true);
         let triggers = self.items("triggers", Kind::Trigger, true);
+        let win_states = self.items("win_states", Kind::WinState, true);
         let fact_claims_enabled = self.is_format_2();
         let facts = if fact_claims_enabled {
             self.nested_facts(&[
@@ -303,7 +313,9 @@ impl<'a> Validator<'a> {
             );
         }
 
+        self.validate_terminal_configuration(&win_states);
         self.validate_solution();
+        self.validate_win_states(&win_states);
         self.validate_references();
         self.validate_duplicate_lists();
         self.validate_deck();
@@ -1779,6 +1791,124 @@ impl<'a> Validator<'a> {
                     None,
                 ),
                 None => {}
+            }
+        }
+    }
+
+    fn validate_terminal_configuration(&mut self, win_states: &[Item]) {
+        let has_legacy_solution = self.parsed.iter().any(|file| {
+            file.value
+                .as_mapping()
+                .and_then(|root| root.get(Value::String("solution".to_string())))
+                .and_then(Value::as_mapping)
+                .is_some_and(|solution| {
+                    ["victim", "culprit", "weapon", "location"]
+                        .iter()
+                        .all(|field| string_field(solution, field).is_some())
+                })
+        });
+        if win_states.is_empty() && !has_legacy_solution {
+            self.push(
+                Severity::Error,
+                "win_states.missing_terminal_configuration",
+                "define at least one generic win state or a legacy `solution` block".to_string(),
+                "",
+                Some("/win_states".to_string()),
+                None,
+                None,
+            );
+        }
+    }
+
+    fn validate_win_states(&mut self, win_states: &[Item]) {
+        for win_state in win_states {
+            for field in ["name", "text"] {
+                if string_field(&win_state.mapping, field)
+                    .map_or(true, |value| value.trim().is_empty())
+                {
+                    self.push(
+                        Severity::Error,
+                        if field == "name" {
+                            "win_states.name"
+                        } else {
+                            "win_states.text"
+                        },
+                        format!("win state `{field}` must be a non-empty string"),
+                        &win_state.path,
+                        Some(format!("{}/{}", win_state.pointer, escape_pointer(field))),
+                        None,
+                        Some(win_state.id.clone()),
+                    );
+                }
+            }
+
+            match win_state.mapping.get(Value::String("requires".to_string())) {
+                Some(requires) if is_string_sequence(requires) => {}
+                Some(_) => self.push(
+                    Severity::Error,
+                    "win_states.requires_type",
+                    "win state `requires` must be a sequence of persistent requirement IDs"
+                        .to_string(),
+                    &win_state.path,
+                    Some(format!("{}/requires", win_state.pointer)),
+                    None,
+                    Some(win_state.id.clone()),
+                ),
+                None => {}
+            }
+
+            match win_state
+                .mapping
+                .get(Value::String("minimum_points".to_string()))
+            {
+                Some(Value::Number(number)) if number.as_u64().is_some() => {}
+                Some(_) => self.push(
+                    Severity::Error,
+                    "win_states.minimum_points",
+                    "win state `minimum_points` must be a non-negative whole number".to_string(),
+                    &win_state.path,
+                    Some(format!("{}/minimum_points", win_state.pointer)),
+                    None,
+                    Some(win_state.id.clone()),
+                ),
+                None => {}
+            }
+
+            let has_requirements = win_state
+                .mapping
+                .get(Value::String("requires".to_string()))
+                .and_then(Value::as_sequence)
+                .is_some_and(|requirements| !requirements.is_empty());
+            let has_point_threshold = win_state
+                .mapping
+                .get(Value::String("minimum_points".to_string()))
+                .and_then(Value::as_u64)
+                .is_some_and(|minimum| minimum > 0);
+            if !has_requirements && !has_point_threshold {
+                self.push(
+                    Severity::Error,
+                    "win_states.unconditional",
+                    "win state must require at least one persistent condition or a positive point threshold"
+                        .to_string(),
+                    &win_state.path,
+                    Some(win_state.pointer.clone()),
+                    None,
+                    Some(win_state.id.clone()),
+                );
+            }
+
+            for key in win_state.mapping.keys().filter_map(Value::as_str) {
+                if !matches!(key, "id" | "name" | "requires" | "minimum_points" | "text") {
+                    self.push(
+                        Severity::Error,
+                        "win_states.unknown_field",
+                        format!("unknown win-state field `{key}`"),
+                        &win_state.path,
+                        Some(format!("{}/{}", win_state.pointer, escape_pointer(key))),
+                        None,
+                        Some(win_state.id.clone()),
+                    );
+                }
             }
         }
     }
@@ -5786,6 +5916,7 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
         }
         _ if is_entity_visibility_requirement_pointer(pointer) => Some(PERSISTENT_REQUIREMENTS),
         _ if is_point_requirement_pointer(pointer) => Some(PERSISTENT_REQUIREMENTS),
+        _ if is_win_state_requirement_pointer(pointer) => Some(PERSISTENT_REQUIREMENTS),
         _ if is_character_testimony_list_pointer(pointer, "requires") => Some(FACT_REQUIREMENTS),
         _ if is_character_testimony_list_pointer(pointer, "reveals") => Some(FACTS),
         _ if is_fact_association_pointer(pointer) => Some(FACTS),
@@ -5814,6 +5945,19 @@ fn is_point_requirement_pointer(pointer: &str) -> bool {
         [section, owner_index, "points", "requires", requirement_index]
             if matches!(*section, "settings" | "entities" | "deductions" | "commands")
                 && owner_index.parse::<usize>().is_ok()
+                && requirement_index.parse::<usize>().is_ok()
+    )
+}
+
+fn is_win_state_requirement_pointer(pointer: &str) -> bool {
+    let parts = pointer
+        .trim_start_matches('/')
+        .split('/')
+        .collect::<Vec<_>>();
+    matches!(
+        parts.as_slice(),
+        ["win_states", state_index, "requires", requirement_index]
+            if state_index.parse::<usize>().is_ok()
                 && requirement_index.parse::<usize>().is_ok()
     )
 }
