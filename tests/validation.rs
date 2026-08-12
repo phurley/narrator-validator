@@ -474,6 +474,104 @@ fn rejects_missing_story_format_with_friendly_migration_guidance() {
 }
 
 #[test]
+fn point_awards_are_valid_on_every_supported_owner_with_default_claim_count() {
+    let source = VALID_FORMAT_2_STORY
+        .replace(
+            "  - id: setting.foyer\n    type: room",
+            "  - id: setting.foyer\n    type: room\n    points:\n      value: 5",
+        )
+        .replace(
+            "  - id: entity.knife\n    initial:",
+            "  - id: entity.knife\n    points:\n      value: 10\n      requires: [setting.study]\n    initial:",
+        )
+        .replace(
+            "  - id: deduction.solution\n    conclusion:",
+            "  - id: deduction.solution\n    points:\n      value: 20\n    conclusion:",
+        )
+        .replace(
+            "  - id: command.investigate\n    name:",
+            "  - id: command.investigate\n    points:\n      value: 3\n      max_claim_count: 4\n      requires: [setting.study, entity.knife, fact.knife_is_present, deduction.solution, flag.knife_examined, trigger.investigate_knife]\n    name:",
+        );
+    let report = report(source);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+}
+
+#[test]
+fn point_awards_reject_invalid_values_owners_and_requirement_kinds() {
+    let source = VALID_FORMAT_2_STORY
+        .replace(
+            "  - id: setting.foyer\n    type: room",
+            "  - id: setting.foyer\n    type: room\n    points:\n      value: 0\n      max_claim_count: -1\n      requires: [character.victim, setting.unknown]",
+        )
+        .replace(
+            "  - id: character.victim",
+            "  - id: character.victim\n    points:\n      value: 1",
+        );
+    let report = report(source);
+    let diagnostics = report
+        .diagnostics
+        .iter()
+        .map(|diagnostic| (diagnostic.code.as_str(), diagnostic.pointer.as_deref()))
+        .collect::<Vec<_>>();
+    assert!(diagnostics.contains(&("points.value", Some("/settings/1/points/value"))));
+    assert!(diagnostics.contains(&(
+        "points.max_claim_count",
+        Some("/settings/1/points/max_claim_count")
+    )));
+    assert!(diagnostics.contains(&(
+        "reference.wrong_type",
+        Some("/settings/1/points/requires/0")
+    )));
+    assert!(diagnostics.contains(&("reference.unknown", Some("/settings/1/points/requires/1"))));
+    assert!(diagnostics.contains(&("points.owner", Some("/characters/0/points"))));
+}
+
+#[test]
+fn point_awards_report_exact_shape_and_field_diagnostics() {
+    for (points, code, pointer) in [
+        ("points: 4", "points.type", "/settings/1/points"),
+        (
+            "points:\n      requires: []",
+            "points.value",
+            "/settings/1/points/value",
+        ),
+        (
+            "points:\n      value: 1.5",
+            "points.value",
+            "/settings/1/points/value",
+        ),
+        (
+            "points:\n      value: 1\n      max_claim_count: 0",
+            "points.max_claim_count",
+            "/settings/1/points/max_claim_count",
+        ),
+        (
+            "points:\n      value: 1\n      requires: setting.study",
+            "points.requires_type",
+            "/settings/1/points/requires",
+        ),
+        (
+            "points:\n      value: 1\n      bonus: 2",
+            "points.unknown_field",
+            "/settings/1/points/bonus",
+        ),
+    ] {
+        let source = VALID_FORMAT_2_STORY.replace(
+            "  - id: setting.foyer\n    type: room",
+            &format!("  - id: setting.foyer\n    type: room\n    {points}"),
+        );
+        let report = report(source);
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code && diagnostic.pointer.as_deref() == Some(pointer)
+            }),
+            "{points}: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
 fn accepts_player_safe_portrayal_and_ordered_testimony_for_all_characters() {
     let report = report(format_2_story_with_player_safe_character_behavior());
 

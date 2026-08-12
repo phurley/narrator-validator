@@ -297,6 +297,18 @@ impl<'a> Validator<'a> {
         }
         self.validate_deduction_values(&deductions, fact_claims_enabled);
         self.validate_command_values(&commands);
+        self.validate_point_awards(&[
+            settings.as_slice(),
+            entities.as_slice(),
+            deductions.as_slice(),
+            commands.as_slice(),
+        ]);
+        self.validate_disallowed_point_owners(&[
+            routes.as_slice(),
+            characters.as_slice(),
+            events.as_slice(),
+            triggers.as_slice(),
+        ]);
         self.validate_testimony_question_signature(&characters, &commands);
         self.validate_trigger_values(&triggers, &commands, fact_claims_enabled);
         if !fact_claims_enabled {
@@ -1554,6 +1566,94 @@ impl<'a> Validator<'a> {
             }
             self.require_nonnegative_integer(event, "day", "event.invalid_day");
             self.require_nonnegative_integer(event, "duration_minutes", "event.invalid_duration");
+        }
+    }
+
+    fn validate_point_awards(&mut self, owner_groups: &[&[Item]]) {
+        for owner in owner_groups.iter().flat_map(|items| items.iter()) {
+            let Some(value) = owner.mapping.get(Value::String("points".to_string())) else {
+                continue;
+            };
+            let pointer = format!("{}/points", owner.pointer);
+            let Some(points) = value.as_mapping() else {
+                self.push(
+                    Severity::Error,
+                    "points.type",
+                    "`points` must be a mapping".to_string(),
+                    &owner.path,
+                    Some(pointer),
+                    None,
+                    Some(owner.id.clone()),
+                );
+                continue;
+            };
+            for key in points.keys().filter_map(Value::as_str) {
+                if !matches!(key, "value" | "max_claim_count" | "requires") {
+                    self.push(
+                        Severity::Error,
+                        "points.unknown_field",
+                        format!("unknown point-award field `{key}`"),
+                        &owner.path,
+                        Some(format!("{pointer}/{}", escape_pointer(key))),
+                        None,
+                        Some(owner.id.clone()),
+                    );
+                }
+            }
+            for (field, required) in [("value", true), ("max_claim_count", false)] {
+                match points.get(Value::String(field.to_string())) {
+                    Some(Value::Number(number))
+                        if number.as_u64().is_some_and(|value| value > 0) => {}
+                    None if !required => {}
+                    _ => self.push(
+                        Severity::Error,
+                        if field == "value" {
+                            "points.value"
+                        } else {
+                            "points.max_claim_count"
+                        },
+                        format!("point award `{field}` must be a positive whole number"),
+                        &owner.path,
+                        Some(format!("{pointer}/{field}")),
+                        None,
+                        Some(owner.id.clone()),
+                    ),
+                }
+            }
+            if let Some(requires) = points.get(Value::String("requires".to_string())) {
+                if !is_string_sequence(requires) {
+                    self.push(
+                        Severity::Error,
+                        "points.requires_type",
+                        "point award `requires` must be a sequence of persistent requirement IDs"
+                            .to_string(),
+                        &owner.path,
+                        Some(format!("{pointer}/requires")),
+                        None,
+                        Some(owner.id.clone()),
+                    );
+                }
+            }
+        }
+    }
+
+    fn validate_disallowed_point_owners(&mut self, owner_groups: &[&[Item]]) {
+        for owner in owner_groups.iter().flat_map(|items| items.iter()) {
+            if owner
+                .mapping
+                .contains_key(Value::String("points".to_string()))
+            {
+                self.push(
+                    Severity::Error,
+                    "points.owner",
+                    "`points` is supported only on settings, entities, deductions, and commands"
+                        .to_string(),
+                    &owner.path,
+                    Some(format!("{}/points", owner.pointer)),
+                    None,
+                    Some(owner.id.clone()),
+                );
+            }
         }
     }
 
@@ -4495,6 +4595,7 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
             Some(FACT_REQUIREMENTS)
         }
         _ if is_entity_visibility_requirement_pointer(pointer) => Some(PERSISTENT_REQUIREMENTS),
+        _ if is_point_requirement_pointer(pointer) => Some(PERSISTENT_REQUIREMENTS),
         _ if is_character_testimony_list_pointer(pointer, "requires") => Some(FACT_REQUIREMENTS),
         _ if is_character_testimony_list_pointer(pointer, "reveals") => Some(FACTS),
         _ if is_fact_association_pointer(pointer) => Some(FACTS),
@@ -4511,6 +4612,20 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
         }
         _ => None,
     }
+}
+
+fn is_point_requirement_pointer(pointer: &str) -> bool {
+    let parts = pointer
+        .trim_start_matches('/')
+        .split('/')
+        .collect::<Vec<_>>();
+    matches!(
+        parts.as_slice(),
+        [section, owner_index, "points", "requires", requirement_index]
+            if matches!(*section, "settings" | "entities" | "deductions" | "commands")
+                && owner_index.parse::<usize>().is_ok()
+                && requirement_index.parse::<usize>().is_ok()
+    )
 }
 
 fn is_entity_visibility_requirement_pointer(pointer: &str) -> bool {
