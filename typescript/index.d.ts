@@ -46,6 +46,30 @@ export interface ValidationReport {
   diagnostics: Diagnostic[]
 }
 
+export interface RulesetCommandParameter {
+  name: string
+  description?: string
+  types: Array<'character' | 'entity' | 'setting' | 'deduction' | 'event'>
+  min: number
+  max: number
+}
+
+export interface RulesetCommand {
+  id: string
+  name: string
+  description?: string
+  parameters?: RulesetCommandParameter[]
+  effects?: Array<Record<string, unknown>>
+}
+
+export interface StandardMysteryRuleset {
+  id: 'ruleset.standard_mystery'
+  version: '1.0.0'
+  commands: RulesetCommand[]
+}
+
+export const STANDARD_MYSTERY_RULESET: StandardMysteryRuleset
+
 /**
  * Load the validator WebAssembly module.
  *
