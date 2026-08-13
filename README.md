@@ -141,6 +141,13 @@ Validator `1.1.0` is the coordinated release for the format-3.1 contract. See
 [`v1.1.0` release](https://github.com/phurley/narrator-validator/releases/tag/v1.1.0)
 for the exact consumer commit matrix.
 
+The normative placement, presence, candidate-selection, compatibility, and
+privacy decisions are recorded in
+[Story Format 3.1](docs/story-format-3.1.md) and
+[ADR 0001](docs/adr/0001-story-format-3.1-character-presence-and-command-candidates.md).
+The [ADR index](docs/adr/README.md) is the discovery point for architecture
+decisions shared by validator consumers.
+
 Legacy integer versions, missing versions, and versions outside the supported
 range stop validation with migration guidance before version-specific schema
 rules run. This prevents an older story from producing a misleading cascade of
@@ -245,6 +252,25 @@ commands: [{ id: command.investigate, name: Investigate, parameters: [{ name: ta
 triggers: [{ id: trigger.blackout, name: Blackout, on: { command: command.question, parameters: { character: character.suspect } }, effects: [{ operation: set_flag, flag: flag.power_out, value: true }] }]
 cards: [{ tag_id: 0, subject: setting.study }, { tag_id: 1, subject: character.suspect }, { tag_id: 2, subject: entity.knife }]
 ```
+
+## Format 3 character placement, presence, and command candidates
+
+Format 3.1 keeps narrative kind, player knowledge, authoritative world
+location, and player-scoped physical presence separate. A character may declare
+`initial.location` as a setting and may gate local availability with persistent
+`presence.requires`. Remote or gated characters stay absent from local options
+and narration without hiding their public identity or leaking their location or
+requirements.
+
+Command parameters may declare ordered candidate sources from `all`,
+`current_location`, `inventory`, `reachable`, `known`, and `established`, then
+apply the closed `portable` capability filter. Source results are unioned and
+deduplicated deterministically. The backend uses the same revision-bound
+resolver for options and reducer authorization.
+
+See the [Story Format 3.1 reference](docs/story-format-3.1.md) and
+[accepted architecture decision](docs/adr/0001-story-format-3.1-character-presence-and-command-candidates.md)
+for the normative semantics and privacy invariants.
 
 ## Facts and deductions
 
