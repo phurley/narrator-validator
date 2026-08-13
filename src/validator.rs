@@ -1384,6 +1384,8 @@ impl<'a> Validator<'a> {
             .iter()
             .filter(|command| standard_ids.contains(&command.id.as_str()))
             .count();
+        let copied_legacy_catalog =
+            copied >= 3 && commands.iter().any(|command| command.id == "command.claim");
         for command in commands {
             let Some(parameters) = command
                 .mapping
@@ -1396,7 +1398,7 @@ impl<'a> Validator<'a> {
                 let Some(parameter) = parameter.as_mapping() else {
                     continue;
                 };
-                if copied >= 3
+                if copied_legacy_catalog
                     && standard_ids.contains(&command.id.as_str())
                     && (parameter.contains_key(Value::String("type".to_string()))
                         || parameter.contains_key(Value::String("required".to_string())))
@@ -1415,7 +1417,7 @@ impl<'a> Validator<'a> {
             }
         }
 
-        if self.ruleset.is_none() && copied >= 3 {
+        if self.ruleset.is_none() && copied_legacy_catalog {
             let command = commands
                 .iter()
                 .find(|command| standard_ids.contains(&command.id.as_str()))
