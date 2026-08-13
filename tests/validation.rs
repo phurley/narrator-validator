@@ -94,7 +94,7 @@ cards:
     subject: command.examine
 "#;
 
-const VALID_FORMAT_2_STORY: &str = r#"
+const VALID_FORMAT_3_STORY: &str = r#"
 case:
   id: case.example
   format_version: "3.0.0"
@@ -187,20 +187,25 @@ commands:
     description: Resolve the authored effects of investigating an entity.
     parameters:
       - name: target
-        type: entity
-        required: true
+        types: [entity]
+        min: 1
+        max: 1
       - name: destination
-        type: setting
-        required: false
+        types: [setting]
+        min: 0
+        max: 1
       - name: companion
-        type: character
-        required: false
+        types: [character]
+        min: 0
+        max: 1
       - name: conclusion
-        type: deduction
-        required: false
+        types: [deduction]
+        min: 0
+        max: 1
       - name: incident
-        type: event
-        required: false
+        types: [event]
+        min: 0
+        max: 1
     effects:
       - operation: advance_time
         minutes: 12
@@ -261,8 +266,8 @@ fn codes(source: impl Into<String>) -> Vec<String> {
         .collect()
 }
 
-fn format_2_story_with_narrative_details() -> String {
-    VALID_FORMAT_2_STORY
+fn format_3_story_with_narrative_details() -> String {
+    VALID_FORMAT_3_STORY
         .replace(
             "  - id: setting.foyer\n    type: room\n    description: The entry foyer.\n    parent: setting.world",
             "  - id: setting.foyer\n    type: room\n    description: The entry foyer.\n    parent: setting.world\n    facts:\n      - id: fact.setting_detail\n        statement: A setting-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL",
@@ -285,34 +290,34 @@ fn format_2_story_with_narrative_details() -> String {
         )
 }
 
-fn format_2_story_with_occurrences_on_every_fact_owner() -> String {
-    format_2_story_with_narrative_details().replace(
+fn format_3_story_with_occurrences_on_every_fact_owner() -> String {
+    format_3_story_with_narrative_details().replace(
         "        narrative_detail: SAFE_NARRATIVE_DETAIL",
         "        narrative_detail: SAFE_NARRATIVE_DETAIL\n        occurred_at:\n          day: 0\n          time: \"21:18\"",
     )
 }
 
-fn format_2_story_with_entity_occurrence(occurred_at: &str) -> String {
-    VALID_FORMAT_2_STORY.replace(
+fn format_3_story_with_entity_occurrence(occurred_at: &str) -> String {
+    VALID_FORMAT_3_STORY.replace(
         "        statement: The knife is present.",
         &format!("        statement: The knife is present.\n{occurred_at}"),
     )
 }
 
-fn format_2_story_with_character_fields(fields: &str) -> String {
-    VALID_FORMAT_2_STORY
+fn format_3_story_with_character_fields(fields: &str) -> String {
+    VALID_FORMAT_3_STORY
         .replace(
             "  - id: character.culprit\n    description: A suspect with a carefully guarded secret.\nentities:",
             &format!("  - id: character.culprit\n    description: A suspect with a carefully guarded secret.\n{fields}entities:"),
         )
         .replace(
             "commands:\n",
-            "commands:\n  - id: command.question\n    name: Question\n    parameters:\n      - name: character\n        type: character\n        required: true\n",
+            "commands:\n  - id: command.question\n    name: Question\n    parameters:\n      - name: character\n        types: [character]\n        min: 1\n        max: 1\n",
         )
 }
 
-fn format_2_story_with_player_safe_character_behavior() -> String {
-    format_2_story_with_character_fields(
+fn format_3_story_with_player_safe_character_behavior() -> String {
+    format_3_story_with_character_fields(
         "    portrayal:\n      demeanor: Controlled and professionally helpful.\n      speech_style: Precise, restrained sentences.\n    testimony:\n      - id: testimony.culprit_opening_account\n        text: The culprit gives a player-safe opening account.\n        requires: [command.question, character.culprit]\n        reveals: [fact.knife_is_present]\n      - id: testimony.culprit_follow_up\n        text: The culprit gives a second player-safe account.\n        requires: [command.question, character.culprit, fact.knife_is_present]\n        reveals: []\n",
     )
     .replace(
@@ -368,10 +373,10 @@ fn valid_repository_has_no_diagnostics() {
 }
 
 #[test]
-fn valid_format_2_repository_has_no_diagnostics() {
-    let report = report(VALID_FORMAT_2_STORY);
+fn valid_format_3_repository_has_no_diagnostics() {
+    let report = report(VALID_FORMAT_3_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "0.23.0");
+    assert_eq!(report.validator_version, "1.0.0");
     assert_eq!(report.format_version.as_deref(), Some("3.0.0"));
     assert!(report.diagnostics.is_empty());
 }
@@ -385,7 +390,7 @@ fn with_standard_ruleset(source: &str) -> String {
 
 #[test]
 fn standard_ruleset_commands_join_global_validation_and_allow_extensions() {
-    let source = with_standard_ruleset(VALID_FORMAT_2_STORY)
+    let source = with_standard_ruleset(VALID_FORMAT_3_STORY)
         .replace("  - id: command.claim\n    name: Claim\n    description: Learn that the knife is present.\n    effects:\n      - operation: learn_fact\n        fact_id: fact.knife_is_present\n", "")
         .replace("    subject: command.claim", "    subject: command.move");
     let report = report(source);
@@ -396,7 +401,7 @@ fn standard_ruleset_commands_join_global_validation_and_allow_extensions() {
 #[test]
 fn rejects_unknown_and_incompatible_rulesets_with_version_guidance() {
     let unknown = report(
-        with_standard_ruleset(VALID_FORMAT_2_STORY)
+        with_standard_ruleset(VALID_FORMAT_3_STORY)
             .replace("ruleset.standard_mystery", "ruleset.private_mystery"),
     );
     let diagnostic = unknown
@@ -407,7 +412,7 @@ fn rejects_unknown_and_incompatible_rulesets_with_version_guidance() {
     assert!(diagnostic.message.contains("supported rulesets"));
 
     let incompatible = report(
-        with_standard_ruleset(VALID_FORMAT_2_STORY)
+        with_standard_ruleset(VALID_FORMAT_3_STORY)
             .replace("version: \"1.0.0\"", "version: \"2.0.0\""),
     );
     let diagnostic = incompatible
@@ -420,7 +425,7 @@ fn rejects_unknown_and_incompatible_rulesets_with_version_guidance() {
 
 #[test]
 fn rejects_local_overrides_but_accepts_distinct_extension_ids() {
-    let source = with_standard_ruleset(VALID_FORMAT_2_STORY).replace(
+    let source = with_standard_ruleset(VALID_FORMAT_3_STORY).replace(
         "commands:\n",
         "commands:\n  - id: command.move\n    name: Story move\n    parameters: []\n",
     );
@@ -429,7 +434,7 @@ fn rejects_local_overrides_but_accepts_distinct_extension_ids() {
 
 #[test]
 fn diagnoses_copied_standard_catalogs_and_legacy_parameter_shapes() {
-    let source = VALID_FORMAT_2_STORY.replace(
+    let source = VALID_FORMAT_3_STORY.replace(
         "  - id: command.claim\n",
         "  - id: command.move\n    name: Move\n    parameters:\n      - name: destination\n        type: setting\n        required: true\n  - id: command.examine\n    name: Examine\n  - id: command.question\n    name: Question\n      \n  - id: command.claim\n",
     );
@@ -442,11 +447,19 @@ fn diagnoses_copied_standard_catalogs_and_legacy_parameter_shapes() {
         .diagnostics
         .iter()
         .any(|diagnostic| diagnostic.code == "ruleset.legacy_command_parameter"));
+    assert!(report
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "command.parameter_type_removed"));
+    assert!(report
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "command.parameter_required_removed"));
 }
 
 #[test]
 fn validates_physical_deck_bindings() {
-    let malformed = report(VALID_FORMAT_2_STORY.replace(
+    let malformed = report(VALID_FORMAT_3_STORY.replace(
         "cards:\n  - tag_id: 0\n    subject: setting.foyer\n  - tag_id: 1\n    subject: setting.study\n  - tag_id: 2\n    subject: character.victim\n  - tag_id: 3\n    subject: character.culprit\n  - tag_id: 4\n    subject: entity.knife\n  - tag_id: 5\n    subject: command.claim\n  - tag_id: 6\n    subject: command.investigate\n",
         "cards: not-a-sequence\n",
     ));
@@ -461,7 +474,7 @@ fn validates_physical_deck_bindings() {
         ("not-a-number", "deck.tag_id_invalid"),
     ] {
         let report =
-            report(VALID_FORMAT_2_STORY.replacen("tag_id: 4", &format!("tag_id: {value}"), 1));
+            report(VALID_FORMAT_3_STORY.replacen("tag_id: 4", &format!("tag_id: {value}"), 1));
         assert!(
             report.diagnostics.iter().any(|diagnostic| {
                 diagnostic.code == code && diagnostic.pointer.as_deref() == Some("/cards/4/tag_id")
@@ -471,7 +484,7 @@ fn validates_physical_deck_bindings() {
         );
     }
 
-    let duplicate = report(VALID_FORMAT_2_STORY.replacen("tag_id: 4", "tag_id: 0", 1))
+    let duplicate = report(VALID_FORMAT_3_STORY.replacen("tag_id: 4", "tag_id: 0", 1))
         .diagnostics
         .into_iter()
         .find(|diagnostic| diagnostic.code == "deck.tag_id_duplicate")
@@ -486,7 +499,7 @@ fn validates_physical_deck_bindings() {
         ("entity.unknown", "deck.subject_unknown"),
         ("event.murder", "deck.subject_unsupported"),
     ] {
-        let report = report(VALID_FORMAT_2_STORY.replacen(
+        let report = report(VALID_FORMAT_3_STORY.replacen(
             "subject: entity.knife",
             &format!("subject: {subject}"),
             1,
@@ -501,10 +514,10 @@ fn validates_physical_deck_bindings() {
     }
 
     let uncarded =
-        report(VALID_FORMAT_2_STORY.replace("  - tag_id: 4\n    subject: entity.knife\n", ""));
+        report(VALID_FORMAT_3_STORY.replace("  - tag_id: 4\n    subject: entity.knife\n", ""));
     assert!(uncarded.valid, "{:#?}", uncarded.diagnostics);
 
-    let legacy = report(VALID_FORMAT_2_STORY.replace(
+    let legacy = report(VALID_FORMAT_3_STORY.replace(
         "  - id: entity.knife\n",
         "  - id: entity.knife\n    tag_id: 42\n",
     ));
@@ -521,7 +534,7 @@ fn accepts_semantically_compatible_story_format_versions() {
         let source = if version.starts_with('1') {
             VALID_STORY.replace("\"1.0.0\"", &format!("\"{version}\""))
         } else {
-            VALID_FORMAT_2_STORY.replace("\"3.0.0\"", &format!("\"{version}\""))
+            VALID_FORMAT_3_STORY.replace("\"3.0.0\"", &format!("\"{version}\""))
         };
         let report = report(source);
         assert!(report.valid, "{version}: {:#?}", report.diagnostics);
@@ -536,7 +549,7 @@ fn rejects_older_and_newer_incompatible_story_formats_with_migration_guidance() 
         ("2.0.0", "pre-migration"),
         ("4.0.0", "newer"),
     ] {
-        let source = VALID_FORMAT_2_STORY.replace("\"3.0.0\"", &format!("\"{version}\""));
+        let source = VALID_FORMAT_3_STORY.replace("\"3.0.0\"", &format!("\"{version}\""));
         let report = report(source);
         assert!(!report.valid);
         assert_eq!(report.diagnostics.len(), 1);
@@ -565,10 +578,8 @@ fn pre_v3_demo_layouts_fail_once_with_focused_migration_guidance() {
             report.diagnostics[0].pointer.as_deref(),
             Some("/case/format_version")
         );
-        assert!(report.diagnostics[0].message.contains("case.yaml"));
-        assert!(report.diagnostics[0]
-            .message
-            .contains("typed player limits"));
+        assert!(report.diagnostics[0].message.contains("MIGRATION.md"));
+        assert!(report.diagnostics[0].message.contains("v1.0.0"));
     }
 }
 
@@ -589,7 +600,7 @@ fn format_3_rejects_unknown_fields_on_every_known_item_kind() {
         ("    name: Investigate the knife\n", "    name: Investigate the knife\n    conditons: []\n", "trigger.unknown_field", "/triggers/0/conditons"),
     ];
     for (needle, replacement, code, pointer) in mutations {
-        let report = report(VALID_FORMAT_2_STORY.replacen(needle, replacement, 1));
+        let report = report(VALID_FORMAT_3_STORY.replacen(needle, replacement, 1));
         assert!(
             report.diagnostics.iter().any(|diagnostic| {
                 diagnostic.code == code && diagnostic.pointer.as_deref() == Some(pointer)
@@ -612,7 +623,7 @@ fn format_3_requires_typed_player_limits_and_baseline_safe_descriptions() {
             "/case/players/max",
         ),
     ] {
-        let source = VALID_FORMAT_2_STORY.replace(
+        let source = VALID_FORMAT_3_STORY.replace(
             "  players:\n    min: 1\n    max: 4",
             &format!("  players: {players}"),
         );
@@ -643,7 +654,7 @@ fn format_3_requires_typed_player_limits_and_baseline_safe_descriptions() {
             "/entities/0/description",
         ),
     ] {
-        let report = report(VALID_FORMAT_2_STORY.replacen(line, "", 1));
+        let report = report(VALID_FORMAT_3_STORY.replacen(line, "", 1));
         assert!(
             report.diagnostics.iter().any(|diagnostic| {
                 diagnostic.code == code && diagnostic.pointer.as_deref() == Some(pointer)
@@ -656,13 +667,13 @@ fn format_3_requires_typed_player_limits_and_baseline_safe_descriptions() {
 
 #[test]
 fn format_3_separates_narrator_guidance_from_open_author_notes() {
-    let accepted = report(VALID_FORMAT_2_STORY.replace(
+    let accepted = report(VALID_FORMAT_3_STORY.replace(
         "    description: A suspect with a carefully guarded secret.\n",
         "    description: A suspect with a carefully guarded secret.\n    narrator_guidance:\n      goal: Keep the truth hidden.\n      testimony_guidance:\n        default: Give the safe ordered testimony.\n    author_notes:\n      research_link: https://example.invalid/private\n",
     ));
     assert!(accepted.valid, "{:#?}", accepted.diagnostics);
 
-    let rejected = report(VALID_FORMAT_2_STORY.replace(
+    let rejected = report(VALID_FORMAT_3_STORY.replace(
         "    description: A suspect with a carefully guarded secret.\n",
         "    description: A suspect with a carefully guarded secret.\n    narrator_guidance:\n      testimony: Ambiguous private testimony.\n",
     ));
@@ -674,7 +685,7 @@ fn format_3_separates_narrator_guidance_from_open_author_notes() {
 
 #[test]
 fn rejects_legacy_integer_story_formats_before_schema_validation() {
-    let report = report(VALID_FORMAT_2_STORY.replace("\"3.0.0\"", "2"));
+    let report = report(VALID_FORMAT_3_STORY.replace("\"3.0.0\"", "2"));
     assert!(!report.valid);
     assert_eq!(report.diagnostics.len(), 1);
     assert_eq!(report.diagnostics[0].code, "format.incompatible_version");
@@ -694,7 +705,7 @@ fn rejects_missing_story_format_with_friendly_migration_guidance() {
 
 #[test]
 fn generic_win_states_allow_a_non_murder_story_and_preserve_authored_precedence() {
-    let source = VALID_FORMAT_2_STORY
+    let source = VALID_FORMAT_3_STORY
         .replace(
             "solution:\n  victim: character.victim\n  culprit: character.culprit\n  weapon: entity.knife\n  location: setting.study\n  deduction: deduction.solution\n",
             "",
@@ -709,7 +720,7 @@ fn generic_win_states_allow_a_non_murder_story_and_preserve_authored_precedence(
 
 #[test]
 fn win_states_validate_shape_requirement_kinds_and_thresholds() {
-    let source = VALID_FORMAT_2_STORY.replace(
+    let source = VALID_FORMAT_3_STORY.replace(
         "settings:\n",
         "win_states:\n  - id: win.invalid\n    name: ''\n    requires: [character.victim, setting.unknown]\n    minimum_points: -1\n    text: ''\n    secret: never expose this\nsettings:\n",
     );
@@ -739,7 +750,7 @@ fn win_states_validate_shape_requirement_kinds_and_thresholds() {
 
 #[test]
 fn repository_requires_a_generic_or_legacy_terminal_configuration() {
-    let source = VALID_FORMAT_2_STORY.replace(
+    let source = VALID_FORMAT_3_STORY.replace(
         "solution:\n  victim: character.victim\n  culprit: character.culprit\n  weapon: entity.knife\n  location: setting.study\n  deduction: deduction.solution\n",
         "",
     );
@@ -757,7 +768,7 @@ fn win_states_must_use_the_canonical_root_filename() {
         source: "win_states:\n  - id: win.escape\n    name: Escape\n    text: You escape.\n"
             .to_string(),
     };
-    let mut files = story_files(VALID_FORMAT_2_STORY.to_string());
+    let mut files = story_files(VALID_FORMAT_3_STORY.to_string());
     files.push(source);
     let report = validate(&files);
     assert!(report.diagnostics.iter().any(|diagnostic| {
@@ -769,7 +780,7 @@ fn win_states_must_use_the_canonical_root_filename() {
 
 #[test]
 fn point_awards_are_valid_on_every_supported_owner_with_default_claim_count() {
-    let source = VALID_FORMAT_2_STORY
+    let source = VALID_FORMAT_3_STORY
         .replace(
             "  - id: setting.foyer\n    type: room",
             "  - id: setting.foyer\n    type: room\n    points:\n      value: 5",
@@ -792,7 +803,7 @@ fn point_awards_are_valid_on_every_supported_owner_with_default_claim_count() {
 
 #[test]
 fn point_awards_reject_invalid_values_owners_and_requirement_kinds() {
-    let source = VALID_FORMAT_2_STORY
+    let source = VALID_FORMAT_3_STORY
         .replace(
             "  - id: setting.foyer\n    type: room",
             "  - id: setting.foyer\n    type: room\n    points:\n      value: 0\n      max_claim_count: -1\n      requires: [character.victim, setting.unknown]",
@@ -850,7 +861,7 @@ fn point_awards_report_exact_shape_and_field_diagnostics() {
             "/settings/1/points/bonus",
         ),
     ] {
-        let source = VALID_FORMAT_2_STORY.replace(
+        let source = VALID_FORMAT_3_STORY.replace(
             "  - id: setting.foyer\n    type: room",
             &format!("  - id: setting.foyer\n    type: room\n    {points}"),
         );
@@ -867,7 +878,7 @@ fn point_awards_report_exact_shape_and_field_diagnostics() {
 
 #[test]
 fn accepts_player_safe_portrayal_and_ordered_testimony_for_all_characters() {
-    let report = report(format_2_story_with_player_safe_character_behavior());
+    let report = report(format_3_story_with_player_safe_character_behavior());
 
     assert!(report.valid, "{:#?}", report.diagnostics);
     assert!(report.diagnostics.is_empty());
@@ -875,7 +886,7 @@ fn accepts_player_safe_portrayal_and_ordered_testimony_for_all_characters() {
 
 #[test]
 fn character_voice_id_is_optional_and_validates_elevenlabs_identifier_shape() {
-    let valid = report(format_2_story_with_character_fields(
+    let valid = report(format_3_story_with_character_fields(
         "    voice_id: JBFqnCBsd6RMkjVDRZzb\n",
     ));
     assert!(
@@ -888,7 +899,7 @@ fn character_voice_id_is_optional_and_validates_elevenlabs_identifier_shape() {
     );
 
     for invalid in ["''", "' voice-id'", "voice/id", "[]"] {
-        let report = report(format_2_story_with_character_fields(&format!(
+        let report = report(format_3_story_with_character_fields(&format!(
             "    voice_id: {invalid}\n"
         )));
         assert!(report.diagnostics.iter().any(|diagnostic| {
@@ -899,7 +910,7 @@ fn character_voice_id_is_optional_and_validates_elevenlabs_identifier_shape() {
     }
 
     let too_long = "v".repeat(129);
-    let report = report(format_2_story_with_character_fields(&format!(
+    let report = report(format_3_story_with_character_fields(&format!(
         "    voice_id: {too_long}\n"
     )));
     assert!(report
@@ -910,11 +921,11 @@ fn character_voice_id_is_optional_and_validates_elevenlabs_identifier_shape() {
 
 #[test]
 fn portrayal_may_be_absent_but_present_portrayal_must_be_supported_and_nonempty() {
-    let absent = report(VALID_FORMAT_2_STORY);
+    let absent = report(VALID_FORMAT_3_STORY);
     assert!(absent.valid, "{:#?}", absent.diagnostics);
 
     let invalid = report(
-        format_2_story_with_player_safe_character_behavior()
+        format_3_story_with_player_safe_character_behavior()
             .replace("demeanor: Quietly formal.", "demeanor: \"   \"")
             .replace(
                 "speech_style: Precise, restrained sentences.",
@@ -957,7 +968,7 @@ fn portrayal_may_be_absent_but_present_portrayal_must_be_supported_and_nonempty(
             "character.portrayal_empty",
         ),
     ] {
-        let invalid = report(format_2_story_with_character_fields(&format!(
+        let invalid = report(format_3_story_with_character_fields(&format!(
             "    portrayal: {value}\n"
         )));
         assert!(
@@ -974,7 +985,7 @@ fn portrayal_may_be_absent_but_present_portrayal_must_be_supported_and_nonempty(
 
 #[test]
 fn testimony_requires_safe_shape_text_and_explicit_question_target_gates() {
-    let malformed = report(format_2_story_with_character_fields(
+    let malformed = report(format_3_story_with_character_fields(
         "    testimony:\n      - id: testimony.bad_shape\n        text: \"   \"\n        requires: []\n        reveals: fact.knife_is_present\n        must_not_confirm: SENTINEL_HIDDEN_FACT\n",
     ));
     for (code, pointer) in [
@@ -1003,7 +1014,7 @@ fn testimony_requires_safe_shape_text_and_explicit_question_target_gates() {
         );
     }
 
-    let unsafe_gates = report(format_2_story_with_character_fields(
+    let unsafe_gates = report(format_3_story_with_character_fields(
         "    testimony:\n      - id: testimony.missing_safe_gates\n        text: A structurally safe statement.\n        requires: [fact.knife_is_present]\n",
     ));
     for code in [
@@ -1024,7 +1035,7 @@ fn testimony_requires_safe_shape_text_and_explicit_question_target_gates() {
 
 #[test]
 fn testimony_rejects_collection_entry_and_id_shapes() {
-    let mapping = report(format_2_story_with_character_fields(
+    let mapping = report(format_3_story_with_character_fields(
         "    testimony: {default: SENTINEL_PRIVATE_LEGACY_TEXT}\n",
     ));
     assert!(mapping.diagnostics.iter().any(|diagnostic| {
@@ -1033,7 +1044,7 @@ fn testimony_rejects_collection_entry_and_id_shapes() {
             && diagnostic.subject_id.as_deref() == Some("character.culprit")
     }));
 
-    let entries = report(format_2_story_with_character_fields(
+    let entries = report(format_3_story_with_character_fields(
         "    testimony:\n      - SENTINEL_NOT_A_MAPPING\n      - text: Missing an ID.\n        requires: [command.question, character.culprit]\n      - id: fact.wrong_prefix_but_unique\n        text: Wrong prefix.\n        requires: [command.question, character.culprit]\n      - id: Testimony.Invalid\n        text: Invalid ID shape.\n        requires: [command.question, character.culprit]\n",
     ));
     for (code, pointer) in [
@@ -1058,7 +1069,7 @@ fn testimony_rejects_collection_entry_and_id_shapes() {
 #[test]
 fn testimony_ids_and_reference_lists_are_unique_and_typed() {
     let duplicate_id = report(
-        format_2_story_with_player_safe_character_behavior().replace(
+        format_3_story_with_player_safe_character_behavior().replace(
             "    testimony: []",
             "    testimony:\n      - id: testimony.culprit_opening_account\n        text: Duplicate across character owners.\n        requires: [command.question, character.victim]",
         ),
@@ -1078,7 +1089,7 @@ fn testimony_ids_and_reference_lists_are_unique_and_typed() {
     );
     assert_eq!(duplicate.related.len(), 1);
 
-    let bad_refs = report(format_2_story_with_character_fields(
+    let bad_refs = report(format_3_story_with_character_fields(
         "    testimony:\n      - id: testimony.bad_refs\n        text: References are structurally checked.\n        requires: [command.question, character.culprit, flag.not_authored, command.question]\n        reveals: [entity.knife, fact.not_authored, entity.knife]\n",
     ));
     for (code, pointer, subject) in [
@@ -1122,7 +1133,7 @@ fn testimony_ids_and_reference_lists_are_unique_and_typed() {
 
 #[test]
 fn testimony_rejects_every_non_question_command_gate_and_preserves_duplicate_diagnostics() {
-    let source = format_2_story_with_character_fields(
+    let source = format_3_story_with_character_fields(
         "    testimony:\n      - id: testimony.impossible_commands\n        text: This can only be selected by questioning.\n        requires: [command.question, character.culprit, command.examine, command.investigate, command.examine]\n",
     )
     .replace(
@@ -1164,7 +1175,7 @@ fn testimony_rejects_every_non_question_command_gate_and_preserves_duplicate_dia
 
 #[test]
 fn testimony_accepts_exact_question_gate_with_real_non_command_prerequisites() {
-    let source = format_2_story_with_character_fields(
+    let source = format_3_story_with_character_fields(
         "    testimony:\n      - id: testimony.real_prerequisites\n        text: Every additional prerequisite can be satisfied independently.\n        requires:\n          - command.question\n          - character.culprit\n          - character.victim\n          - entity.knife\n          - event.murder\n          - fact.knife_is_present\n          - deduction.solution\n          - flag.knife_examined\n          - setting.study\n          - route.foyer_study\n          - trigger.investigate_knife\n        reveals: []\n",
     );
     let report = report(source);
@@ -1175,8 +1186,8 @@ fn testimony_accepts_exact_question_gate_with_real_non_command_prerequisites() {
 
 #[test]
 fn authored_testimony_requires_a_first_required_character_question_target() {
-    let base = format_2_story_with_player_safe_character_behavior();
-    let valid_parameters = "    parameters:\n      - name: character\n        type: character\n        required: true\n";
+    let base = format_3_story_with_player_safe_character_behavior();
+    let valid_parameters = "    parameters:\n      - name: character\n        types: [character]\n        min: 1\n        max: 1\n";
     for (replacement, code, pointer) in [
         (
             "",
@@ -1189,14 +1200,14 @@ fn authored_testimony_requires_a_first_required_character_question_target() {
             "/commands/0/parameters/0",
         ),
         (
-            "    parameters:\n      - name: character\n        type: entity\n        required: true\n",
+            "    parameters:\n      - name: character\n        types: [entity]\n        min: 1\n        max: 1\n",
             "character.testimony_question_target_type",
-            "/commands/0/parameters/0/type",
+            "/commands/0/parameters/0/types",
         ),
         (
-            "    parameters:\n      - name: character\n        type: character\n        required: false\n",
+            "    parameters:\n      - name: character\n        types: [character]\n        min: 0\n        max: 1\n",
             "character.testimony_question_target_required",
-            "/commands/0/parameters/0/required",
+            "/commands/0/parameters/0/min",
         ),
     ] {
         let report = report(base.replace(valid_parameters, replacement));
@@ -1210,15 +1221,15 @@ fn authored_testimony_requires_a_first_required_character_question_target() {
 
 #[test]
 fn question_character_target_requires_exact_name_without_target_diagnostic_cascades() {
-    let base = format_2_story_with_player_safe_character_behavior();
-    let valid_parameters = "    parameters:\n      - name: character\n        type: character\n        required: true\n";
+    let base = format_3_story_with_player_safe_character_behavior();
+    let valid_parameters = "    parameters:\n      - name: character\n        types: [character]\n        min: 1\n        max: 1\n";
     for replacement in [
-        "    parameters:\n      - type: character\n        required: true\n",
-        "    parameters:\n      - name: null\n        type: character\n        required: true\n",
-        "    parameters:\n      - name: 42\n        type: character\n        required: true\n",
-        "    parameters:\n      - name: \"\"\n        type: character\n        required: true\n",
-        "    parameters:\n      - name: \"   \"\n        type: character\n        required: true\n",
-        "    parameters:\n      - name: suspect\n        type: character\n        required: true\n",
+        "    parameters:\n      - types: [character]\n        min: 1\n        max: 1\n",
+        "    parameters:\n      - name: null\n        types: [character]\n        min: 1\n        max: 1\n",
+        "    parameters:\n      - name: 42\n        types: [character]\n        min: 1\n        max: 1\n",
+        "    parameters:\n      - name: \"\"\n        types: [character]\n        min: 1\n        max: 1\n",
+        "    parameters:\n      - name: \"   \"\n        types: [character]\n        min: 1\n        max: 1\n",
+        "    parameters:\n      - name: suspect\n        types: [character]\n        min: 1\n        max: 1\n",
     ] {
         let invalid = report(base.replace(valid_parameters, replacement));
         let target_diagnostics = invalid
@@ -1261,25 +1272,25 @@ fn question_character_target_requires_exact_name_without_target_diagnostic_casca
 
 #[test]
 fn question_parameters_after_the_character_target_must_be_optional_typed_topics() {
-    let base = format_2_story_with_player_safe_character_behavior();
-    let valid_parameters = "    parameters:\n      - name: character\n        type: character\n        required: true\n";
+    let base = format_3_story_with_player_safe_character_behavior();
+    let valid_parameters = "    parameters:\n      - name: character\n        types: [character]\n        min: 1\n        max: 1\n";
     let malformed = base.replace(
         valid_parameters,
-        "    parameters:\n      - name: character\n        type: character\n        required: true\n      - name: other\n        type: entity\n        required: true\n      - name: topic_event\n        type: entity\n        required: false\n",
+        "    parameters:\n      - name: character\n        types: [character]\n        min: 1\n        max: 1\n      - name: topic\n        types: [entity]\n        min: 1\n        max: 1\n      - name: other\n        types: [character, setting, event, entity, deduction]\n        min: 0\n        max: 5\n",
     );
     let malformed_report = report(malformed);
     for (code, pointer) in [
         (
             "character.testimony_question_topic_name",
-            "/commands/0/parameters/1/name",
+            "/commands/0/parameters/2/name",
         ),
         (
             "character.testimony_question_topic_required",
-            "/commands/0/parameters/1/required",
+            "/commands/0/parameters/1/min",
         ),
         (
             "character.testimony_question_topic_type",
-            "/commands/0/parameters/2/type",
+            "/commands/0/parameters/1/types",
         ),
     ] {
         assert!(
@@ -1295,25 +1306,21 @@ fn question_parameters_after_the_character_target_must_be_optional_typed_topics(
 
     let wrong_order = base.replace(
         valid_parameters,
-        "    parameters:\n      - name: topic_entity\n        type: entity\n        required: false\n      - name: character\n        type: character\n        required: true\n",
+        "    parameters:\n      - name: topic\n        types: [character, setting, event, entity, deduction]\n        min: 0\n        max: 5\n      - name: character\n        types: [character]\n        min: 1\n        max: 1\n",
     );
     let report = report(wrong_order);
     for (code, pointer) in [
         (
             "character.testimony_question_target_type",
-            "/commands/0/parameters/0/type",
+            "/commands/0/parameters/0/types",
         ),
         (
             "character.testimony_question_target_required",
-            "/commands/0/parameters/0/required",
+            "/commands/0/parameters/0/min",
         ),
         (
             "character.testimony_question_topic_name",
             "/commands/0/parameters/1/name",
-        ),
-        (
-            "character.testimony_question_topic_required",
-            "/commands/0/parameters/1/required",
         ),
     ] {
         assert!(
@@ -1329,21 +1336,24 @@ fn question_parameters_after_the_character_target_must_be_optional_typed_topics(
 }
 
 #[test]
-fn question_signature_accepts_optional_topics_in_authored_order() {
-    let source = format_2_story_with_player_safe_character_behavior().replace(
-        "    parameters:\n      - name: character\n        type: character\n        required: true\n",
-        "    parameters:\n      - name: character\n        type: character\n        required: true\n      - name: topic_character\n        type: character\n        required: false\n      - name: topic_entity\n        type: entity\n      - name: topic_setting\n        type: setting\n        required: false\n      - name: topic_event\n        type: event\n        required: false\n      - name: topic_deduction\n        type: deduction\n        required: false\n",
+fn question_signature_rejects_split_legacy_topics() {
+    let source = format_3_story_with_player_safe_character_behavior().replace(
+        "    parameters:\n      - name: character\n        types: [character]\n        min: 1\n        max: 1\n",
+        "    parameters:\n      - name: character\n        types: [character]\n        min: 1\n        max: 1\n      - name: topic_character\n        types: [character]\n        min: 0\n        max: 1\n",
     );
     let report = report(source);
 
-    assert!(report.valid, "{:#?}", report.diagnostics);
-    assert!(report.diagnostics.is_empty());
+    assert!(!report.valid);
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "character.testimony_question_topic_name"
+            && diagnostic.pointer.as_deref() == Some("/commands/0/parameters/1/name")
+    }));
 }
 
 #[test]
 fn question_signature_accepts_canonical_union_topic_cardinality() {
-    let source = format_2_story_with_player_safe_character_behavior().replace(
-        "    parameters:\n      - name: character\n        type: character\n        required: true\n",
+    let source = format_3_story_with_player_safe_character_behavior().replace(
+        "    parameters:\n      - name: character\n        types: [character]\n        min: 1\n        max: 1\n",
         "    parameters:\n      - name: character\n        types: [character]\n        min: 1\n        max: 1\n      - name: topic\n        types: [character, setting, event, entity, deduction]\n        min: 0\n        max: 5\n",
     );
     let report = report(source);
@@ -1354,7 +1364,7 @@ fn question_signature_accepts_canonical_union_topic_cardinality() {
 
 #[test]
 fn omitted_and_empty_reveals_match_and_narrator_guidance_is_not_safe_content() {
-    let source = format_2_story_with_character_fields(
+    let source = format_3_story_with_character_fields(
         "    narrator_guidance:\n      goal: SENTINEL_PRIVATE_GOAL\n      testimony_guidance:\n        under_pressure: SENTINEL_PRIVATE_UNDER_PRESSURE\n        must_not_confirm: SENTINEL_HIDDEN_FACT\n    portrayal:\n      demeanor: Player-safe demeanor.\n    testimony:\n      - id: testimony.no_reveal_omitted\n        text: This entry reveals no fact.\n        requires: [command.question, character.culprit]\n      - id: testimony.no_reveal_empty\n        text: This entry also reveals no fact.\n        requires: [command.question, character.culprit]\n        reveals: []\n",
     );
     let report = report(source);
@@ -1364,18 +1374,18 @@ fn omitted_and_empty_reveals_match_and_narrator_guidance_is_not_safe_content() {
 }
 
 #[test]
-fn format_2_accepts_narrative_detail_on_every_supported_fact_owner() {
-    let report = report(format_2_story_with_narrative_details());
+fn format_3_accepts_narrative_detail_on_every_supported_fact_owner() {
+    let report = report(format_3_story_with_narrative_details());
 
     assert!(report.valid, "{:#?}", report.diagnostics);
     assert!(report.diagnostics.is_empty());
 }
 
 #[test]
-fn format_2_rejects_blank_narrative_detail_on_every_supported_fact_owner() {
+fn format_3_rejects_blank_narrative_detail_on_every_supported_fact_owner() {
     for blank in ["\"\"", "\"   \""] {
         let source =
-            format_2_story_with_narrative_details().replace("SAFE_NARRATIVE_DETAIL", blank);
+            format_3_story_with_narrative_details().replace("SAFE_NARRATIVE_DETAIL", blank);
         let report = report(source);
         let pointers: Vec<_> = report
             .diagnostics
@@ -1399,9 +1409,9 @@ fn format_2_rejects_blank_narrative_detail_on_every_supported_fact_owner() {
 }
 
 #[test]
-fn format_2_rejects_every_non_string_narrative_detail_shape() {
+fn format_3_rejects_every_non_string_narrative_detail_shape() {
     for value in ["null", "false", "42", "[detail]", "{text: detail}"] {
-        let report = report(VALID_FORMAT_2_STORY.replace(
+        let report = report(VALID_FORMAT_3_STORY.replace(
             "        statement: The knife is present.",
             &format!("        statement: The knife is present.\n        narrative_detail: {value}"),
         ));
@@ -1424,13 +1434,13 @@ fn format_2_rejects_every_non_string_narrative_detail_shape() {
 }
 
 #[test]
-fn format_2_accepts_exact_occurrence_on_every_supported_fact_owner() {
-    let all_owners = report(format_2_story_with_occurrences_on_every_fact_owner());
+fn format_3_accepts_exact_occurrence_on_every_supported_fact_owner() {
+    let all_owners = report(format_3_story_with_occurrences_on_every_fact_owner());
 
     assert!(all_owners.valid, "{:#?}", all_owners.diagnostics);
     assert!(all_owners.diagnostics.is_empty());
 
-    let maximum_day = report(format_2_story_with_entity_occurrence(
+    let maximum_day = report(format_3_story_with_entity_occurrence(
         "        occurred_at:\n          day: 2147483647\n          time: \"23:59\"",
     ));
     assert!(maximum_day.valid, "{:#?}", maximum_day.diagnostics);
@@ -1438,9 +1448,9 @@ fn format_2_accepts_exact_occurrence_on_every_supported_fact_owner() {
 }
 
 #[test]
-fn format_2_occurrence_requires_an_exact_mapping_and_both_fields() {
+fn format_3_occurrence_requires_an_exact_mapping_and_both_fields() {
     for value in ["null", "[]", "\"21:18\"", "false"] {
-        let report = report(format_2_story_with_entity_occurrence(&format!(
+        let report = report(format_3_story_with_entity_occurrence(&format!(
             "        occurred_at: {value}"
         )));
         let diagnostic = report
@@ -1475,7 +1485,7 @@ fn format_2_occurrence_requires_an_exact_mapping_and_both_fields() {
             "/entities/0/facts/0/occurred_at/time",
         ),
     ] {
-        let report = report(format_2_story_with_entity_occurrence(mapping));
+        let report = report(format_3_story_with_entity_occurrence(mapping));
         assert!(
             report.diagnostics.iter().any(|diagnostic| {
                 diagnostic.code == code
@@ -1489,9 +1499,9 @@ fn format_2_occurrence_requires_an_exact_mapping_and_both_fields() {
 }
 
 #[test]
-fn format_2_occurrence_day_is_a_bounded_nonnegative_integer() {
+fn format_3_occurrence_day_is_a_bounded_nonnegative_integer() {
     for day in ["-1", "true", "1.5", "\"0\"", "2147483648"] {
-        let report = report(format_2_story_with_entity_occurrence(&format!(
+        let report = report(format_3_story_with_entity_occurrence(&format!(
             "        occurred_at:\n          day: {day}\n          time: \"21:18\""
         )));
         let diagnostic = report
@@ -1516,7 +1526,7 @@ fn format_2_occurrence_day_is_a_bounded_nonnegative_integer() {
 }
 
 #[test]
-fn format_2_occurrence_time_requires_canonical_exact_hh_mm() {
+fn format_3_occurrence_time_requires_canonical_exact_hh_mm() {
     for time in [
         "\"1:02\"",
         "\"01:2\"",
@@ -1527,7 +1537,7 @@ fn format_2_occurrence_time_requires_canonical_exact_hh_mm() {
         "42",
         "null",
     ] {
-        let report = report(format_2_story_with_entity_occurrence(&format!(
+        let report = report(format_3_story_with_entity_occurrence(&format!(
             "        occurred_at:\n          day: 0\n          time: {time}"
         )));
         let diagnostic = report
@@ -1552,8 +1562,8 @@ fn format_2_occurrence_time_requires_canonical_exact_hh_mm() {
 }
 
 #[test]
-fn format_2_occurrence_rejects_unknown_fields_at_the_exact_pointer() {
-    let report = report(format_2_story_with_entity_occurrence(
+fn format_3_occurrence_rejects_unknown_fields_at_the_exact_pointer() {
+    let report = report(format_3_story_with_entity_occurrence(
         "        occurred_at:\n          time: \"21:18\"\n          timezone: UTC\n          day: 0",
     ));
     let diagnostics = report
@@ -1605,7 +1615,7 @@ fn format_1_does_not_treat_clue_metadata_as_fact_occurrence() {
 
 #[test]
 fn validates_optional_case_voice_metadata() {
-    let with_voice = VALID_FORMAT_2_STORY.replace(
+    let with_voice = VALID_FORMAT_3_STORY.replace(
         "  initial_time: \"21:00\"",
         "  initial_time: \"21:00\"\n  genre: closed-circle mystery\n  tone: [elegant, storm-bound, quietly menacing]",
     );
@@ -1616,14 +1626,14 @@ fn validates_optional_case_voice_metadata() {
         with_voice_report.diagnostics
     );
 
-    let without_voice = report(VALID_FORMAT_2_STORY);
+    let without_voice = report(VALID_FORMAT_3_STORY);
     assert!(without_voice.valid, "{:#?}", without_voice.diagnostics);
 }
 
 #[test]
 fn rejects_blank_and_wrong_type_case_genre() {
     for genre in ["\"   \"", "[mystery]", "42"] {
-        let report = report(VALID_FORMAT_2_STORY.replace(
+        let report = report(VALID_FORMAT_3_STORY.replace(
             "  initial_time: \"21:00\"",
             &format!("  initial_time: \"21:00\"\n  genre: {genre}"),
         ));
@@ -1638,7 +1648,7 @@ fn rejects_blank_and_wrong_type_case_genre() {
 
 #[test]
 fn rejects_wrong_type_blank_and_duplicate_case_tones() {
-    let wrong_type = report(VALID_FORMAT_2_STORY.replace(
+    let wrong_type = report(VALID_FORMAT_3_STORY.replace(
         "  initial_time: \"21:00\"",
         "  initial_time: \"21:00\"\n  tone: elegant",
     ));
@@ -1648,7 +1658,7 @@ fn rejects_wrong_type_blank_and_duplicate_case_tones() {
         .any(|diagnostic| diagnostic.code == "case.tone_type"
             && diagnostic.pointer.as_deref() == Some("/case/tone")));
 
-    let invalid_entries = report(VALID_FORMAT_2_STORY.replace(
+    let invalid_entries = report(VALID_FORMAT_3_STORY.replace(
         "  initial_time: \"21:00\"",
         "  initial_time: \"21:00\"\n  tone: [elegant, \"   \", 42, \" elegant \"]",
     ));
@@ -1666,15 +1676,15 @@ fn rejects_wrong_type_blank_and_duplicate_case_tones() {
 }
 
 #[test]
-fn format_2_requires_a_runtime_clock_and_whole_minute_effects() {
-    let missing = report(VALID_FORMAT_2_STORY.replace("  initial_time: \"21:00\"\n", ""));
+fn format_3_requires_a_runtime_clock_and_whole_minute_effects() {
+    let missing = report(VALID_FORMAT_3_STORY.replace("  initial_time: \"21:00\"\n", ""));
     assert!(missing
         .diagnostics
         .iter()
         .any(|diagnostic| diagnostic.code == "case.initial_time_missing"));
 
     let invalid = codes(
-        VALID_FORMAT_2_STORY
+        VALID_FORMAT_3_STORY
             .replace("initial_time: \"21:00\"", "initial_time: \"24:00\"")
             .replace("minutes: 12", "minutes: 12.5"),
     );
@@ -1684,7 +1694,7 @@ fn format_2_requires_a_runtime_clock_and_whole_minute_effects() {
 
 #[test]
 fn validates_runtime_trigger_effect_contracts() {
-    let invalid = VALID_FORMAT_2_STORY
+    let invalid = VALID_FORMAT_3_STORY
         .replace(
             "    effects:",
             "    when:\n      all:\n        - time:\n            relation: after\n            value: \"99:00\"\n    effects:",
@@ -1700,13 +1710,13 @@ fn validates_runtime_trigger_effect_contracts() {
     assert!(result.contains(&"command.effect_unknown_operation".to_string()));
 
     let missing_value =
-        codes(VALID_FORMAT_2_STORY.replace("        value: true", "        omitted_value: true"));
+        codes(VALID_FORMAT_3_STORY.replace("        value: true", "        omitted_value: true"));
     assert!(missing_value.contains(&"effect.flag_value".to_string()));
 }
 
 #[test]
 fn rejects_removed_tags_section_and_action_effects() {
-    let source = VALID_FORMAT_2_STORY
+    let source = VALID_FORMAT_3_STORY
         .replace(
             "flags:",
             "tags:\n  - id: tag.legacy\n    members: [entity.knife]\nflags:",
@@ -1792,28 +1802,28 @@ fn flags_section_is_required() {
 }
 
 #[test]
-fn format_2_nests_facts_and_rejects_top_level_facts_and_clues() {
-    let with_top_level_facts = VALID_FORMAT_2_STORY.replace(
+fn format_3_nests_facts_and_rejects_top_level_facts_and_clues() {
+    let with_top_level_facts = VALID_FORMAT_3_STORY.replace(
         "entities:",
         "facts:\n  - id: fact.legacy\n    statement: This no longer belongs at the root.\nentities:",
     );
     assert!(codes(with_top_level_facts).contains(&"format.facts_section_removed".to_string()));
 
     let with_clues =
-        VALID_FORMAT_2_STORY.replace("deductions:", "clues:\n  - id: clue.legacy\ndeductions:");
+        VALID_FORMAT_3_STORY.replace("deductions:", "clues:\n  - id: clue.legacy\ndeductions:");
     assert!(codes(with_clues).contains(&"format.clues_removed".to_string()));
 }
 
 #[test]
-fn format_2_allows_empty_fact_lists_and_rejects_non_mapping_facts() {
-    let empty = VALID_FORMAT_2_STORY.replace(
+fn format_3_allows_empty_fact_lists_and_rejects_non_mapping_facts() {
+    let empty = VALID_FORMAT_3_STORY.replace(
         "  - id: character.culprit",
         "  - id: character.culprit\n    facts: []",
     );
     let report = report(empty);
     assert!(report.valid, "{:#?}", report.diagnostics);
 
-    let malformed = VALID_FORMAT_2_STORY.replace(
+    let malformed = VALID_FORMAT_3_STORY.replace(
         "    facts:",
         "    facts:\n      - fact.legacy_reference\n    ignored_facts:",
     );
@@ -1821,8 +1831,8 @@ fn format_2_allows_empty_fact_lists_and_rejects_non_mapping_facts() {
 }
 
 #[test]
-fn format_2_validates_fact_requirements_and_cycles() {
-    let malformed = VALID_FORMAT_2_STORY
+fn format_3_validates_fact_requirements_and_cycles() {
+    let malformed = VALID_FORMAT_3_STORY
         .replace(
             "          all:\n            - flag: flag.knife_analysis_complete",
             "          all: []",
@@ -1835,7 +1845,7 @@ fn format_2_validates_fact_requirements_and_cycles() {
     assert!(result.contains(&"condition.all_type".to_string()));
     assert!(result.contains(&"reference.wrong_type".to_string()));
 
-    let cyclic = VALID_FORMAT_2_STORY.replace(
+    let cyclic = VALID_FORMAT_3_STORY.replace(
         "        statement: The knife is present.",
         "        statement: The knife is present.\n        when:\n          all:\n            - knows: fact.knife_connects_to_scene",
     );
@@ -1843,8 +1853,8 @@ fn format_2_validates_fact_requirements_and_cycles() {
 }
 
 #[test]
-fn format_2_accepts_opening_action_persistent_and_delayed_fact_discovery() {
-    let source = VALID_FORMAT_2_STORY
+fn format_3_accepts_opening_action_persistent_and_delayed_fact_discovery() {
+    let source = VALID_FORMAT_3_STORY
         .replace(
             "        statement: The knife is present.",
             "        statement: The knife is present.\n        on:\n          command: command.investigate\n          parameters:\n            target: owner",
@@ -1858,8 +1868,8 @@ fn format_2_accepts_opening_action_persistent_and_delayed_fact_discovery() {
 }
 
 #[test]
-fn format_2_rejects_immediate_effects_on_a_delayed_trigger() {
-    let source = VALID_FORMAT_2_STORY.replace(
+fn format_3_rejects_immediate_effects_on_a_delayed_trigger() {
+    let source = VALID_FORMAT_3_STORY.replace(
         "    effects:\n      - operation: set_flag",
         "    after: 20m\n    effects:\n      - operation: set_flag",
     );
@@ -1872,7 +1882,7 @@ fn format_2_rejects_immediate_effects_on_a_delayed_trigger() {
 
 #[test]
 fn action_matches_validate_semantic_roles_unions_cardinality_actor_and_owner() {
-    let source = VALID_FORMAT_2_STORY
+    let source = VALID_FORMAT_3_STORY
         .replace(
             "triggers:",
             "  - id: command.compare\n    name: Compare\n    parameters:\n      - name: evidence\n        types: [entity, setting]\n        min: 1\n        max: 2\n    effects: []\ntriggers:",
@@ -1913,13 +1923,13 @@ fn action_matches_validate_semantic_roles_unions_cardinality_actor_and_owner() {
             "/triggers/0/on/parameters/target",
         ),
     ] {
-        let invalid = VALID_FORMAT_2_STORY.replace("        target: entity.knife", replacement);
+        let invalid = VALID_FORMAT_3_STORY.replace("        target: entity.knife", replacement);
         assert!(report(invalid).diagnostics.iter().any(|diagnostic| {
             diagnostic.code == code && diagnostic.pointer.as_deref() == Some(pointer)
         }));
     }
 
-    let bad_actor = report(VALID_FORMAT_2_STORY.replace(
+    let bad_actor = report(VALID_FORMAT_3_STORY.replace(
         "      command: command.investigate",
         "      command: command.investigate\n      actor: entity.knife",
     ));
@@ -1931,7 +1941,7 @@ fn action_matches_validate_semantic_roles_unions_cardinality_actor_and_owner() {
 
 #[test]
 fn persistent_conditions_validate_every_role_and_reject_ambiguous_or_wrong_kinds() {
-    let valid = VALID_FORMAT_2_STORY.replace(
+    let valid = VALID_FORMAT_3_STORY.replace(
         "            - flag: flag.knife_analysis_complete",
         "            - at: setting.study\n            - owns: entity.knife\n            - knows: fact.knife_is_present\n            - knows: deduction.solution\n            - flag: flag.knife_analysis_complete\n            - completed: trigger.investigate_knife\n            - time:\n                relation: after\n                value: \"21:00\"",
     );
@@ -1947,7 +1957,7 @@ fn persistent_conditions_validate_every_role_and_reject_ambiguous_or_wrong_kinds
         ("completed: command.investigate", "reference.wrong_type"),
         ("time: soon", "condition.time_type"),
     ] {
-        let invalid = VALID_FORMAT_2_STORY.replace(
+        let invalid = VALID_FORMAT_3_STORY.replace(
             "            - flag: flag.knife_analysis_complete",
             &format!("            - {predicate}"),
         );
@@ -1962,8 +1972,8 @@ fn persistent_conditions_validate_every_role_and_reject_ambiguous_or_wrong_kinds
 }
 
 #[test]
-fn format_2_rejects_legacy_noop_and_cyclic_triggers_deterministically() {
-    let legacy = report(VALID_FORMAT_2_STORY.replace(
+fn format_3_rejects_legacy_noop_and_cyclic_triggers_deterministically() {
+    let legacy = report(VALID_FORMAT_3_STORY.replace(
         "    on:\n      command: command.investigate\n      parameters:\n        target: entity.knife",
         "    command: command.investigate",
     ));
@@ -1976,7 +1986,7 @@ fn format_2_rejects_legacy_noop_and_cyclic_triggers_deterministically() {
         legacy.diagnostics
     );
 
-    let noop = report(VALID_FORMAT_2_STORY.replace(
+    let noop = report(VALID_FORMAT_3_STORY.replace(
         "    effects:\n      - operation: set_flag\n        flag: flag.knife_analysis_complete\n        value: true\n        after: 20m",
         "    effects: []",
     ));
@@ -1985,7 +1995,7 @@ fn format_2_rejects_legacy_noop_and_cyclic_triggers_deterministically() {
         .iter()
         .any(|diagnostic| diagnostic.code == "trigger.no_observable_result"));
 
-    let cyclic = VALID_FORMAT_2_STORY
+    let cyclic = VALID_FORMAT_3_STORY
         .replace(
             "triggers:\n  - id: trigger.investigate_knife",
             "triggers:\n  - id: trigger.prior\n    name: Prior\n    on:\n      command: command.investigate\n    when:\n      all:\n        - completed: trigger.investigate_knife\n  - id: trigger.investigate_knife",
@@ -2006,8 +2016,8 @@ fn format_2_rejects_legacy_noop_and_cyclic_triggers_deterministically() {
 }
 
 #[test]
-fn format_2_enforces_automatic_opening_facts_and_central_requirements() {
-    let source = VALID_FORMAT_2_STORY
+fn format_3_enforces_automatic_opening_facts_and_central_requirements() {
+    let source = VALID_FORMAT_3_STORY
         .replace(
             "        statement: The knife is present.",
             "        statement: The knife is present.\n        initially_known: true",
@@ -2027,8 +2037,8 @@ fn format_2_enforces_automatic_opening_facts_and_central_requirements() {
 }
 
 #[test]
-fn format_2_validates_flags_and_delayed_assignment() {
-    let invalid = VALID_FORMAT_2_STORY
+fn format_3_validates_flags_and_delayed_assignment() {
+    let invalid = VALID_FORMAT_3_STORY
         .replace(
             "  - id: flag.knife_analysis_complete\n    name: Knife analysis complete\n    description: Whether the delayed knife analysis has completed.\n    initial_state: false",
             "  - id: flag.knife_analysis_complete\n    name: Knife analysis complete\n    description: Whether the delayed knife analysis has completed.\n    initial_state: sometimes",
@@ -2042,12 +2052,12 @@ fn format_2_validates_flags_and_delayed_assignment() {
     assert!(result.contains(&"reference.wrong_type".to_string()));
     assert!(result.contains(&"effect.delay".to_string()));
 
-    let legacy = VALID_FORMAT_2_STORY.replace("operation: set_flag", "operation: learn_after");
+    let legacy = VALID_FORMAT_3_STORY.replace("operation: set_flag", "operation: learn_after");
     assert!(codes(legacy).contains(&"command.effect_unknown_operation".to_string()));
 
     for delay in ["1turn", "4294967296turns", "4294967296m"] {
         assert!(
-            codes(VALID_FORMAT_2_STORY.replace("after: 20m", &format!("after: {delay}")))
+            codes(VALID_FORMAT_3_STORY.replace("after: 20m", &format!("after: {delay}")))
                 .contains(&"effect.delay".to_string()),
             "{delay} must be rejected before runtime"
         );
@@ -2056,7 +2066,7 @@ fn format_2_validates_flags_and_delayed_assignment() {
 
 #[test]
 fn delayed_set_flag_rejects_false_assignment() {
-    let report = report(VALID_FORMAT_2_STORY.replace(
+    let report = report(VALID_FORMAT_3_STORY.replace(
         "        value: true\n        after: 20m",
         "        value: false\n        after: 20m",
     ));
@@ -2140,7 +2150,7 @@ fn reports_parent_and_dependency_cycles() {
 
 #[test]
 fn validates_entity_placement_visibility_and_portability() {
-    let source = VALID_FORMAT_2_STORY
+    let source = VALID_FORMAT_3_STORY
         .replace(
             "  - id: entity.knife\n    initial:\n      container: setting.study",
             "  - id: entity.knife\n    initial:\n      container: entity.box\n    physical:\n      portable: true\n    visibility:\n      requires: flag.knife_examined\n  - id: entity.box\n    initial:\n      container: setting.study\n  - id: entity.bookshelf\n    initial:\n      container: setting.study\n    visibility:\n      requires: [setting.study, entity.box, fact.knife_is_present, deduction.solution, flag.knife_examined, trigger.investigate_knife]",
@@ -2188,7 +2198,7 @@ fn rejects_invalid_entity_physical_and_visibility_shapes_at_exact_pointers() {
             "/entities/0/visibility/searchable",
         ),
     ] {
-        let source = VALID_FORMAT_2_STORY.replace(
+        let source = VALID_FORMAT_3_STORY.replace(
             "    initial:\n      container: setting.study",
             &format!("    initial:\n      container: setting.study\n{replacement}"),
         );
@@ -2205,7 +2215,7 @@ fn rejects_invalid_entity_physical_and_visibility_shapes_at_exact_pointers() {
 
 #[test]
 fn rejects_unknown_ephemeral_and_duplicate_visibility_requirements() {
-    let source = VALID_FORMAT_2_STORY.replace(
+    let source = VALID_FORMAT_3_STORY.replace(
         "    initial:\n      container: setting.study",
         "    initial:\n      container: setting.study\n    visibility:\n      requires: [flag.not_authored, command.investigate, flag.knife_examined, flag.knife_examined]",
     );
@@ -2231,13 +2241,13 @@ fn rejects_unknown_ephemeral_and_duplicate_visibility_requirements() {
 #[test]
 fn rejects_entity_container_type_and_cycles_at_the_container_pointer() {
     let wrong_type =
-        report(VALID_FORMAT_2_STORY.replace("container: setting.study", "container: 42"));
+        report(VALID_FORMAT_3_STORY.replace("container: setting.study", "container: 42"));
     assert!(wrong_type.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "entity.container_type"
             && diagnostic.pointer.as_deref() == Some("/entities/0/initial/container")
     }));
 
-    let cyclic = VALID_FORMAT_2_STORY
+    let cyclic = VALID_FORMAT_3_STORY
         .replace("container: setting.study", "container: entity.box")
         .replace(
             "events:",
@@ -2260,7 +2270,7 @@ fn rejects_entity_container_type_and_cycles_at_the_container_pointer() {
 #[test]
 fn rejects_misplaced_entity_capability_booleans() {
     for field in ["portable", "searchable", "investigatable", "takeable"] {
-        let source = VALID_FORMAT_2_STORY.replace(
+        let source = VALID_FORMAT_3_STORY.replace(
             "    initial:\n      container: setting.study",
             &format!("    initial:\n      container: setting.study\n    {field}: true"),
         );
@@ -2396,12 +2406,12 @@ fn validates_typed_trigger_parameter_bindings() {
 #[test]
 fn validates_runtime_command_signatures_and_unique_parameter_names() {
     let duplicate =
-        codes(VALID_FORMAT_2_STORY.replace("      - name: destination", "      - name: target"));
+        codes(VALID_FORMAT_3_STORY.replace("      - name: destination", "      - name: target"));
     assert!(duplicate.contains(&"command.parameter_name_duplicate".to_string()));
 
-    let reserved = codes(VALID_FORMAT_2_STORY.replace(
+    let reserved = codes(VALID_FORMAT_3_STORY.replace(
         "    description: Learn that the knife is present.\n    effects:",
-        "    description: Learn that the knife is present.\n    parameters:\n      - name: target\n        type: entity\n        required: true\n    effects:",
+        "    description: Learn that the knife is present.\n    parameters:\n      - name: target\n        types: [entity]\n        min: 1\n        max: 1\n    effects:",
     ));
     assert!(reserved.contains(&"command.runtime_signature".to_string()));
 }
@@ -2450,10 +2460,10 @@ fn validates_union_parameter_kinds_and_cardinality() {
 #[test]
 fn take_and_drop_require_one_required_entity_parameter() {
     for command in ["command.take", "command.drop"] {
-        let accepted = report(VALID_FORMAT_2_STORY.replace(
+        let accepted = report(VALID_FORMAT_3_STORY.replace(
             "commands:\n",
             &format!(
-                "commands:\n  - id: {command}\n    name: Inventory command\n    parameters:\n      - name: item\n        type: entity\n        required: true\n"
+                "commands:\n  - id: {command}\n    name: Inventory command\n    parameters:\n      - name: item\n        types: [entity]\n        min: 1\n        max: 1\n"
             ),
         ));
         assert!(accepted.valid, "{command}: {:#?}", accepted.diagnostics);
@@ -2462,21 +2472,21 @@ fn take_and_drop_require_one_required_entity_parameter() {
             ("zero", "", "/commands/0/parameters"),
             (
                 "optional",
-                "    parameters:\n      - name: item\n        type: entity\n        required: false\n",
-                "/commands/0/parameters/0/required",
+                "    parameters:\n      - name: item\n        types: [entity]\n        min: 0\n        max: 1\n",
+                "/commands/0/parameters/0/min",
             ),
             (
                 "multiple",
-                "    parameters:\n      - name: item\n        type: entity\n        required: true\n      - name: other\n        type: entity\n        required: true\n",
+                "    parameters:\n      - name: item\n        types: [entity]\n        min: 1\n        max: 1\n      - name: other\n        types: [entity]\n        min: 1\n        max: 1\n",
                 "/commands/0/parameters/1",
             ),
             (
                 "wrong kind",
-                "    parameters:\n      - name: item\n        type: setting\n        required: true\n",
-                "/commands/0/parameters/0/type",
+                "    parameters:\n      - name: item\n        types: [setting]\n        min: 1\n        max: 1\n",
+                "/commands/0/parameters/0/types",
             ),
         ] {
-            let report = report(VALID_FORMAT_2_STORY.replace(
+            let report = report(VALID_FORMAT_3_STORY.replace(
                 "commands:\n",
                 &format!(
                     "commands:\n  - id: {command}\n    name: Inventory command\n{parameters}"
@@ -2514,28 +2524,28 @@ fn take_and_drop_require_one_required_entity_parameter() {
 fn validates_action_effect_container_and_operation_shapes() {
     for (source, expected_code) in [
         (
-            VALID_FORMAT_2_STORY.replace(
+            VALID_FORMAT_3_STORY.replace(
                 "    effects:\n      - operation: advance_time",
                 "    effects: advance_time\n    ignored_effects:\n      - operation: advance_time",
             ),
             "command.effects_type",
         ),
         (
-            VALID_FORMAT_2_STORY.replace(
+            VALID_FORMAT_3_STORY.replace(
                 "      - operation: advance_time\n        minutes: 12",
                 "      - advance_time",
             ),
             "command.effect_type",
         ),
         (
-            VALID_FORMAT_2_STORY.replace(
+            VALID_FORMAT_3_STORY.replace(
                 "      - operation: advance_time\n        minutes: 12",
                 "      - minutes: 12",
             ),
             "command.effect_operation",
         ),
         (
-            VALID_FORMAT_2_STORY.replace("operation: advance_time", "operation: warp_time"),
+            VALID_FORMAT_3_STORY.replace("operation: advance_time", "operation: warp_time"),
             "command.effect_unknown_operation",
         ),
     ] {
@@ -2619,7 +2629,7 @@ fn validates_every_action_effect_payload() {
     ];
 
     for (before, after, expected_code, expected_pointer) in cases {
-        let report = report(VALID_FORMAT_2_STORY.replace(before, after));
+        let report = report(VALID_FORMAT_3_STORY.replace(before, after));
         assert!(
             report.diagnostics.iter().any(|diagnostic| {
                 diagnostic.code == expected_code
@@ -2646,7 +2656,7 @@ fn every_world_effect_uses_the_same_command_and_trigger_validator() {
         "operation: win\n        text: Solved.",
         "operation: lose\n        text: Lost.",
     ];
-    let base = VALID_FORMAT_2_STORY.replace(
+    let base = VALID_FORMAT_3_STORY.replace(
         "  - id: entity.knife\n    initial:",
         "  - id: entity.replacement\n  - id: entity.knife\n    initial:",
     );
@@ -2703,7 +2713,7 @@ fn validates_action_effect_parameter_references() {
     ];
 
     for (before, after, expected_code) in cases {
-        let result = codes(VALID_FORMAT_2_STORY.replace(before, after));
+        let result = codes(VALID_FORMAT_3_STORY.replace(before, after));
         assert!(
             result.contains(&expected_code.to_string()),
             "missing {expected_code}: {result:#?}"
@@ -2713,7 +2723,7 @@ fn validates_action_effect_parameter_references() {
 
 #[test]
 fn action_effects_report_unknown_authored_ids() {
-    let report = report(VALID_FORMAT_2_STORY.replace(
+    let report = report(VALID_FORMAT_3_STORY.replace(
         "        fact_id: fact.knife_has_blood",
         "        fact_id: fact.not_authored",
     ));
@@ -2725,8 +2735,8 @@ fn action_effects_report_unknown_authored_ids() {
 }
 
 #[test]
-fn format_2_no_longer_requires_a_fact_accepting_claim_action() {
-    let report = report(VALID_FORMAT_2_STORY.replace("command.claim", "command.observe"));
+fn format_3_no_longer_requires_a_fact_accepting_claim_action() {
+    let report = report(VALID_FORMAT_3_STORY.replace("command.claim", "command.observe"));
     assert!(report.valid, "{:#?}", report.diagnostics);
 }
 
@@ -2903,7 +2913,7 @@ fn rejects_legacy_trigger_conditions() {
 
 #[test]
 fn validates_optional_facts_and_deduction_inputs() {
-    let source = VALID_FORMAT_2_STORY.to_string();
+    let source = VALID_FORMAT_3_STORY.to_string();
 
     let valid_report = report(source.clone());
     assert!(valid_report.valid, "{:#?}", valid_report.diagnostics);
@@ -2937,7 +2947,7 @@ fn validates_optional_facts_and_deduction_inputs() {
 
 #[test]
 fn validates_fact_reference_types() {
-    let source = VALID_FORMAT_2_STORY.replace(
+    let source = VALID_FORMAT_3_STORY.replace(
         "  - id: character.culprit",
         "  - id: character.culprit\n    knowledge:\n      - fact: entity.knife\n        source: entity.knife",
     );
@@ -2970,7 +2980,7 @@ fn legacy_character_knowledge_and_clue_prose_remain_valid_without_facts() {
 
 #[test]
 fn detects_deduction_cycles_through_inputs() {
-    let source = VALID_FORMAT_2_STORY
+    let source = VALID_FORMAT_3_STORY
         .replace(
             "inputs: [fact.knife_has_blood, fact.knife_connects_to_scene]",
             "inputs: [deduction.loop, fact.knife_connects_to_scene]",
@@ -2984,7 +2994,7 @@ fn detects_deduction_cycles_through_inputs() {
 
 #[test]
 fn warns_for_unrefutable_false_deductions() {
-    let source = VALID_FORMAT_2_STORY.replace("truth: true", "truth: false");
+    let source = VALID_FORMAT_3_STORY.replace("truth: true", "truth: false");
     let report = report(source);
     assert!(report.valid, "{:#?}", report.diagnostics);
     assert!(report
@@ -2995,7 +3005,7 @@ fn warns_for_unrefutable_false_deductions() {
 
 #[test]
 fn validates_deduction_solution_shape() {
-    let source = VALID_FORMAT_2_STORY.replace(
+    let source = VALID_FORMAT_3_STORY.replace(
         "truth: true",
         "truth: true\n    solves:\n      culprit: character.culprit\n      weapon: entity.knife\n      location: setting.study\n      time: \"29:00\"",
     );
