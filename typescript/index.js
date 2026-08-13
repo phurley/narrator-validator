@@ -1,6 +1,6 @@
 import initWasm, { validate_json as validateJson } from './narrator_validator.js'
 
-export { STANDARD_MYSTERY_RULESET } from './rulesets.js'
+export { STANDARD_MYSTERY_RULESET, STANDARD_MYSTERY_RULESETS } from './rulesets.js'
 
 /** @type {Promise<void> | undefined} */
 let initialization

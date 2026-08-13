@@ -57,14 +57,18 @@ await Promise.all([
   copyFile(join(root, 'typescript', 'index.d.ts'), join(output, 'index.d.ts')),
 ])
 
-const standardMysteryRuleset = execFileSync(
-  'cargo',
-  ['run', '--quiet', '--bin', 'export_ruleset'],
-  { cwd: root, encoding: 'utf8' },
-).trim()
+const standardMysteryRulesets = ['1.0.0', '2.0.0'].map((version) =>
+  JSON.parse(
+    execFileSync(
+      'cargo',
+      ['run', '--quiet', '--bin', 'export_ruleset', '--', version],
+      { cwd: root, encoding: 'utf8' },
+    ).trim(),
+  ),
+)
 await writeFile(
   join(output, 'rulesets.js'),
-  `export const STANDARD_MYSTERY_RULESET = Object.freeze(${standardMysteryRuleset})\n`,
+  `export const STANDARD_MYSTERY_RULESETS = Object.freeze(${JSON.stringify(standardMysteryRulesets)}.map(Object.freeze))\nexport const STANDARD_MYSTERY_RULESET = STANDARD_MYSTERY_RULESETS.at(-1)\n`,
 )
 
 const metadata = JSON.parse(

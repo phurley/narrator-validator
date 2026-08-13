@@ -52,6 +52,10 @@ export interface RulesetCommandParameter {
   types: Array<'character' | 'entity' | 'setting' | 'deduction' | 'event'>
   min: number
   max: number
+  candidates?: {
+    from: Array<'all' | 'current_location' | 'inventory' | 'reachable' | 'known' | 'established'>
+    capabilities?: Array<'portable'>
+  }
 }
 
 export interface RulesetCommand {
@@ -64,11 +68,12 @@ export interface RulesetCommand {
 
 export interface StandardMysteryRuleset {
   id: 'ruleset.standard_mystery'
-  version: '1.0.0'
+  version: '1.0.0' | '2.0.0'
   commands: RulesetCommand[]
 }
 
 export const STANDARD_MYSTERY_RULESET: StandardMysteryRuleset
+export const STANDARD_MYSTERY_RULESETS: readonly StandardMysteryRuleset[]
 
 /**
  * Load the validator WebAssembly module.

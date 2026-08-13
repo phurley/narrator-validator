@@ -6,7 +6,8 @@ use serde_yaml::{Mapping, Value};
 
 use crate::{
     resolve_ruleset, Diagnostic, Position, RelatedLocation, RulesetReference, Severity, SourceFile,
-    SourceRange, ValidationReport, STORY_FORMAT_VERSION, VALIDATOR_VERSION,
+    SourceRange, ValidationReport, STANDARD_MYSTERY_RULESET_ID, STANDARD_MYSTERY_RULESET_VERSION_2,
+    STORY_FORMAT_VERSION, VALIDATOR_VERSION,
 };
 
 const MAX_REPOSITORY_FILES: usize = 512;
@@ -87,6 +88,16 @@ enum CommandParameterType {
     Event,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum CandidateSource {
+    All,
+    CurrentLocation,
+    Inventory,
+    Reachable,
+    Known,
+    Established,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CommandParameterShape {
     types: Vec<CommandParameterType>,
@@ -123,6 +134,31 @@ impl CommandParameterType {
             Self::Setting => Kind::Setting,
             Self::Deduction => Kind::Deduction,
             Self::Event => Kind::Event,
+        }
+    }
+}
+
+impl CandidateSource {
+    fn parse(value: &str) -> Option<Self> {
+        match value {
+            "all" => Some(Self::All),
+            "current_location" => Some(Self::CurrentLocation),
+            "inventory" => Some(Self::Inventory),
+            "reachable" => Some(Self::Reachable),
+            "known" => Some(Self::Known),
+            "established" => Some(Self::Established),
+            _ => None,
+        }
+    }
+
+    fn produced_types(self) -> &'static [CommandParameterType] {
+        use CommandParameterType::{Character, Deduction, Entity, Event, Setting};
+        match self {
+            Self::All | Self::Known => &[Character, Entity, Setting, Deduction, Event],
+            Self::CurrentLocation => &[Setting, Entity, Character],
+            Self::Inventory => &[Entity],
+            Self::Reachable => &[Setting],
+            Self::Established => &[Deduction],
         }
     }
 }
@@ -251,6 +287,12 @@ impl<'a> Validator<'a> {
         self.format_version
             .as_ref()
             .is_some_and(|version| version.major == 3)
+    }
+
+    fn is_format_3_1_or_later(&self) -> bool {
+        self.format_version
+            .as_ref()
+            .is_some_and(|version| version.major == 3 && version.minor >= 1)
     }
 
     fn run(&mut self) {
@@ -1282,6 +1324,22 @@ impl<'a> Validator<'a> {
                 return;
             }
         };
+        if reference.id == STANDARD_MYSTERY_RULESET_ID
+            && reference.version == STANDARD_MYSTERY_RULESET_VERSION_2
+            && !self.is_format_3_1_or_later()
+        {
+            self.push(
+                Severity::Error,
+                "ruleset.format_incompatible",
+                "ruleset.standard_mystery@2.0.0 declares format-3.1 candidate semantics; set `case.format_version` to \"3.1.0\" or select ruleset version \"1.0.0\""
+                    .to_string(),
+                &case.path,
+                Some(format!("{pointer}/version")),
+                None,
+                Some(case.id.clone()),
+            );
+            return;
+        }
         match resolve_ruleset(&reference) {
             Ok(_) => self.ruleset = Some(reference),
             Err(error) => self.push(
@@ -1560,8 +1618,26 @@ impl<'a> Validator<'a> {
                 "author_notes",
             ],
         );
-        self.validate_item_fields(
-            characters,
+        let character_fields: &[&str] = if self.is_format_3_1_or_later() {
+            &[
+                "id",
+                "tag_id",
+                "name",
+                "voice_id",
+                "role",
+                "age",
+                "occupation",
+                "description",
+                "initial",
+                "presence",
+                "portrayal",
+                "testimony",
+                "narrator_guidance",
+                "knowledge",
+                "facts",
+                "author_notes",
+            ]
+        } else {
             &[
                 "id",
                 "tag_id",
@@ -1577,8 +1653,9 @@ impl<'a> Validator<'a> {
                 "knowledge",
                 "facts",
                 "author_notes",
-            ],
-        );
+            ]
+        };
+        self.validate_item_fields(characters, character_fields);
         self.validate_item_fields(
             entities,
             &[
@@ -1748,6 +1825,40 @@ impl<'a> Validator<'a> {
                     &format!("{}/initial", entity.pointer),
                     Some(&entity.id),
                 );
+            }
+        }
+        if self.is_format_3_1_or_later() {
+            for character in characters {
+                if let Some(initial) = character
+                    .mapping
+                    .get(Value::String("initial".to_string()))
+                    .and_then(Value::as_mapping)
+                {
+                    self.validate_mapping_fields(
+                        initial,
+                        &["location"],
+                        "character.initial",
+                        &character.path,
+                        &character.source,
+                        &format!("{}/initial", character.pointer),
+                        Some(&character.id),
+                    );
+                }
+                if let Some(presence) = character
+                    .mapping
+                    .get(Value::String("presence".to_string()))
+                    .and_then(Value::as_mapping)
+                {
+                    self.validate_mapping_fields(
+                        presence,
+                        &["requires"],
+                        "character.presence",
+                        &character.path,
+                        &character.source,
+                        &format!("{}/presence", character.pointer),
+                        Some(&character.id),
+                    );
+                }
             }
         }
         for deduction in deductions {
@@ -2556,6 +2667,9 @@ impl<'a> Validator<'a> {
             self.validate_character_voice_id(character);
             self.validate_character_portrayal(character);
             self.validate_character_testimony(character);
+            if self.is_format_3_1_or_later() {
+                self.validate_character_placement(character);
+            }
 
             if let Some(knowledge) = character
                 .mapping
@@ -2650,6 +2764,118 @@ impl<'a> Validator<'a> {
                     }
                 }
             }
+        }
+    }
+
+    fn validate_character_placement(&mut self, character: &Item) {
+        let initial_location = match character.mapping.get(Value::String("initial".to_string())) {
+            None => None,
+            Some(initial) => {
+                let pointer = format!("{}/initial", character.pointer);
+                let Some(initial) = initial.as_mapping() else {
+                    self.push(
+                        Severity::Error,
+                        "character.initial_type",
+                        "character `initial` must be a mapping containing `location`".to_string(),
+                        &character.path,
+                        Some(pointer),
+                        None,
+                        Some(character.id.clone()),
+                    );
+                    return;
+                };
+                match initial.get(Value::String("location".to_string())) {
+                    Some(Value::String(location)) if !location.trim().is_empty() => {
+                        Some(location.as_str())
+                    }
+                    Some(_) => {
+                        self.push(
+                            Severity::Error,
+                            "character.location_type",
+                            "character `initial.location` must be a non-empty setting ID"
+                                .to_string(),
+                            &character.path,
+                            Some(format!("{pointer}/location")),
+                            None,
+                            Some(character.id.clone()),
+                        );
+                        None
+                    }
+                    None => {
+                        self.push(
+                            Severity::Error,
+                            "character.location_missing",
+                            "character `initial` must declare a setting `location`".to_string(),
+                            &character.path,
+                            Some(format!("{pointer}/location")),
+                            None,
+                            Some(character.id.clone()),
+                        );
+                        None
+                    }
+                }
+            }
+        };
+
+        let Some(presence) = character.mapping.get(Value::String("presence".to_string())) else {
+            return;
+        };
+        let pointer = format!("{}/presence", character.pointer);
+        if initial_location.is_none() {
+            self.push(
+                Severity::Error,
+                "character.presence_without_location",
+                "character `presence` requires an authoritative `initial.location`; add a setting location or remove the presence gate"
+                    .to_string(),
+                &character.path,
+                Some(pointer.clone()),
+                None,
+                Some(character.id.clone()),
+            );
+        }
+        let Some(presence) = presence.as_mapping() else {
+            self.push(
+                Severity::Error,
+                "character.presence_type",
+                "character `presence` must be a mapping containing `requires`".to_string(),
+                &character.path,
+                Some(pointer),
+                None,
+                Some(character.id.clone()),
+            );
+            return;
+        };
+        let requires_pointer = format!("{pointer}/requires");
+        match presence.get(Value::String("requires".to_string())) {
+            Some(Value::String(id)) if !id.trim().is_empty() => {}
+            Some(Value::Sequence(values)) if !values.is_empty() => {
+                for (index, value) in values.iter().enumerate() {
+                    if !value
+                        .as_str()
+                        .is_some_and(|requirement| !requirement.trim().is_empty())
+                    {
+                        self.push(
+                            Severity::Error,
+                            "character.presence_requirement_type",
+                            "character presence requirements must be non-empty IDs".to_string(),
+                            &character.path,
+                            Some(format!("{requires_pointer}/{index}")),
+                            None,
+                            Some(character.id.clone()),
+                        );
+                    }
+                }
+            }
+            _ => self.push(
+                Severity::Error,
+                "character.presence_requires_type",
+                "character `presence.requires` must be one persistent requirement ID or a non-empty list of unique IDs"
+                    .to_string(),
+                &character.path,
+                Some(requires_pointer),
+                None,
+                Some(character.id.clone()),
+            ),
         }
     }
 
@@ -3857,6 +4083,17 @@ impl<'a> Validator<'a> {
                         Some(command.id.clone()),
                     );
                 }
+                if self.is_format_3_1_or_later() {
+                    self.validate_mapping_fields(
+                        parameter,
+                        &["name", "description", "types", "min", "max", "candidates"],
+                        "command.parameter",
+                        &command.path,
+                        &command.source,
+                        &pointer,
+                        Some(&command.id),
+                    );
+                }
                 if parameter.contains_key(Value::String("accepts".to_string())) {
                     self.push(
                         Severity::Error,
@@ -4043,9 +4280,230 @@ impl<'a> Validator<'a> {
                         Some(command.id.clone()),
                     );
                 }
+                self.validate_command_parameter_candidates(command, parameter, &pointer, &types);
                 (!types.is_empty()).then_some(CommandParameterShape { types, min, max })
             })
             .collect()
+    }
+
+    fn validate_command_parameter_candidates(
+        &mut self,
+        command: &Item,
+        parameter: &Mapping,
+        parameter_pointer: &str,
+        parameter_types: &[CommandParameterType],
+    ) {
+        let Some(candidates) = parameter.get(Value::String("candidates".to_string())) else {
+            return;
+        };
+        let pointer = format!("{parameter_pointer}/candidates");
+        if !self.is_format_3_1_or_later() {
+            self.push(
+                Severity::Error,
+                "command.parameter_candidates_version",
+                "declarative command candidates require story format 3.1.0 or later".to_string(),
+                &command.path,
+                Some(pointer),
+                None,
+                Some(command.id.clone()),
+            );
+            return;
+        }
+        let Some(candidates) = candidates.as_mapping() else {
+            self.push(
+                Severity::Error,
+                "command.candidates_type",
+                "command parameter `candidates` must be a mapping".to_string(),
+                &command.path,
+                Some(pointer),
+                None,
+                Some(command.id.clone()),
+            );
+            return;
+        };
+        self.validate_mapping_fields(
+            candidates,
+            &["from", "capabilities"],
+            "command.candidates",
+            &command.path,
+            &command.source,
+            &pointer,
+            Some(&command.id),
+        );
+
+        let from_pointer = format!("{pointer}/from");
+        let mut parsed_sources = Vec::new();
+        match candidates.get(Value::String("from".to_string())) {
+            Some(Value::Sequence(sources)) if !sources.is_empty() => {
+                let mut seen = HashSet::new();
+                for (index, source) in sources.iter().enumerate() {
+                    let item_pointer = format!("{from_pointer}/{index}");
+                    let Some(source_name) = source.as_str() else {
+                        self.push(
+                            Severity::Error,
+                            "command.candidates_source_unknown",
+                            "candidate sources must be `all`, `current_location`, `inventory`, `reachable`, `known`, or `established`"
+                                .to_string(),
+                            &command.path,
+                            Some(item_pointer),
+                            None,
+                            Some(command.id.clone()),
+                        );
+                        continue;
+                    };
+                    let Some(source) = CandidateSource::parse(source_name) else {
+                        self.push(
+                            Severity::Error,
+                            "command.candidates_source_unknown",
+                            format!("unknown candidate source `{source_name}`; use `all`, `current_location`, `inventory`, `reachable`, `known`, or `established`"),
+                            &command.path,
+                            Some(item_pointer),
+                            None,
+                            Some(command.id.clone()),
+                        );
+                        continue;
+                    };
+                    if !seen.insert(source) {
+                        self.push(
+                            Severity::Error,
+                            "command.candidates_source_duplicate",
+                            format!("candidate source `{source_name}` occurs more than once"),
+                            &command.path,
+                            Some(item_pointer),
+                            None,
+                            Some(command.id.clone()),
+                        );
+                        continue;
+                    }
+                    if !parameter_types.is_empty()
+                        && !source
+                            .produced_types()
+                            .iter()
+                            .any(|candidate_type| parameter_types.contains(candidate_type))
+                    {
+                        self.push(
+                            Severity::Error,
+                            "command.candidates_source_incompatible",
+                            format!(
+                                "candidate source `{source_name}` cannot produce any of this parameter's allowed types"
+                            ),
+                            &command.path,
+                            Some(item_pointer),
+                            None,
+                            Some(command.id.clone()),
+                        );
+                    }
+                    parsed_sources.push(source);
+                }
+            }
+            Some(Value::Sequence(_)) | None => self.push(
+                Severity::Error,
+                "command.candidates_from_empty",
+                "command parameter `candidates.from` must be a non-empty ordered set".to_string(),
+                &command.path,
+                Some(from_pointer),
+                None,
+                Some(command.id.clone()),
+            ),
+            Some(_) => self.push(
+                Severity::Error,
+                "command.candidates_from_type",
+                "command parameter `candidates.from` must be a non-empty sequence".to_string(),
+                &command.path,
+                Some(from_pointer),
+                None,
+                Some(command.id.clone()),
+            ),
+        }
+
+        let Some(capabilities) = candidates.get(Value::String("capabilities".to_string())) else {
+            return;
+        };
+        let capabilities_pointer = format!("{pointer}/capabilities");
+        let Value::Sequence(capabilities) = capabilities else {
+            self.push(
+                Severity::Error,
+                "command.candidates_capabilities_type",
+                "command parameter candidate `capabilities` must be a sequence".to_string(),
+                &command.path,
+                Some(capabilities_pointer),
+                None,
+                Some(command.id.clone()),
+            );
+            return;
+        };
+        if capabilities.is_empty() {
+            self.push(
+                Severity::Error,
+                "command.candidates_capabilities_empty",
+                "command parameter candidate `capabilities` must be omitted or non-empty"
+                    .to_string(),
+                &command.path,
+                Some(capabilities_pointer),
+                None,
+                Some(command.id.clone()),
+            );
+            return;
+        }
+        let mut seen = HashSet::new();
+        for (index, capability) in capabilities.iter().enumerate() {
+            let item_pointer = format!("{capabilities_pointer}/{index}");
+            let Some(capability) = capability.as_str() else {
+                self.push(
+                    Severity::Error,
+                    "command.candidates_capability_unknown",
+                    "candidate capabilities must be `portable`".to_string(),
+                    &command.path,
+                    Some(item_pointer),
+                    None,
+                    Some(command.id.clone()),
+                );
+                continue;
+            };
+            if capability != "portable" {
+                self.push(
+                    Severity::Error,
+                    "command.candidates_capability_unknown",
+                    format!("unknown candidate capability `{capability}`; format 3.1 supports only `portable`"),
+                    &command.path,
+                    Some(item_pointer),
+                    None,
+                    Some(command.id.clone()),
+                );
+                continue;
+            }
+            if !seen.insert(capability) {
+                self.push(
+                    Severity::Error,
+                    "command.candidates_capability_duplicate",
+                    "candidate capability `portable` occurs more than once".to_string(),
+                    &command.path,
+                    Some(item_pointer),
+                    None,
+                    Some(command.id.clone()),
+                );
+                continue;
+            }
+            let type_compatible = parameter_types.contains(&CommandParameterType::Entity);
+            let source_compatible = parsed_sources.is_empty()
+                || parsed_sources.iter().any(|source| {
+                    source
+                        .produced_types()
+                        .contains(&CommandParameterType::Entity)
+                });
+            if !type_compatible || !source_compatible {
+                self.push(
+                    Severity::Error,
+                    "command.candidates_capability_incompatible",
+                    "candidate capability `portable` requires an entity parameter and a source that can produce entities"
+                        .to_string(),
+                    &command.path,
+                    Some(item_pointer),
+                    None,
+                    Some(command.id.clone()),
+                );
+            }
+        }
     }
 
     fn validate_runtime_command_signature(
@@ -6072,6 +6530,7 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
             Some(FACT_REQUIREMENTS)
         }
         _ if is_entity_visibility_requirement_pointer(pointer) => Some(PERSISTENT_REQUIREMENTS),
+        _ if is_character_presence_requirement_pointer(pointer) => Some(PERSISTENT_REQUIREMENTS),
         _ if is_point_requirement_pointer(pointer) => Some(PERSISTENT_REQUIREMENTS),
         _ if is_win_state_requirement_pointer(pointer) => Some(PERSISTENT_REQUIREMENTS),
         _ if is_character_testimony_list_pointer(pointer, "requires") => Some(FACT_REQUIREMENTS),
@@ -6132,6 +6591,23 @@ fn is_entity_visibility_requirement_pointer(pointer: &str) -> bool {
         parts.as_slice(),
         ["entities", entity_index, "visibility", "requires", requirement_index]
             if entity_index.parse::<usize>().is_ok()
+                && requirement_index.parse::<usize>().is_ok()
+    )
+}
+
+fn is_character_presence_requirement_pointer(pointer: &str) -> bool {
+    let parts = pointer
+        .trim_start_matches('/')
+        .split('/')
+        .collect::<Vec<_>>();
+    matches!(
+        parts.as_slice(),
+        ["characters", character_index, "presence", "requires"]
+            if character_index.parse::<usize>().is_ok()
+    ) || matches!(
+        parts.as_slice(),
+        ["characters", character_index, "presence", "requires", requirement_index]
+            if character_index.parse::<usize>().is_ok()
                 && requirement_index.parse::<usize>().is_ok()
     )
 }

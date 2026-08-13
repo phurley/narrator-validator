@@ -376,7 +376,7 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_3_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_3_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "1.0.0");
+    assert_eq!(report.validator_version, "1.1.0");
     assert_eq!(report.format_version.as_deref(), Some("3.0.0"));
     assert!(report.diagnostics.is_empty());
 }
@@ -399,6 +399,28 @@ fn standard_ruleset_commands_join_global_validation_and_allow_extensions() {
 }
 
 #[test]
+fn standard_ruleset_2_0_validates_with_format_3_1() {
+    let source = with_standard_ruleset(VALID_FORMAT_3_STORY)
+        .replace("format_version: \"3.0.0\"", "format_version: \"3.1.0\"")
+        .replace("version: \"1.0.0\"", "version: \"2.0.0\"")
+        .replace("  - id: command.claim\n    name: Claim\n    description: Learn that the knife is present.\n    effects:\n      - operation: learn_fact\n        fact_id: fact.knife_is_present\n", "")
+        .replace("    subject: command.claim", "    subject: command.move");
+    let report = report(source);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+}
+
+#[test]
+fn standard_ruleset_2_0_requires_format_3_1() {
+    let source = with_standard_ruleset(VALID_FORMAT_3_STORY)
+        .replace("version: \"1.0.0\"", "version: \"2.0.0\"");
+    let report = report(source);
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "ruleset.format_incompatible"
+            && diagnostic.pointer.as_deref() == Some("/case/ruleset/version")
+    }));
+}
+
+#[test]
 fn rejects_unknown_and_incompatible_rulesets_with_version_guidance() {
     let unknown = report(
         with_standard_ruleset(VALID_FORMAT_3_STORY)
@@ -413,14 +435,14 @@ fn rejects_unknown_and_incompatible_rulesets_with_version_guidance() {
 
     let incompatible = report(
         with_standard_ruleset(VALID_FORMAT_3_STORY)
-            .replace("version: \"1.0.0\"", "version: \"2.0.0\""),
+            .replace("version: \"1.0.0\"", "version: \"9.0.0\""),
     );
     let diagnostic = incompatible
         .diagnostics
         .iter()
         .find(|diagnostic| diagnostic.code == "ruleset.unsupported")
         .expect("incompatible ruleset diagnostic");
-    assert!(diagnostic.message.contains("use version 1.0.0"));
+    assert!(diagnostic.message.contains("1.0.0 or 2.0.0"));
 }
 
 #[test]
@@ -2160,6 +2182,132 @@ fn validates_entity_placement_visibility_and_portability() {
 }
 
 #[test]
+fn validates_format_3_1_character_placement_and_presence() {
+    let source = VALID_FORMAT_3_STORY
+        .replace("\"3.0.0\"", "\"3.1.0\"")
+        .replace(
+            "  - id: character.culprit\n    description: A suspect with a carefully guarded secret.",
+            "  - id: character.culprit\n    description: A suspect with a carefully guarded secret.\n    initial:\n      location: setting.study\n    presence:\n      requires: [fact.knife_is_present, flag.knife_examined, trigger.investigate_knife]",
+        );
+    let report = report(source);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert_eq!(report.format_version.as_deref(), Some("3.1.0"));
+}
+
+#[test]
+fn keeps_character_placement_out_of_the_format_3_0_contract() {
+    let source = VALID_FORMAT_3_STORY.replace(
+        "  - id: character.culprit\n    description: A suspect with a carefully guarded secret.",
+        "  - id: character.culprit\n    description: A suspect with a carefully guarded secret.\n    initial:\n      location: setting.study",
+    );
+    let result = report(source);
+    assert!(result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "character.unknown_field"
+            && diagnostic.pointer.as_deref() == Some("/characters/1/initial")
+    }));
+}
+
+#[test]
+fn rejects_invalid_character_placement_and_presence_at_exact_pointers() {
+    let format_3_1 = VALID_FORMAT_3_STORY.replace("\"3.0.0\"", "\"3.1.0\"");
+    let cases = [
+        (
+            "    initial: setting.study",
+            "character.initial_type",
+            "/characters/1/initial",
+        ),
+        (
+            "    initial:\n      location: 42",
+            "character.location_type",
+            "/characters/1/initial/location",
+        ),
+        (
+            "    initial:\n      location: entity.knife",
+            "reference.wrong_type",
+            "/characters/1/initial/location",
+        ),
+        (
+            "    initial:\n      location: setting.study\n      container: setting.foyer",
+            "character.initial.unknown_field",
+            "/characters/1/initial/container",
+        ),
+        (
+            "    initial:\n      location: setting.study\n    presence: visible",
+            "character.presence_type",
+            "/characters/1/presence",
+        ),
+        (
+            "    initial:\n      location: setting.study\n    presence:\n      requires: []",
+            "character.presence_requires_type",
+            "/characters/1/presence/requires",
+        ),
+        (
+            "    initial:\n      location: setting.study\n    presence:\n      requires: [flag.knife_examined, 42]",
+            "character.presence_requirement_type",
+            "/characters/1/presence/requires/1",
+        ),
+        (
+            "    initial:\n      location: setting.study\n    presence:\n      requires: command.investigate",
+            "reference.wrong_type",
+            "/characters/1/presence/requires",
+        ),
+        (
+            "    initial:\n      location: setting.study\n    presence:\n      when: flag.knife_examined",
+            "character.presence.unknown_field",
+            "/characters/1/presence/when",
+        ),
+        (
+            "    presence:\n      requires: flag.knife_examined",
+            "character.presence_without_location",
+            "/characters/1/presence",
+        ),
+    ];
+
+    for (addition, code, pointer) in cases {
+        let source = format_3_1.replace(
+            "  - id: character.culprit\n    description: A suspect with a carefully guarded secret.",
+            &format!(
+                "  - id: character.culprit\n    description: A suspect with a carefully guarded secret.\n{addition}"
+            ),
+        );
+        let report = report(source);
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code && diagnostic.pointer.as_deref() == Some(pointer)
+            }),
+            "missing {code} at {pointer}: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
+fn rejects_unknown_and_duplicate_character_presence_requirements() {
+    let source = VALID_FORMAT_3_STORY
+        .replace("\"3.0.0\"", "\"3.1.0\"")
+        .replace(
+            "  - id: character.culprit\n    description: A suspect with a carefully guarded secret.",
+            "  - id: character.culprit\n    description: A suspect with a carefully guarded secret.\n    initial:\n      location: setting.study\n    presence:\n      requires: [flag.not_authored, flag.knife_examined, flag.knife_examined]",
+        );
+    let report = report(source);
+    for (code, pointer) in [
+        ("reference.unknown", "/characters/1/presence/requires/0"),
+        (
+            "list.duplicate_reference",
+            "/characters/1/presence/requires/2",
+        ),
+    ] {
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code && diagnostic.pointer.as_deref() == Some(pointer)
+            }),
+            "missing {code} at {pointer}: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
 fn rejects_invalid_entity_physical_and_visibility_shapes_at_exact_pointers() {
     for (replacement, code, pointer) in [
         (
@@ -2455,6 +2603,176 @@ fn validates_union_parameter_kinds_and_cardinality() {
     ] {
         assert!(codes(source).contains(&code.to_string()), "missing {code}");
     }
+}
+
+#[test]
+fn validates_format_3_1_declarative_command_candidates() {
+    let source = VALID_FORMAT_3_STORY
+        .replace("\"3.0.0\"", "\"3.1.0\"")
+        .replace(
+            "      - name: target\n        types: [entity]\n        min: 1\n        max: 1",
+            "      - name: target\n        types: [entity]\n        min: 1\n        max: 1\n        candidates:\n          from: [current_location, inventory, known]\n          capabilities: [portable]",
+        )
+        .replace(
+            "      - name: destination\n        types: [setting]\n        min: 0\n        max: 1",
+            "      - name: destination\n        types: [setting]\n        min: 0\n        max: 1\n        candidates:\n          from: [reachable]",
+        )
+        .replace(
+            "      - name: companion\n        types: [character]\n        min: 0\n        max: 1",
+            "      - name: companion\n        types: [character]\n        min: 0\n        max: 1\n        candidates:\n          from: [all, known]",
+        )
+        .replace(
+            "      - name: conclusion\n        types: [deduction]\n        min: 0\n        max: 1",
+            "      - name: conclusion\n        types: [deduction]\n        min: 0\n        max: 1\n        candidates:\n          from: [established]",
+        )
+        .replace(
+            "      - name: incident\n        types: [event]\n        min: 0\n        max: 1",
+            "      - name: incident\n        types: [event]\n        min: 0\n        max: 1\n        candidates:\n          from: [known]",
+        );
+    let report = report(source);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+}
+
+#[test]
+fn keeps_declarative_command_candidates_out_of_the_format_3_0_contract() {
+    let source = VALID_FORMAT_3_STORY.replace(
+        "      - name: target\n        types: [entity]\n        min: 1\n        max: 1",
+        "      - name: target\n        types: [entity]\n        min: 1\n        max: 1\n        candidates:\n          from: [current_location]",
+    );
+    let report = report(source);
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "command.parameter_candidates_version"
+            && diagnostic.pointer.as_deref() == Some("/commands/1/parameters/0/candidates")
+    }));
+}
+
+#[test]
+fn rejects_invalid_candidate_shapes_names_and_duplicates_at_exact_pointers() {
+    let format_3_1 = VALID_FORMAT_3_STORY.replace("\"3.0.0\"", "\"3.1.0\"");
+    let cases = [
+        (
+            "        candidates: current_location",
+            "command.candidates_type",
+            "/commands/1/parameters/0/candidates",
+        ),
+        (
+            "        candidates:\n          from: current_location",
+            "command.candidates_from_type",
+            "/commands/1/parameters/0/candidates/from",
+        ),
+        (
+            "        candidates:\n          from: []",
+            "command.candidates_from_empty",
+            "/commands/1/parameters/0/candidates/from",
+        ),
+        (
+            "        candidates:\n          from: [nearby]",
+            "command.candidates_source_unknown",
+            "/commands/1/parameters/0/candidates/from/0",
+        ),
+        (
+            "        candidates:\n          from: [current_location, current_location]",
+            "command.candidates_source_duplicate",
+            "/commands/1/parameters/0/candidates/from/1",
+        ),
+        (
+            "        candidates:\n          from: [current_location]\n          capabilities: portable",
+            "command.candidates_capabilities_type",
+            "/commands/1/parameters/0/candidates/capabilities",
+        ),
+        (
+            "        candidates:\n          from: [current_location]\n          capabilities: []",
+            "command.candidates_capabilities_empty",
+            "/commands/1/parameters/0/candidates/capabilities",
+        ),
+        (
+            "        candidates:\n          from: [current_location]\n          capabilities: [searchable]",
+            "command.candidates_capability_unknown",
+            "/commands/1/parameters/0/candidates/capabilities/0",
+        ),
+        (
+            "        candidates:\n          from: [current_location]\n          capabilities: [portable, portable]",
+            "command.candidates_capability_duplicate",
+            "/commands/1/parameters/0/candidates/capabilities/1",
+        ),
+        (
+            "        candidates:\n          from: [current_location]\n          where: visible",
+            "command.candidates.unknown_field",
+            "/commands/1/parameters/0/candidates/where",
+        ),
+        (
+            "        canddiates:\n          from: [current_location]",
+            "command.parameter.unknown_field",
+            "/commands/1/parameters/0/canddiates",
+        ),
+    ];
+
+    for (addition, code, pointer) in cases {
+        let source = format_3_1.replace(
+            "      - name: target\n        types: [entity]\n        min: 1\n        max: 1",
+            &format!(
+                "      - name: target\n        types: [entity]\n        min: 1\n        max: 1\n{addition}"
+            ),
+        );
+        let report = report(source);
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code && diagnostic.pointer.as_deref() == Some(pointer)
+            }),
+            "missing {code} at {pointer}: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
+fn rejects_candidate_sources_and_capabilities_incompatible_with_parameter_types() {
+    let format_3_1 = VALID_FORMAT_3_STORY.replace("\"3.0.0\"", "\"3.1.0\"");
+    for (types, source) in [
+        ("event", "current_location"),
+        ("character", "inventory"),
+        ("entity", "reachable"),
+        ("event", "established"),
+    ] {
+        let source = format_3_1.replace(
+            "      - name: target\n        types: [entity]\n        min: 1\n        max: 1",
+            &format!(
+                "      - name: target\n        types: [{types}]\n        min: 1\n        max: 1\n        candidates:\n          from: [{source}]"
+            ),
+        );
+        let report = report(source);
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "command.candidates_source_incompatible"
+                    && diagnostic.pointer.as_deref()
+                        == Some("/commands/1/parameters/0/candidates/from/0")
+            }),
+            "missing source compatibility diagnostic: {:#?}",
+            report.diagnostics
+        );
+    }
+
+    let source = format_3_1.replace(
+        "      - name: target\n        types: [entity]\n        min: 1\n        max: 1",
+        "      - name: target\n        types: [setting]\n        min: 1\n        max: 1\n        candidates:\n          from: [current_location]\n          capabilities: [portable]",
+    );
+    let setting_result = report(source);
+    assert!(setting_result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "command.candidates_capability_incompatible"
+            && diagnostic.pointer.as_deref()
+                == Some("/commands/1/parameters/0/candidates/capabilities/0")
+    }));
+
+    let source = format_3_1.replace(
+        "      - name: target\n        types: [entity]\n        min: 1\n        max: 1",
+        "      - name: target\n        types: [entity, setting]\n        min: 1\n        max: 1\n        candidates:\n          from: [reachable]\n          capabilities: [portable]",
+    );
+    let source_result = report(source);
+    assert!(source_result.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "command.candidates_capability_incompatible"
+            && diagnostic.pointer.as_deref()
+                == Some("/commands/1/parameters/0/candidates/capabilities/0")
+    }));
 }
 
 #[test]
