@@ -322,7 +322,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn released_standard_catalog_is_stable_and_claim_free() {
+    fn released_standard_catalog_is_byte_for_byte_stable_and_claim_free() {
         let resolved = resolve_ruleset(&RulesetReference {
             id: STANDARD_MYSTERY_RULESET_ID.to_string(),
             version: "1.0.0".to_string(),
@@ -352,6 +352,20 @@ mod tests {
         );
         assert!(!resolved.commands_yaml.contains("command.claim"));
         assert!(!resolved.commands_yaml.contains("candidates:"));
+
+        // This length and FNV-1a fingerprint were recorded from the released
+        // 1.0.0 catalog before the 2.0.0 catalog was added. Together they make
+        // an accidental edit fail without duplicating the complete YAML in the
+        // test. A new command contract belongs in a new ruleset version.
+        let fingerprint = resolved
+            .commands_yaml
+            .as_bytes()
+            .iter()
+            .fold(0xcbf29ce484222325_u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+            });
+        assert_eq!(resolved.commands_yaml.len(), 3_164);
+        assert_eq!(fingerprint, 0xbcd9c7cdae74ca72);
     }
 
     #[test]
