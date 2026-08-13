@@ -123,7 +123,7 @@ This repository includes a composite action:
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: phurley/narrator-validator@v1.0.0
+- uses: phurley/narrator-validator@v1.1.0
 ```
 
 It builds the pinned validator revision and emits native GitHub annotations.
@@ -131,14 +131,14 @@ It builds the pinned validator revision and emits native GitHub annotations.
 ## Story format versions
 
 Every story declares a quoted semantic version at `case.format_version`.
-This validator authors format `3.0.0`. Format 3 minor and patch releases remain
+This validator authors format `3.1.0`. Format 3 minor and patch releases remain
 compatible within the major format. The format-1 validation path remains for
 legacy repositories, while format-2 repositories stop with focused migration
 guidance before the strict format-3 schema runs.
 
-Validator `1.0.0` is the coordinated release for this contract. See
+Validator `1.1.0` is the coordinated release for the format-3.1 contract. See
 [MIGRATION.md](MIGRATION.md) for the complete format-2 migration and the
-[`v1.0.0` release](https://github.com/phurley/narrator-validator/releases/tag/v1.0.0)
+[`v1.1.0` release](https://github.com/phurley/narrator-validator/releases/tag/v1.1.0)
 for the exact consumer commit matrix.
 
 Legacy integer versions, missing versions, and versions outside the supported
@@ -155,10 +155,10 @@ owns only the world settings and routes. A case declares typed player limits:
 ```yaml
 case:
   id: case.last_tide
-  format_version: "3.0.0"
+  format_version: "3.1.0"
   ruleset:
     id: ruleset.standard_mystery
-    version: "1.0.0"
+    version: "2.0.0"
   players:
     min: 2
     max: 6
@@ -187,11 +187,13 @@ material with no runtime projection.
 
 ## Versioned mystery ruleset
 
-`case.ruleset` selects an exact immutable command catalog. The supported
-`ruleset.standard_mystery@1.0.0` catalog supplies Move, Open, Search, Examine,
+`case.ruleset` selects an exact immutable command catalog. Both
+`ruleset.standard_mystery@1.0.0` and `@2.0.0` supply Move, Open, Search, Examine,
 Take, Drop, Use, Question, Deduce, and Solve with canonical ordered semantic
-parameter groups. It deliberately omits `command.claim`: facts enter notebooks
-automatically, while Deduce remains the deliberate notebook action.
+parameter groups. Version 2 adds explicit candidate sources and portability
+filters; version 1 remains immutable for format-3.0 stories. Both deliberately
+omit `command.claim`: facts enter notebooks automatically, while Deduce remains
+the deliberate notebook action.
 
 Ruleset commands participate in global ID and reference validation, including
 physical bindings in `deck.yaml`, without being copied into `commands.yaml`.
@@ -212,7 +214,7 @@ compact examples show every item kind and its canonical fields:
 
 ```yaml
 # case.yaml
-case: { id: case.example, format_version: "3.0.0", players: { min: 1, max: 4 }, initial_time: "20:00", entry_settings: [setting.study], exit_settings: [setting.study] }
+case: { id: case.example, format_version: "3.1.0", players: { min: 1, max: 4 }, initial_time: "20:00", entry_settings: [setting.study], exit_settings: [setting.study] }
 solution: { culprit: character.suspect, weapon: entity.knife, location: setting.study, time: "20:15", deduction: deduction.solution }
 
 # settings.yaml
@@ -226,6 +228,8 @@ characters:
   - id: character.suspect
     name: Alex Vale
     description: A composed guest in a rain-dark coat.
+    initial: { location: setting.study }
+    presence: { requires: flag.power_out }
     narrator_guidance: { goal: Keep the missing hour private. }
     testimony: [{ id: testimony.alibi, text: Alex says they remained in the lounge., requires: [command.question, character.suspect], reveals: [fact.alibi] }]
     facts: [{ id: fact.alibi, statement: Alex claimed to remain in the lounge. }]
@@ -332,6 +336,29 @@ nested in another entity. Actions determine what players can do, so the entity
 contract intentionally has no `searchable`, `investigatable`, `takeable`, or
 other verb-shaped booleans.
 
+## Character placement and physical presence
+
+Format 3.1 can place a character at one authoritative setting and gate their
+physical presence with durable, player-relative requirements:
+
+```yaml
+characters:
+  - id: character.echo
+    name: Echo
+    description: A publicly known missing detection dog.
+    initial:
+      location: setting.hidden_run
+    presence:
+      requires: flag.echo_discovered
+```
+
+`initial.location` accepts only a setting. A character is physically present
+when their current setting matches the player's and every `presence.requires`
+reference is satisfied for that player. Omitted placement means the character
+is unplaced; omitted presence means no additional gate. Placement and gates do
+not conceal public identity or known notebook references, and characters never
+become portable inventory or nested containers.
+
 ## Actions and effects
 
 Actions remain in the `commands` section. Each action has an ID, name, optional
@@ -352,6 +379,8 @@ commands:
         types: [character]
         min: 0
         max: 1
+        candidates:
+          from: [current_location]
     effects:
       - operation: move
         subjects: [player, param2]
@@ -364,6 +393,12 @@ Parameter types are `character`, `entity`, `setting`, `deduction`, and `event`.
 role that accepts alternative kinds or multiple selected cards without merging
 distinct roles. Format 3 rejects the removed singular `type`/`required` shape;
 use `types`/`min`/`max` for every command parameter.
+Format 3.1 parameters may add `candidates.from`, an ordered non-empty set of
+`all`, `current_location`, `inventory`, `reachable`, `known`, or `established`.
+Sources are unioned and deduplicated. The optional `capabilities: [portable]`
+filter is valid only for entity-capable parameters. The standard mystery 2.0
+catalog declares these contracts explicitly; custom commands use the same
+resolver and validation rules.
 Within an effect, `param1`, `param2`, and so on refer to parameters by their
 one-based position. An effect parameter reference is valid only for a
 single-card parameter whose accepted kinds all match the operand. Authored IDs
@@ -585,7 +620,7 @@ travel, and delayed effects:
 ```yaml
 case:
   id: case.last_tide
-  format_version: "3.0.0"
+  format_version: "3.1.0"
   initial_time: "21:32"
 ```
 
@@ -662,7 +697,7 @@ descriptive category does not change navigation behavior:
 
 ```yaml
 case:
-  format_version: "3.0.0"
+  format_version: "3.1.0"
   entry_settings:
     - setting.main_lodge
   exit_settings:

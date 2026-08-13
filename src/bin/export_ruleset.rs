@@ -4,9 +4,12 @@ use narrator_validator::{
 };
 
 fn main() {
+    let version = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| STANDARD_MYSTERY_RULESET_VERSION.to_string());
     let reference = RulesetReference {
         id: STANDARD_MYSTERY_RULESET_ID.to_string(),
-        version: STANDARD_MYSTERY_RULESET_VERSION.to_string(),
+        version,
     };
     let resolved = resolve_ruleset(&reference).expect("standard ruleset resolves");
     let document: serde_yaml::Value =
