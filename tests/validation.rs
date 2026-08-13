@@ -2195,6 +2195,25 @@ fn validates_format_3_1_character_placement_and_presence() {
 }
 
 #[test]
+fn normalizes_scalar_and_sequence_character_presence_requirements() {
+    for requires in [
+        "flag.knife_examined",
+        "[fact.knife_is_present, flag.knife_examined, trigger.investigate_knife]",
+    ] {
+        let source = VALID_FORMAT_3_STORY
+            .replace("\"3.0.0\"", "\"3.1.0\"")
+            .replace(
+                "  - id: character.culprit\n    description: A suspect with a carefully guarded secret.",
+                &format!(
+                    "  - id: character.culprit\n    description: A suspect with a carefully guarded secret.\n    initial:\n      location: setting.study\n    presence:\n      requires: {requires}"
+                ),
+            );
+        let report = report(source);
+        assert!(report.valid, "{requires}: {:#?}", report.diagnostics);
+    }
+}
+
+#[test]
 fn keeps_character_placement_out_of_the_format_3_0_contract() {
     let source = VALID_FORMAT_3_STORY.replace(
         "  - id: character.culprit\n    description: A suspect with a carefully guarded secret.",
@@ -2219,6 +2238,11 @@ fn rejects_invalid_character_placement_and_presence_at_exact_pointers() {
         (
             "    initial:\n      location: 42",
             "character.location_type",
+            "/characters/1/initial/location",
+        ),
+        (
+            "    initial:\n      location: setting.not_authored",
+            "reference.unknown",
             "/characters/1/initial/location",
         ),
         (
