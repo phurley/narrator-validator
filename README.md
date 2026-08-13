@@ -123,7 +123,7 @@ This repository includes a composite action:
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: phurley/narrator-validator@v0
+- uses: phurley/narrator-validator@v1.0.0
 ```
 
 It builds the pinned validator revision and emits native GitHub annotations.
@@ -135,6 +135,11 @@ This validator authors format `3.0.0`. Format 3 minor and patch releases remain
 compatible within the major format. The format-1 validation path remains for
 legacy repositories, while format-2 repositories stop with focused migration
 guidance before the strict format-3 schema runs.
+
+Validator `1.0.0` is the coordinated release for this contract. See
+[MIGRATION.md](MIGRATION.md) for the complete format-2 migration and the
+[`v1.0.0` release](https://github.com/phurley/narrator-validator/releases/tag/v1.0.0)
+for the exact consumer commit matrix.
 
 Legacy integer versions, missing versions, and versions outside the supported
 range stop validation with migration guidance before version-specific schema
@@ -213,28 +218,28 @@ solution: { culprit: character.suspect, weapon: entity.knife, location: setting.
 # settings.yaml
 settings:
   - { id: setting.world, type: island, navigable: false, name: The island, description: A storm-bound island. }
-  - { id: setting.study, tag_id: 0, type: room, name: Study, description: A book-lined study., parent: setting.world }
+  - { id: setting.study, type: room, name: Study, description: A book-lined study., parent: setting.world }
 routes: []
 
 # characters.yaml
 characters:
   - id: character.suspect
-    tag_id: 1
     name: Alex Vale
     description: A composed guest in a rain-dark coat.
     narrator_guidance: { goal: Keep the missing hour private. }
-    testimony: [{ id: testimony.alibi, text: Alex says they remained in the lounge., requires: [command.question, character.suspect] }]
-    facts: [{ id: fact.alibi, statement: Alex claimed to remain in the lounge., requires: [command.question, character.suspect] }]
+    testimony: [{ id: testimony.alibi, text: Alex says they remained in the lounge., requires: [command.question, character.suspect], reveals: [fact.alibi] }]
+    facts: [{ id: fact.alibi, statement: Alex claimed to remain in the lounge. }]
 
 # entities.yaml / events.yaml / deductions.yaml / flags.yaml
-entities: [{ id: entity.knife, tag_id: 2, type: object, name: Knife, description: A polished display knife., initial: { container: setting.study } }]
+entities: [{ id: entity.knife, type: object, name: Knife, description: A polished display knife., initial: { container: setting.study } }]
 events: [{ id: event.murder, day: 0, time: "20:15", duration_minutes: 0, location: setting.study, participants: [character.suspect] }]
 deductions: [{ id: deduction.solution, conclusion: Alex used the knife., inputs: [fact.alibi], truth: true }]
 flags: [{ id: flag.power_out, name: Power out, description: The power has failed., initial_state: false }]
 
-# optional commands.yaml / triggers.yaml
+# optional commands.yaml / triggers.yaml / deck.yaml
 commands: [{ id: command.investigate, name: Investigate, parameters: [{ name: target, types: [entity, setting], min: 1, max: 1 }] }]
-triggers: [{ id: trigger.blackout, name: Blackout, command: command.question, effects: [{ operation: set_flag, flag: flag.power_out, value: true }] }]
+triggers: [{ id: trigger.blackout, name: Blackout, on: { command: command.question, parameters: { character: character.suspect } }, effects: [{ operation: set_flag, flag: flag.power_out, value: true }] }]
+cards: [{ tag_id: 0, subject: setting.study }, { tag_id: 1, subject: character.suspect }, { tag_id: 2, subject: entity.knife }]
 ```
 
 ## Facts and deductions
@@ -357,8 +362,8 @@ Parameter types are `character`, `entity`, `setting`, `deduction`, and `event`.
 `types` is ordered, non-empty, and unique. Cardinality must satisfy
 `0 <= min <= max` and `max >= 1`. A parameter can therefore model one semantic
 role that accepts alternative kinds or multiple selected cards without merging
-distinct roles. The legacy singular `type`/`required` shape remains readable
-for existing stories, while maintained stories use `types`/`min`/`max`.
+distinct roles. Format 3 rejects the removed singular `type`/`required` shape;
+use `types`/`min`/`max` for every command parameter.
 Within an effect, `param1`, `param2`, and so on refer to parameters by their
 one-based position. An effect parameter reference is valid only for a
 single-card parameter whose accepted kinds all match the operand. Authored IDs

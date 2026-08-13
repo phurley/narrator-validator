@@ -247,12 +247,6 @@ pub fn validate(files: &[SourceFile]) -> ValidationReport {
 }
 
 impl<'a> Validator<'a> {
-    fn is_format_2(&self) -> bool {
-        self.format_version
-            .as_ref()
-            .is_some_and(|version| version.major >= 2)
-    }
-
     fn is_format_3(&self) -> bool {
         self.format_version
             .as_ref()
@@ -286,7 +280,7 @@ impl<'a> Validator<'a> {
         let commands = self.merge_ruleset_commands(local_commands);
         let triggers = self.items("triggers", Kind::Trigger, true);
         let win_states = self.items("win_states", Kind::WinState, true);
-        let fact_claims_enabled = self.is_format_2();
+        let fact_claims_enabled = self.is_format_3();
         let facts = if fact_claims_enabled {
             self.nested_facts(&[
                 settings.as_slice(),
@@ -596,7 +590,7 @@ impl<'a> Validator<'a> {
             }
         }
         let knowledge_section = "clues";
-        if !self.is_format_2() {
+        if !self.is_format_3() {
             match self.sections.get(knowledge_section) {
                 None => self.push(
                     Severity::Error,
@@ -645,13 +639,13 @@ impl<'a> Validator<'a> {
                 }
             }
         }
-        if self.is_format_2() {
+        if self.is_format_3() {
             if let Some(locations) = self.sections.get("clues").cloned() {
                 for (path, pointer) in locations {
                     self.push(
                         Severity::Error,
                         "format.clues_removed",
-                        "format 2 removes clues; express player knowledge in `facts`".to_string(),
+                        "format 3 removes clues; express player knowledge in `facts`".to_string(),
                         &path,
                         Some(pointer),
                         None,
@@ -1088,7 +1082,7 @@ impl<'a> Validator<'a> {
                     if !self.format_compatible {
                         let message = if version.major == 2 {
                             format!(
-                                "This story uses pre-migration format {version}. Please migrate it to story format {STORY_FORMAT_VERSION}; move `case` and `solution` to `case.yaml`, adopt the strict disclosure contract, and update the typed player limits before opening it."
+                                "This story uses pre-migration format {version}. Please migrate it to story format {STORY_FORMAT_VERSION} before opening it. Follow the focused migration guide at https://github.com/phurley/narrator-validator/blob/v1.0.0/MIGRATION.md."
                             )
                         } else if version
                             < Version::parse("1.0.0").expect("minimum story format is valid")
@@ -1237,7 +1231,7 @@ impl<'a> Validator<'a> {
                 );
             }
         }
-        if self.is_format_2() {
+        if self.is_format_3() {
             match case
                 .mapping
                 .get(Value::String("initial_time".to_string()))
@@ -1255,7 +1249,7 @@ impl<'a> Validator<'a> {
                 None => self.push(
                     Severity::Error,
                     "case.initial_time_missing",
-                    "format 2 games require `case.initial_time` so runtime time effects are deterministic"
+                    "format 3 games require `case.initial_time` so runtime time effects are deterministic"
                         .to_string(),
                     &case.path,
                     Some(format!("{}/initial_time", case.pointer)),
@@ -3239,7 +3233,7 @@ impl<'a> Validator<'a> {
                     self.push(
                         Severity::Error,
                         "fact.initially_known_removed",
-                        "format 2 facts enter the notebook automatically; omit `requires` to add a fact when the player joins".to_string(),
+                        "format 3 facts enter the notebook automatically; omit `requires` to add a fact when the player joins".to_string(),
                         &fact.path,
                         Some(format!("{}/initially_known", fact.pointer)),
                         None,
@@ -3452,7 +3446,7 @@ impl<'a> Validator<'a> {
                 self.push(
                     Severity::Error,
                     "deduction.supported_by_removed",
-                    "format 2 deductions use `inputs`; clue-based `supported_by` was removed"
+                    "format 3 deductions use `inputs`; clue-based `supported_by` was removed"
                         .to_string(),
                     &deduction.path,
                     Some(format!("{}/supported_by", deduction.pointer)),
@@ -3619,7 +3613,7 @@ impl<'a> Validator<'a> {
             }
 
             let parameter_types = self.validate_command_parameters(command);
-            if self.is_format_2() {
+            if self.is_format_3() {
                 self.validate_runtime_command_signature(command, &parameter_types);
             }
             self.validate_world_effects(command, &parameter_types);
@@ -3712,14 +3706,7 @@ impl<'a> Validator<'a> {
                 "character.testimony_question_target_type",
                 "the first `command.question` parameter must have type `character`".to_string(),
                 &command.path,
-                Some(format!(
-                    "{first_pointer}/{}",
-                    if first.contains_key(Value::String("types".to_string())) {
-                        "types"
-                    } else {
-                        "type"
-                    }
-                )),
+                Some(format!("{first_pointer}/types")),
                 None,
                 Some(command.id.clone()),
             );
@@ -3730,14 +3717,7 @@ impl<'a> Validator<'a> {
                 "character.testimony_question_target_required",
                 "the first `command.question` character parameter must be required".to_string(),
                 &command.path,
-                Some(format!(
-                    "{first_pointer}/{}",
-                    if first.contains_key(Value::String("min".to_string())) {
-                        "min"
-                    } else {
-                        "required"
-                    }
-                )),
+                Some(format!("{first_pointer}/min")),
                 None,
                 Some(command.id.clone()),
             );
@@ -3758,74 +3738,44 @@ impl<'a> Validator<'a> {
                 );
                 continue;
             };
-            if string_field(parameter, "name") == Some("topic") {
-                let valid = parameter_shapes
-                    .get(index)
-                    .and_then(Option::as_ref)
-                    .is_some_and(|shape| {
-                        shape.types
-                            == [
-                                CommandParameterType::Character,
-                                CommandParameterType::Setting,
-                                CommandParameterType::Event,
-                                CommandParameterType::Entity,
-                                CommandParameterType::Deduction,
-                            ]
-                            && shape.min == 0
-                    });
-                if !valid {
-                    self.push(
-                        Severity::Error,
-                        "character.testimony_question_topic_type",
-                        "the canonical `topic` parameter must accept optional character, setting, event, entity, or deduction selections".to_string(),
-                        &command.path,
-                        Some(format!("{pointer}/types")),
-                        None,
-                        Some(command.id.clone()),
-                    );
-                }
-                continue;
-            }
-            let expected_type = match string_field(parameter, "name") {
-                Some("topic_character") => Some(CommandParameterType::Character),
-                Some("topic_entity") => Some(CommandParameterType::Entity),
-                Some("topic_setting") => Some(CommandParameterType::Setting),
-                Some("topic_deduction") => Some(CommandParameterType::Deduction),
-                Some("topic_event") => Some(CommandParameterType::Event),
-                _ => None,
-            };
-            if expected_type.is_none() {
+            if string_field(parameter, "name") != Some("topic") {
                 self.push(
                     Severity::Error,
                     "character.testimony_question_topic_name",
-                    "later `command.question` parameters must be named for a supported optional topic"
-                        .to_string(),
+                    "the optional `command.question` parameter must be named `topic`".to_string(),
                     &command.path,
                     Some(format!("{pointer}/name")),
                     None,
                     Some(command.id.clone()),
                 );
-            } else if string_field(parameter, "type").and_then(CommandParameterType::parse)
-                != expected_type
-            {
+                continue;
+            }
+            let shape = parameter_shapes.get(index).and_then(Option::as_ref);
+            if !matches!(shape, Some(shape) if shape.types
+            == [
+                CommandParameterType::Character,
+                CommandParameterType::Setting,
+                CommandParameterType::Event,
+                CommandParameterType::Entity,
+                CommandParameterType::Deduction,
+            ]) {
                 self.push(
                     Severity::Error,
                     "character.testimony_question_topic_type",
-                    "a `command.question` topic parameter type must match its topic name"
-                        .to_string(),
+                    "the canonical `topic` parameter must accept character, setting, event, entity, and deduction selections in that order".to_string(),
                     &command.path,
-                    Some(format!("{pointer}/type")),
+                    Some(format!("{pointer}/types")),
                     None,
                     Some(command.id.clone()),
                 );
             }
-            if bool_field(parameter, "required") == Some(true) {
+            if !matches!(shape, Some(shape) if shape.min == 0) {
                 self.push(
                     Severity::Error,
                     "character.testimony_question_topic_required",
                     "later `command.question` topic parameters must be optional".to_string(),
                     &command.path,
-                    Some(format!("{pointer}/required")),
+                    Some(format!("{pointer}/min")),
                     None,
                     Some(command.id.clone()),
                 );
@@ -3921,6 +3871,20 @@ impl<'a> Validator<'a> {
                 }
                 let legacy_type = string_field(parameter, "type")
                     .and_then(CommandParameterType::parse);
+                if self.is_format_3()
+                    && parameter.contains_key(Value::String("type".to_string()))
+                {
+                    self.push(
+                        Severity::Error,
+                        "command.parameter_type_removed",
+                        "format 3 command parameters use ordered `types`; legacy singular `type` was removed"
+                            .to_string(),
+                        &command.path,
+                        Some(format!("{pointer}/type")),
+                        None,
+                        Some(command.id.clone()),
+                    );
+                }
                 let types_value = parameter.get(Value::String("types".to_string()));
                 if legacy_type.is_some() && types_value.is_some() {
                     self.push(
@@ -3933,7 +3897,11 @@ impl<'a> Validator<'a> {
                         Some(command.id.clone()),
                     );
                 }
-                let mut types = legacy_type.into_iter().collect::<Vec<_>>();
+                let mut types = if self.is_format_3() {
+                    Vec::new()
+                } else {
+                    legacy_type.into_iter().collect::<Vec<_>>()
+                };
                 if let Some(types_value) = types_value {
                     let Some(values) = types_value.as_sequence() else {
                         self.push(
@@ -3999,7 +3967,20 @@ impl<'a> Validator<'a> {
                         Some(command.id.clone()),
                     );
                 }
-                if parameter
+                if self.is_format_3()
+                    && parameter.contains_key(Value::String("required".to_string()))
+                {
+                    self.push(
+                        Severity::Error,
+                        "command.parameter_required_removed",
+                        "format 3 command parameters use `min` and `max`; legacy `required` was removed"
+                            .to_string(),
+                        &command.path,
+                        Some(format!("{pointer}/required")),
+                        None,
+                        Some(command.id.clone()),
+                    );
+                } else if parameter
                     .get(Value::String("required".to_string()))
                     .is_some_and(|required| required.as_bool().is_none())
                 {
@@ -4013,7 +3994,8 @@ impl<'a> Validator<'a> {
                         Some(command.id.clone()),
                     );
                 }
-                let required = bool_field(parameter, "required").unwrap_or(false);
+                let required = !self.is_format_3()
+                    && bool_field(parameter, "required").unwrap_or(false);
                 let min = integer_field(parameter, "min")
                     .and_then(|value| usize::try_from(value).ok())
                     .unwrap_or(usize::from(required));
