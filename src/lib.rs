@@ -4,10 +4,15 @@
 //! implementation can run in the backend, a browser Web Worker, or the CLI.
 
 mod diagnostic;
+mod ruleset;
 mod validator;
 
 pub use diagnostic::{
     Diagnostic, Position, RelatedLocation, Severity, SourceFile, SourceRange, ValidationReport,
+};
+pub use ruleset::{
+    resolve_ruleset, ResolvedRuleset, RulesetError, RulesetReference, STANDARD_MYSTERY_RULESET_ID,
+    STANDARD_MYSTERY_RULESET_VERSION,
 };
 pub use validator::validate;
 

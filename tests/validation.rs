@@ -371,9 +371,77 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_2_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_2_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "0.22.0");
+    assert_eq!(report.validator_version, "0.23.0");
     assert_eq!(report.format_version.as_deref(), Some("3.0.0"));
     assert!(report.diagnostics.is_empty());
+}
+
+fn with_standard_ruleset(source: &str) -> String {
+    source.replace(
+        "  format_version: \"3.0.0\"",
+        "  format_version: \"3.0.0\"\n  ruleset:\n    id: ruleset.standard_mystery\n    version: \"1.0.0\"",
+    )
+}
+
+#[test]
+fn standard_ruleset_commands_join_global_validation_and_allow_extensions() {
+    let source = with_standard_ruleset(VALID_FORMAT_2_STORY)
+        .replace("  - id: command.claim\n    name: Claim\n    description: Learn that the knife is present.\n    effects:\n      - operation: learn_fact\n        fact_id: fact.knife_is_present\n", "")
+        .replace("    subject: command.claim", "    subject: command.move");
+    let report = report(source);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert!(report.diagnostics.is_empty(), "{:#?}", report.diagnostics);
+}
+
+#[test]
+fn rejects_unknown_and_incompatible_rulesets_with_version_guidance() {
+    let unknown = report(
+        with_standard_ruleset(VALID_FORMAT_2_STORY)
+            .replace("ruleset.standard_mystery", "ruleset.private_mystery"),
+    );
+    let diagnostic = unknown
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "ruleset.unsupported")
+        .expect("unknown ruleset diagnostic");
+    assert!(diagnostic.message.contains("supported rulesets"));
+
+    let incompatible = report(
+        with_standard_ruleset(VALID_FORMAT_2_STORY)
+            .replace("version: \"1.0.0\"", "version: \"2.0.0\""),
+    );
+    let diagnostic = incompatible
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "ruleset.unsupported")
+        .expect("incompatible ruleset diagnostic");
+    assert!(diagnostic.message.contains("use version 1.0.0"));
+}
+
+#[test]
+fn rejects_local_overrides_but_accepts_distinct_extension_ids() {
+    let source = with_standard_ruleset(VALID_FORMAT_2_STORY).replace(
+        "commands:\n",
+        "commands:\n  - id: command.move\n    name: Story move\n    parameters: []\n",
+    );
+    assert!(codes(source).contains(&"ruleset.command_conflict".to_string()));
+}
+
+#[test]
+fn diagnoses_copied_standard_catalogs_and_legacy_parameter_shapes() {
+    let source = VALID_FORMAT_2_STORY.replace(
+        "  - id: command.claim\n",
+        "  - id: command.move\n    name: Move\n    parameters:\n      - name: destination\n        type: setting\n        required: true\n  - id: command.examine\n    name: Examine\n  - id: command.question\n    name: Question\n      \n  - id: command.claim\n",
+    );
+    let report = report(source);
+    assert!(report
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "ruleset.copied_standard_commands"));
+    assert!(report
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "ruleset.legacy_command_parameter"));
 }
 
 #[test]

@@ -5,8 +5,8 @@ use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
 
 use crate::{
-    Diagnostic, Position, RelatedLocation, Severity, SourceFile, SourceRange, ValidationReport,
-    STORY_FORMAT_VERSION, VALIDATOR_VERSION,
+    resolve_ruleset, Diagnostic, Position, RelatedLocation, RulesetReference, Severity, SourceFile,
+    SourceRange, ValidationReport, STORY_FORMAT_VERSION, VALIDATOR_VERSION,
 };
 
 const MAX_REPOSITORY_FILES: usize = 512;
@@ -202,6 +202,7 @@ struct Validator<'a> {
     sections: BTreeMap<String, Vec<(String, String)>>,
     format_version: Option<Version>,
     format_compatible: bool,
+    ruleset: Option<RulesetReference>,
 }
 
 /// Validate a complete, immutable repository snapshot.
@@ -214,6 +215,7 @@ pub fn validate(files: &[SourceFile]) -> ValidationReport {
         sections: BTreeMap::new(),
         format_version: None,
         format_compatible: true,
+        ruleset: None,
     };
     validator.run();
     validator.diagnostics.sort_by(|left, right| {
@@ -279,7 +281,9 @@ impl<'a> Validator<'a> {
         let clues = self.items("clues", Kind::Clue, true);
         let deductions = self.items("deductions", Kind::Deduction, true);
         let flags = self.items("flags", Kind::Flag, true);
-        let commands = self.items("commands", Kind::Command, true);
+        let local_commands = self.items("commands", Kind::Command, true);
+        self.validate_command_migration(&local_commands);
+        let commands = self.merge_ruleset_commands(local_commands);
         let triggers = self.items("triggers", Kind::Trigger, true);
         let win_states = self.items("win_states", Kind::WinState, true);
         let fact_claims_enabled = self.is_format_2();
@@ -1174,6 +1178,7 @@ impl<'a> Validator<'a> {
         }
         if self.is_format_3() {
             self.validate_player_limits(case);
+            self.validate_ruleset_reference(case);
         }
         if case
             .mapping
@@ -1258,6 +1263,173 @@ impl<'a> Validator<'a> {
                     Some(case.id.clone()),
                 ),
             }
+        }
+    }
+
+    fn validate_ruleset_reference(&mut self, case: &Item) {
+        let Some(value) = case.mapping.get(Value::String("ruleset".to_string())) else {
+            return;
+        };
+        let pointer = format!("{}/ruleset", case.pointer);
+        let reference = match serde_yaml::from_value::<RulesetReference>(value.clone()) {
+            Ok(reference) => reference,
+            Err(error) => {
+                self.push(
+                    Severity::Error,
+                    "ruleset.reference_invalid",
+                    format!(
+                        "`case.ruleset` must contain exactly string `id` and `version` fields: {error}"
+                    ),
+                    &case.path,
+                    Some(pointer),
+                    None,
+                    Some(case.id.clone()),
+                );
+                return;
+            }
+        };
+        match resolve_ruleset(&reference) {
+            Ok(_) => self.ruleset = Some(reference),
+            Err(error) => self.push(
+                Severity::Error,
+                "ruleset.unsupported",
+                error.to_string(),
+                &case.path,
+                Some(pointer),
+                None,
+                Some(case.id.clone()),
+            ),
+        }
+    }
+
+    fn merge_ruleset_commands(&mut self, local_commands: Vec<Item>) -> Vec<Item> {
+        let Some(reference) = self.ruleset.as_ref() else {
+            return local_commands;
+        };
+        let resolved = resolve_ruleset(reference).expect("validated ruleset remains resolvable");
+        let document: Value =
+            serde_yaml::from_str(resolved.commands_yaml).expect("built-in ruleset YAML is valid");
+        let commands = document["commands"]
+            .as_sequence()
+            .expect("built-in ruleset commands are a sequence");
+        let local_by_id = local_commands
+            .iter()
+            .map(|command| (command.id.as_str(), command))
+            .collect::<BTreeMap<_, _>>();
+        let source_name = format!("{}@{}", reference.id, reference.version);
+        let mut merged = Vec::with_capacity(commands.len() + local_commands.len());
+
+        for (index, value) in commands.iter().enumerate() {
+            let mapping = value
+                .as_mapping()
+                .expect("built-in ruleset commands are mappings")
+                .clone();
+            let id = string_field(&mapping, "id")
+                .expect("built-in ruleset command has an id")
+                .to_string();
+            if let Some(local) = local_by_id.get(id.as_str()) {
+                self.push(
+                    Severity::Error,
+                    "ruleset.command_conflict",
+                    format!(
+                        "local command `{id}` conflicts with {source_name}; ruleset overrides are deferred, so remove the copied command or choose a different command ID"
+                    ),
+                    &local.path,
+                    Some(format!("{}/id", local.pointer)),
+                    locate_id(&local.source, &local.id),
+                    Some(id),
+                );
+                continue;
+            }
+            let pointer = format!("/commands/{index}");
+            self.definitions.insert(
+                id.clone(),
+                Definition {
+                    kind: Kind::Command,
+                    path: source_name.clone(),
+                    pointer: pointer.clone(),
+                    range: None,
+                },
+            );
+            merged.push(Item {
+                kind: Kind::Command,
+                id,
+                path: source_name.clone(),
+                source: resolved.commands_yaml.to_string(),
+                pointer,
+                mapping,
+            });
+        }
+        merged.extend(local_commands);
+        merged
+    }
+
+    fn validate_command_migration(&mut self, commands: &[Item]) {
+        if !self.is_format_3() {
+            return;
+        }
+        let standard_ids = [
+            "command.move",
+            "command.open",
+            "command.search",
+            "command.examine",
+            "command.take",
+            "command.drop",
+            "command.use",
+            "command.question",
+            "command.deduce",
+            "command.solve",
+        ];
+        let copied = commands
+            .iter()
+            .filter(|command| standard_ids.contains(&command.id.as_str()))
+            .count();
+        for command in commands {
+            let Some(parameters) = command
+                .mapping
+                .get(Value::String("parameters".to_string()))
+                .and_then(Value::as_sequence)
+            else {
+                continue;
+            };
+            for (index, parameter) in parameters.iter().enumerate() {
+                let Some(parameter) = parameter.as_mapping() else {
+                    continue;
+                };
+                if copied >= 3
+                    && standard_ids.contains(&command.id.as_str())
+                    && (parameter.contains_key(Value::String("type".to_string()))
+                        || parameter.contains_key(Value::String("required".to_string())))
+                {
+                    self.push(
+                        Severity::Warning,
+                        "ruleset.legacy_command_parameter",
+                        "migrate legacy `type`/`required` to ordered `types` plus `min`/`max`; standard commands can be removed after selecting `case.ruleset`"
+                            .to_string(),
+                        &command.path,
+                        Some(format!("{}/parameters/{index}", command.pointer)),
+                        None,
+                        Some(command.id.clone()),
+                    );
+                }
+            }
+        }
+
+        if self.ruleset.is_none() && copied >= 3 {
+            let command = commands
+                .iter()
+                .find(|command| standard_ids.contains(&command.id.as_str()))
+                .expect("copied command exists");
+            self.push(
+                Severity::Warning,
+                "ruleset.copied_standard_commands",
+                "this story copies maintained mystery commands; select `case.ruleset: { id: ruleset.standard_mystery, version: \"1.0.0\" }` and keep only story-specific extensions in `commands.yaml`"
+                    .to_string(),
+                &command.path,
+                Some("/commands".to_string()),
+                None,
+                None,
+            );
         }
     }
 
@@ -1350,6 +1522,7 @@ impl<'a> Validator<'a> {
             &[
                 "id",
                 "format_version",
+                "ruleset",
                 "title",
                 "genre",
                 "tone",

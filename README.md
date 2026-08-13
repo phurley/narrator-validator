@@ -151,6 +151,9 @@ owns only the world settings and routes. A case declares typed player limits:
 case:
   id: case.last_tide
   format_version: "3.0.0"
+  ruleset:
+    id: ruleset.standard_mystery
+    version: "1.0.0"
   players:
     min: 2
     max: 6
@@ -176,6 +179,26 @@ Character `narrator_guidance` accepts `goal`, `secret`, `motive`, `method`,
 confused with player-safe ordered `testimony`. `author_notes` is the explicit
 open namespace for research, demographics, drafting reminders, and other
 material with no runtime projection.
+
+## Versioned mystery ruleset
+
+`case.ruleset` selects an exact immutable command catalog. The supported
+`ruleset.standard_mystery@1.0.0` catalog supplies Move, Open, Search, Examine,
+Take, Drop, Use, Question, Deduce, and Solve with canonical ordered semantic
+parameter groups. It deliberately omits `command.claim`: facts enter notebooks
+automatically, while Deduce remains the deliberate notebook action.
+
+Ruleset commands participate in global ID and reference validation, including
+physical bindings in `deck.yaml`, without being copied into `commands.yaml`.
+That file is optional and contains only story-specific extensions such as
+`command.investigate`. Extension IDs must be distinct. Overrides are explicitly
+deferred in version 1; redefining a ruleset command produces
+`ruleset.command_conflict` instead of merging arbitrary YAML fields.
+
+Released ruleset versions are append-only. A new command contract requires a
+new ruleset version, so an immutable story snapshot continues resolving the
+same catalog after reload. Unknown IDs and incompatible versions fail before
+game creation with the supported ID and version in the diagnostic.
 
 Known item mappings reject unknown fields with an exact JSON pointer. This
 includes cases, solutions, settings, routes, characters, entities, events,
@@ -209,8 +232,8 @@ events: [{ id: event.murder, day: 0, time: "20:15", duration_minutes: 0, locatio
 deductions: [{ id: deduction.solution, conclusion: Alex used the knife., inputs: [fact.alibi], truth: true }]
 flags: [{ id: flag.power_out, name: Power out, description: The power has failed., initial_state: false }]
 
-# commands.yaml / triggers.yaml
-commands: [{ id: command.question, tag_id: 3, name: Question, parameters: [{ name: character, types: [character], min: 1, max: 1 }] }]
+# optional commands.yaml / triggers.yaml
+commands: [{ id: command.investigate, name: Investigate, parameters: [{ name: target, types: [entity, setting], min: 1, max: 1 }] }]
 triggers: [{ id: trigger.blackout, name: Blackout, command: command.question, effects: [{ operation: set_flag, flag: flag.power_out, value: true }] }]
 ```
 

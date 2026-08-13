@@ -57,6 +57,16 @@ await Promise.all([
   copyFile(join(root, 'typescript', 'index.d.ts'), join(output, 'index.d.ts')),
 ])
 
+const standardMysteryRuleset = execFileSync(
+  'cargo',
+  ['run', '--quiet', '--bin', 'export_ruleset'],
+  { cwd: root, encoding: 'utf8' },
+).trim()
+await writeFile(
+  join(output, 'rulesets.js'),
+  `export const STANDARD_MYSTERY_RULESET = Object.freeze(${standardMysteryRuleset})\n`,
+)
+
 const metadata = JSON.parse(
   execFileSync(
     'cargo',
@@ -88,6 +98,7 @@ const manifest = {
   files: [
     'index.js',
     'index.d.ts',
+    'rulesets.js',
     'narrator_validator.js',
     'narrator_validator.d.ts',
     'narrator_validator_bg.wasm',
@@ -100,6 +111,10 @@ const manifest = {
     './raw': {
       types: './narrator_validator.d.ts',
       import: './narrator_validator.js',
+    },
+    './rulesets': {
+      types: './index.d.ts',
+      import: './rulesets.js',
     },
   },
 }
