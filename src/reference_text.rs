@@ -42,7 +42,9 @@ pub struct ReferenceExpression {
     pub authored: String,
     pub target_id: String,
     pub property_path: Vec<String>,
+    /// Zero-based UTF-8 byte offset of the opening delimiter.
     pub start: usize,
+    /// Exclusive zero-based UTF-8 byte offset after the closing delimiter.
     pub end: usize,
 }
 
@@ -81,7 +83,8 @@ pub struct ResolvedReferenceText {
     pub provenance: Vec<ReferenceProvenance>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum ReferenceParseError {
     #[error("reference expression is not closed")]
     Unclosed { start: usize },
@@ -95,6 +98,20 @@ pub enum ReferenceParseError {
     },
     #[error("unexpected closing reference delimiter")]
     UnexpectedClose { start: usize },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ReferenceTextParseResult {
+    Parsed { value: ParsedReferenceText },
+    Error { error: ReferenceParseError },
+}
+
+pub fn parse_reference_text_result(source: &str) -> ReferenceTextParseResult {
+    match parse_reference_text(source) {
+        Ok(value) => ReferenceTextParseResult::Parsed { value },
+        Err(error) => ReferenceTextParseResult::Error { error },
+    }
 }
 
 const PUBLIC: DisclosureClass = DisclosureClass::PlayerSafe;
@@ -623,6 +640,19 @@ mod tests {
         assert!(matches!(
             parse_reference_text("character.echo]]"),
             Err(ReferenceParseError::UnexpectedClose { .. })
+        ));
+    }
+
+    #[test]
+    fn parser_offsets_are_utf8_bytes() {
+        let parsed = parse_reference_text("é [[character.echo.name]]!").unwrap();
+        let ReferenceTextSegment::Reference { expression } = &parsed.segments[1] else {
+            panic!("expected reference segment");
+        };
+        assert_eq!((expression.start, expression.end), (3, 26));
+        assert!(matches!(
+            parse_reference_text("é [[character.echo"),
+            Err(ReferenceParseError::Unclosed { start: 3 })
         ));
     }
 }

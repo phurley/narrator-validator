@@ -6583,8 +6583,14 @@ impl<'a> Validator<'a> {
                         "reference expression requires `case.features: [reference_text_v1]`"
                             .to_string(),
                         &consumer.path,
-                        Some(consumer.pointer),
-                        locate_scalar(&consumer.source, "[["),
+                        Some(consumer.pointer.clone()),
+                        locate_yaml_scalar_token(
+                            &consumer.source,
+                            &consumer.pointer,
+                            &consumer.authored,
+                            "[[",
+                            0,
+                        ),
                         consumer.owner_id,
                     );
                 }
@@ -6602,8 +6608,14 @@ impl<'a> Validator<'a> {
                         "reference_text.malformed",
                         error.to_string(),
                         &consumer.path,
-                        Some(consumer.pointer),
-                        locate_text_offset(&consumer.source, &consumer.authored, start, end),
+                        Some(consumer.pointer.clone()),
+                        locate_yaml_scalar_offset(
+                            &consumer.source,
+                            &consumer.pointer,
+                            &consumer.authored,
+                            start,
+                            end,
+                        ),
                         consumer.owner_id,
                     );
                     continue;
@@ -6635,7 +6647,12 @@ impl<'a> Validator<'a> {
                 Err(error) => {
                     let range = error.range.or_else(|| {
                         error.expression.as_ref().and_then(|expression| {
-                            locate_reference_expression(&error.source, &error.authored, expression)
+                            locate_reference_expression(
+                                &error.source,
+                                &error.pointer,
+                                &error.authored,
+                                expression,
+                            )
                         })
                     });
                     self.diagnostics.push(Diagnostic {
@@ -6844,7 +6861,17 @@ impl<'a> TextResolver<'a> {
                                     )),
                                     range: mapping_path(&definition.mapping, path)
                                         .and_then(Value::as_str)
-                                        .and_then(|value| locate_scalar(&definition.source, value)),
+                                        .and_then(|value| {
+                                            locate_first_reference_in_yaml_scalar(
+                                                &definition.source,
+                                                &format!(
+                                                    "{}/{}",
+                                                    definition.pointer,
+                                                    path.replace('.', "/")
+                                                ),
+                                                value,
+                                            )
+                                        }),
                                 })
                             })
                             .collect::<Vec<_>>();
@@ -6861,7 +6888,17 @@ impl<'a> TextResolver<'a> {
                             )),
                             range: mapping_path(&definition.mapping, &property_path)
                                 .and_then(Value::as_str)
-                                .and_then(|value| locate_scalar(&definition.source, value)),
+                                .and_then(|value| {
+                                    locate_first_reference_in_yaml_scalar(
+                                        &definition.source,
+                                        &format!(
+                                            "{}/{}",
+                                            definition.pointer,
+                                            property_path.replace('.', "/")
+                                        ),
+                                        value,
+                                    )
+                                }),
                         });
                         let mut error = text_error(
                             "reference_text.cycle",
@@ -6933,7 +6970,17 @@ impl<'a> TextResolver<'a> {
                                 ),
                                 authored: value.to_string(),
                                 expression: None,
-                                range: locate_text_offset(&definition.source, value, start, end),
+                                range: locate_yaml_scalar_offset(
+                                    &definition.source,
+                                    &format!(
+                                        "{}/{}",
+                                        definition.pointer,
+                                        property_path.replace('.', "/")
+                                    ),
+                                    value,
+                                    start,
+                                    end,
+                                ),
                                 related: Vec::new(),
                             })
                         })?;
@@ -6960,6 +7007,7 @@ impl<'a> TextResolver<'a> {
                         pointer: location.pointer.to_string(),
                         range: locate_reference_expression(
                             location.source,
+                            location.pointer,
                             location.authored,
                             expression,
                         ),
@@ -7102,32 +7150,263 @@ fn parse_error_offsets(error: &crate::ReferenceParseError, source_len: usize) ->
     }
 }
 
-fn locate_text_offset(source: &str, text: &str, start: usize, end: usize) -> Option<SourceRange> {
-    let base = source.find(text)?;
-    let absolute_start = base + start;
-    let absolute_end = base + end;
-    let position = |offset: usize| {
-        let prefix = &source[..offset];
-        let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
-        let column = prefix
-            .rsplit_once('\n')
-            .map_or(prefix.len() + 1, |(_, tail)| tail.len() + 1);
-        Position { line, column }
-    };
-    Some(SourceRange {
-        start: position(absolute_start),
-        end: position(absolute_end),
-    })
+#[derive(Debug, Clone, Copy)]
+struct YamlNodeSpan {
+    start: usize,
+    end: usize,
+    indent: isize,
+    value_start: usize,
 }
 
-fn locate_reference_expression(
+#[derive(Debug, Clone, Copy)]
+struct YamlLine<'a> {
+    start: usize,
+    indent: usize,
+    text: &'a str,
+}
+
+fn yaml_lines(source: &str) -> Vec<YamlLine<'_>> {
+    let mut offset = 0;
+    source
+        .split_inclusive('\n')
+        .map(|raw| {
+            let without_lf = raw.strip_suffix('\n').unwrap_or(raw);
+            let text = without_lf.strip_suffix('\r').unwrap_or(without_lf);
+            let line = YamlLine {
+                start: offset,
+                indent: text.bytes().take_while(|byte| *byte == b' ').count(),
+                text,
+            };
+            offset += raw.len();
+            line
+        })
+        .collect()
+}
+
+fn flow_skip_whitespace(source: &str, mut offset: usize, end: usize) -> usize {
+    while offset < end && source.as_bytes()[offset].is_ascii_whitespace() {
+        offset += 1;
+    }
+    offset
+}
+
+fn flow_top_level_delimiter(
     source: &str,
-    authored: &str,
-    expression: &crate::ReferenceExpression,
-) -> Option<SourceRange> {
-    let needle = format!("[[{}]]", expression.authored);
-    let ordinal = authored[..expression.start].matches(&needle).count();
-    let start = source.match_indices(&needle).nth(ordinal)?.0;
+    start: usize,
+    end: usize,
+    delimiters: &[u8],
+) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut offset = start;
+    let mut depth = 0usize;
+    let mut quote = None;
+    while offset < end {
+        let byte = bytes[offset];
+        if let Some(active_quote) = quote {
+            if byte == active_quote {
+                if active_quote == b'\'' && bytes.get(offset + 1) == Some(&b'\'') {
+                    offset += 2;
+                    continue;
+                }
+                quote = None;
+            } else if active_quote == b'"' && byte == b'\\' {
+                offset += 2;
+                continue;
+            }
+        } else {
+            match byte {
+                b'\'' | b'"' => quote = Some(byte),
+                b'{' | b'[' => depth += 1,
+                b'}' | b']' if depth > 0 => depth -= 1,
+                _ if depth == 0 && delimiters.contains(&byte) => return Some(offset),
+                _ => {}
+            }
+        }
+        offset += 1;
+    }
+    None
+}
+
+fn flow_entries(
+    source: &str,
+    node: YamlNodeSpan,
+    open: u8,
+    close: u8,
+) -> Option<Vec<(usize, usize)>> {
+    let start = flow_skip_whitespace(source, node.value_start, node.end);
+    if source.as_bytes().get(start) != Some(&open) {
+        return None;
+    }
+    let mut entries = Vec::new();
+    let mut entry_start = flow_skip_whitespace(source, start + 1, node.end);
+    loop {
+        if source.as_bytes().get(entry_start) == Some(&close) {
+            break;
+        }
+        let entry_end = flow_top_level_delimiter(source, entry_start, node.end, &[b',', close])?;
+        entries.push((entry_start, entry_end));
+        if source.as_bytes()[entry_end] == close {
+            break;
+        }
+        entry_start = flow_skip_whitespace(source, entry_end + 1, node.end);
+    }
+    Some(entries)
+}
+
+fn yaml_flow_child_span(source: &str, node: YamlNodeSpan, component: &str) -> Option<YamlNodeSpan> {
+    let start = flow_skip_whitespace(source, node.value_start, node.end);
+    match source.as_bytes().get(start)? {
+        b'[' => {
+            let index = component.parse::<usize>().ok()?;
+            let (value_start, end) = *flow_entries(source, node, b'[', b']')?.get(index)?;
+            Some(YamlNodeSpan {
+                start: value_start,
+                end,
+                indent: node.indent,
+                value_start,
+            })
+        }
+        b'{' => {
+            for (entry_start, entry_end) in flow_entries(source, node, b'{', b'}')? {
+                let colon = flow_top_level_delimiter(source, entry_start, entry_end, &[b':'])?;
+                let authored_key = source[entry_start..colon].trim();
+                let authored_key = authored_key
+                    .strip_prefix(['\'', '"'])
+                    .and_then(|key| key.strip_suffix(['\'', '"']))
+                    .unwrap_or(authored_key);
+                if authored_key == component {
+                    let value_start = flow_skip_whitespace(source, colon + 1, entry_end);
+                    return Some(YamlNodeSpan {
+                        start: entry_start,
+                        end: entry_end,
+                        indent: node.indent,
+                        value_start,
+                    });
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn yaml_pointer_component(component: &str) -> String {
+    component.replace("~1", "/").replace("~0", "~")
+}
+
+fn yaml_line_key_value_start(line: YamlLine<'_>, key: &str) -> Option<usize> {
+    let mut content = &line.text[line.indent..];
+    let mut content_offset = line.start + line.indent;
+    if let Some(rest) = content.strip_prefix("- ") {
+        content = rest;
+        content_offset += 2;
+    }
+    let rest = content.strip_prefix(key)?;
+    let rest = rest.strip_prefix(':')?;
+    let colon_offset = content_offset + key.len();
+    let whitespace = rest.bytes().take_while(u8::is_ascii_whitespace).count();
+    Some(colon_offset + 1 + whitespace)
+}
+
+fn yaml_node_end(
+    lines: &[YamlLine<'_>],
+    line_index: usize,
+    indent: usize,
+    fallback: usize,
+    allow_indentless_sequence: bool,
+) -> usize {
+    lines[line_index + 1..]
+        .iter()
+        .find(|line| {
+            let trimmed = line.text.trim();
+            !trimmed.is_empty()
+                && !trimmed.starts_with('#')
+                && (line.indent < indent
+                    || (line.indent == indent
+                        && !(allow_indentless_sequence
+                            && (trimmed == "-" || trimmed.starts_with("- ")))))
+        })
+        .map_or(fallback, |line| line.start)
+}
+
+fn yaml_scalar_span(source: &str, pointer: &str) -> Option<YamlNodeSpan> {
+    let lines = yaml_lines(source);
+    let mut node = YamlNodeSpan {
+        start: 0,
+        end: source.len(),
+        indent: -1,
+        value_start: 0,
+    };
+    for raw_component in pointer.split('/').skip(1) {
+        let component = yaml_pointer_component(raw_component);
+        if let Some(flow_node) = yaml_flow_child_span(source, node, &component) {
+            node = flow_node;
+            continue;
+        }
+        let sequence_index = component.parse::<usize>().ok();
+        let candidates = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| {
+                line.start >= node.start
+                    && line.start < node.end
+                    && if sequence_index.is_some() {
+                        line.indent as isize >= node.indent
+                    } else {
+                        line.indent as isize > node.indent
+                    }
+                    && !line.text.trim().is_empty()
+                    && !line.text.trim_start().starts_with('#')
+            })
+            .collect::<Vec<_>>();
+        if let Some(sequence_index) = sequence_index {
+            let direct_indent = candidates
+                .iter()
+                .filter(|(_, line)| {
+                    let trimmed = line.text.trim_start();
+                    trimmed == "-" || trimmed.starts_with("- ")
+                })
+                .map(|(_, line)| line.indent)
+                .min()?;
+            let (line_index, line) = candidates
+                .into_iter()
+                .filter(|(_, line)| {
+                    line.indent == direct_indent
+                        && (line.text.trim_start() == "-"
+                            || line.text.trim_start().starts_with("- "))
+                })
+                .nth(sequence_index)?;
+            let dash = line.text.find('-')?;
+            node = YamlNodeSpan {
+                start: line.start,
+                end: yaml_node_end(&lines, line_index, line.indent, node.end, false),
+                indent: line.indent as isize,
+                value_start: line.start + dash + 1,
+            };
+        } else {
+            let matches = candidates
+                .into_iter()
+                .filter_map(|(line_index, line)| {
+                    yaml_line_key_value_start(*line, &component)
+                        .map(|value_start| (line_index, *line, value_start))
+                })
+                .collect::<Vec<_>>();
+            let direct_indent = matches.iter().map(|(_, line, _)| line.indent).min()?;
+            let (line_index, line, value_start) = matches
+                .into_iter()
+                .find(|(_, line, _)| line.indent == direct_indent)?;
+            node = YamlNodeSpan {
+                start: line.start,
+                end: yaml_node_end(&lines, line_index, line.indent, node.end, true),
+                indent: line.indent as isize,
+                value_start,
+            };
+        }
+    }
+    Some(node)
+}
+
+fn source_range(source: &str, start: usize, end: usize) -> SourceRange {
     let position = |offset: usize| {
         let prefix = &source[..offset];
         Position {
@@ -7137,9 +7416,97 @@ fn locate_reference_expression(
                 .map_or(prefix.len() + 1, |(_, tail)| tail.len() + 1),
         }
     };
-    Some(SourceRange {
+    SourceRange {
         start: position(start),
-        end: position(start + needle.len()),
+        end: position(end),
+    }
+}
+
+fn locate_yaml_scalar_token(
+    source: &str,
+    pointer: &str,
+    authored: &str,
+    token: &str,
+    ordinal: usize,
+) -> Option<SourceRange> {
+    let span = yaml_scalar_span(source, pointer)?;
+    let authored_ordinal = authored.match_indices(token).nth(ordinal)?.0;
+    let same_token_ordinal = authored[..authored_ordinal].matches(token).count();
+    let relative = source[span.value_start..span.end]
+        .match_indices(token)
+        .nth(same_token_ordinal)?
+        .0;
+    let start = span.value_start + relative;
+    Some(source_range(source, start, start + token.len()))
+}
+
+fn locate_yaml_scalar_offset(
+    source: &str,
+    pointer: &str,
+    authored: &str,
+    start: usize,
+    end: usize,
+) -> Option<SourceRange> {
+    let span = yaml_scalar_span(source, pointer)?;
+    let fragment = authored.get(start..end)?;
+    let ordinal = authored[..start].matches(fragment).count();
+    if !fragment.is_empty() {
+        if let Some(relative) = source[span.value_start..span.end]
+            .match_indices(fragment)
+            .nth(ordinal)
+            .map(|(offset, _)| offset)
+        {
+            let absolute = span.value_start + relative;
+            return Some(source_range(source, absolute, absolute + fragment.len()));
+        }
+    }
+    // Folded block scalars change authored whitespace. Delimiters themselves
+    // remain byte-for-byte in source, so retain a useful field-local range.
+    for token in ["[[", "]]", "[[]]"] {
+        if authored
+            .get(start..)
+            .is_some_and(|tail| tail.starts_with(token))
+        {
+            let token_ordinal = authored[..start].matches(token).count();
+            let relative = source[span.value_start..span.end]
+                .match_indices(token)
+                .nth(token_ordinal)?
+                .0;
+            let absolute = span.value_start + relative;
+            return Some(source_range(source, absolute, absolute + token.len()));
+        }
+    }
+    None
+}
+
+fn locate_reference_expression(
+    source: &str,
+    pointer: &str,
+    authored: &str,
+    expression: &crate::ReferenceExpression,
+) -> Option<SourceRange> {
+    let needle = format!("[[{}]]", expression.authored);
+    let ordinal = authored[..expression.start].matches(&needle).count();
+    let span = yaml_scalar_span(source, pointer)?;
+    let relative = source[span.value_start..span.end]
+        .match_indices(&needle)
+        .nth(ordinal)?
+        .0;
+    let start = span.value_start + relative;
+    Some(source_range(source, start, start + needle.len()))
+}
+
+fn locate_first_reference_in_yaml_scalar(
+    source: &str,
+    pointer: &str,
+    authored: &str,
+) -> Option<SourceRange> {
+    let parsed = parse_reference_text(authored).ok()?;
+    parsed.segments.iter().find_map(|segment| match segment {
+        ReferenceTextSegment::Reference { expression } => {
+            locate_reference_expression(source, pointer, authored, expression)
+        }
+        ReferenceTextSegment::Literal { .. } => None,
     })
 }
 

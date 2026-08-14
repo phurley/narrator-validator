@@ -3,6 +3,7 @@ import { readFile } from 'node:fs/promises'
 
 import {
   initializeNarratorValidator,
+  parseReferenceText,
   referenceTextMetadata,
   validateRepository,
   validateRepositoryWithFeatures,
@@ -33,6 +34,37 @@ assert.ok(
     (kind) => kind.kind === 'character' && kind.default_path === 'name',
   ),
 )
+
+const parsedText = await parseReferenceText('é [[character.echo.name]]!')
+assert.equal(parsedText.status, 'parsed')
+assert.deepEqual(parsedText.value.segments, [
+  { type: 'literal', text: 'é ' },
+  {
+    type: 'reference',
+    expression: {
+      authored: 'character.echo.name',
+      target_id: 'character.echo',
+      property_path: ['name'],
+      start: 3,
+      end: 26,
+    },
+  },
+  { type: 'literal', text: '!' },
+])
+
+const escapedText = await parseReferenceText(
+  String.raw`literal \[[character.echo]]`,
+)
+assert.equal(escapedText.status, 'parsed')
+assert.deepEqual(escapedText.value.segments, [
+  { type: 'literal', text: 'literal [[character.echo]]' },
+])
+
+const parseError = await parseReferenceText('é [[character.echo')
+assert.deepEqual(parseError, {
+  status: 'error',
+  error: { type: 'unclosed', start: 3 },
+})
 
 const featureFiles = [
   {

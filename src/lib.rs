@@ -12,10 +12,11 @@ pub use diagnostic::{
     Diagnostic, Position, RelatedLocation, Severity, SourceFile, SourceRange, ValidationReport,
 };
 pub use reference_text::{
-    parse_reference_text, reference_kind, reference_text_metadata_json, ConsumerField,
-    DisclosureClass, ParsedReferenceText, ReferenceExpression, ReferenceKind, ReferenceParseError,
-    ReferencePath, ReferenceProvenance, ReferenceTextSegment, ResolvedReferenceText,
-    CONSUMER_FIELDS, REFERENCE_KINDS, REFERENCE_TEXT_FEATURE, SUPPORTED_FEATURES,
+    parse_reference_text, parse_reference_text_result, reference_kind,
+    reference_text_metadata_json, ConsumerField, DisclosureClass, ParsedReferenceText,
+    ReferenceExpression, ReferenceKind, ReferenceParseError, ReferencePath, ReferenceProvenance,
+    ReferenceTextParseResult, ReferenceTextSegment, ResolvedReferenceText, CONSUMER_FIELDS,
+    REFERENCE_KINDS, REFERENCE_TEXT_FEATURE, SUPPORTED_FEATURES,
 };
 pub use ruleset::{
     resolve_ruleset, ResolvedRuleset, RulesetError, RulesetReference, STANDARD_MYSTERY_RULESET_ID,
@@ -36,7 +37,8 @@ mod wasm {
     use wasm_bindgen::prelude::*;
 
     use crate::{
-        reference_text_metadata_json, validate, validate_with_supported_features, SourceFile,
+        parse_reference_text_result, reference_text_metadata_json, validate,
+        validate_with_supported_features, SourceFile,
     };
 
     /// Validate a JSON array of `{ "path": string, "source": string }` values.
@@ -70,5 +72,13 @@ mod wasm {
     #[wasm_bindgen]
     pub fn reference_text_metadata_json_export() -> String {
         reference_text_metadata_json()
+    }
+
+    /// Parse reference-aware prose without validating a repository.
+    #[wasm_bindgen]
+    pub fn parse_reference_text_json(source: &str) -> Result<String, JsValue> {
+        serde_json::to_string(&parse_reference_text_result(source)).map_err(|error| {
+            JsValue::from_str(&format!("could not serialize parse result: {error}"))
+        })
     }
 }

@@ -3591,10 +3591,13 @@ fn reference_text_resolves_multihop_nested_facts_and_testimony() {
         .unwrap();
     assert_eq!(opening.resolved, "The Foyer waits in The Foyer.");
     assert_eq!(opening.provenance.len(), 3);
-    assert!(opening
-        .provenance
-        .iter()
-        .all(|origin| origin.range.is_some()));
+    assert!(
+        opening
+            .provenance
+            .iter()
+            .all(|origin| origin.range.is_some()),
+        "{opening:#?}"
+    );
 
     let fact = format_3_2_reference_story()
         .replace(
@@ -3757,4 +3760,138 @@ fn features_are_rejected_before_format_3_2() {
     assert_eq!(report.diagnostics.len(), 1, "{:#?}", report.diagnostics);
     assert_eq!(report.diagnostics[0].code, "feature.format_incompatible");
     assert!(report.reference_text.is_empty());
+}
+
+fn reference_range_report(
+    case_source: &str,
+    character_source: &str,
+) -> narrator_validator::ValidationReport {
+    validate(&[
+        SourceFile {
+            path: "case.yaml".to_string(),
+            source: case_source.to_string(),
+        },
+        SourceFile {
+            path: "characters.yaml".to_string(),
+            source: character_source.to_string(),
+        },
+    ])
+}
+
+#[test]
+fn reference_ranges_are_anchored_to_identical_owning_scalars_and_repetitions() {
+    let report = reference_range_report(
+        "case:\n  id: case.ranges\n  format_version: \"3.2.0\"\n  features: [reference_text_v1]\n  players: { min: 1, max: 1 }\n  initial_time: \"20:00\"\n  title: \"[[character.echo]]\"\n  premise: \"[[character.echo]]\"\n  opening: \"[[character.echo]] then [[character.echo]]\"\n",
+        "characters:\n  - id: character.echo\n    name: Echo Vale\n    description: A witness.\n",
+    );
+    let field = |pointer: &str| {
+        report
+            .reference_text
+            .iter()
+            .find(|field| field.pointer == pointer)
+            .unwrap_or_else(|| panic!("missing {pointer}: {:#?}", report.diagnostics))
+    };
+    assert_eq!(
+        field("/case/title").provenance[0].range.unwrap().start.line,
+        7
+    );
+    assert_eq!(
+        field("/case/premise").provenance[0]
+            .range
+            .unwrap()
+            .start
+            .line,
+        8
+    );
+    let opening = field("/case/opening");
+    assert_eq!(opening.provenance[0].range.unwrap().start.line, 9);
+    assert_eq!(opening.provenance[1].range.unwrap().start.line, 9);
+    assert_ne!(
+        opening.provenance[0].range.unwrap().start.column,
+        opening.provenance[1].range.unwrap().start.column
+    );
+}
+
+#[test]
+fn reference_ranges_follow_literal_and_folded_block_scalar_lines() {
+    let report = reference_range_report(
+        "case:\n  id: case.blocks\n  format_version: \"3.2.0\"\n  features: [reference_text_v1]\n  players: { min: 1, max: 1 }\n  initial_time: \"20:00\"\n  title: Block ranges\n  premise: |\n    First line.\n    [[character.echo]] literal line.\n  opening: >\n    Folded lead\n    [[character.echo]] folded line.\n",
+        "characters:\n  - id: character.echo\n    name: Echo Vale\n    description: A witness.\n",
+    );
+    let premise = report
+        .reference_text
+        .iter()
+        .find(|field| field.pointer == "/case/premise")
+        .unwrap();
+    let opening = report
+        .reference_text
+        .iter()
+        .find(|field| field.pointer == "/case/opening")
+        .unwrap();
+    assert_eq!(premise.provenance[0].range.unwrap().start.line, 10);
+    assert_eq!(opening.provenance[0].range.unwrap().start.line, 13);
+}
+
+#[test]
+fn reference_ranges_follow_flow_mapping_and_sequence_pointers() {
+    let report = reference_range_report(
+        "case: { id: case.flow, format_version: \"3.2.0\", features: [reference_text_v1], players: { min: 1, max: 1 }, initial_time: \"20:00\", title: \"[[character.echo]]\", opening: \"[[character.echo]]\" }\n",
+        "characters: [{ id: character.echo, name: Echo Vale, description: A witness. }]\n",
+    );
+    let title = report
+        .reference_text
+        .iter()
+        .find(|field| field.pointer == "/case/title")
+        .unwrap();
+    let opening = report
+        .reference_text
+        .iter()
+        .find(|field| field.pointer == "/case/opening")
+        .unwrap();
+    assert_eq!(title.provenance[0].range.unwrap().start.line, 1);
+    assert_eq!(opening.provenance[0].range.unwrap().start.line, 1);
+    assert_ne!(
+        title.provenance[0].range.unwrap().start.column,
+        opening.provenance[0].range.unwrap().start.column
+    );
+}
+
+#[test]
+fn malformed_and_cycle_ranges_match_their_exact_field_pointers() {
+    let malformed = reference_range_report(
+        "case:\n  id: case.malformed\n  format_version: \"3.2.0\"\n  features: [reference_text_v1]\n  players: { min: 1, max: 1 }\n  initial_time: \"20:00\"\n  title: \"[[character.echo\"\n  opening: \"[[character.echo\"\n",
+        "characters:\n  - id: character.echo\n    name: Echo Vale\n    description: A witness.\n",
+    );
+    let malformed_fields = malformed
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "reference_text.malformed")
+        .map(|diagnostic| {
+            (
+                diagnostic.pointer.as_deref().unwrap(),
+                diagnostic.range.unwrap().start.line,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(malformed_fields["/case/title"], 7);
+    assert_eq!(malformed_fields["/case/opening"], 8);
+
+    let cycle = reference_range_report(
+        "case:\n  id: case.cycle_ranges\n  format_version: \"3.2.0\"\n  features: [reference_text_v1]\n  players: { min: 1, max: 1 }\n  initial_time: \"20:00\"\n  title: Cycle ranges\n  opening: \"[[character.alpha]]\"\n",
+        "characters:\n  - id: character.alpha\n    name: \"[[character.beta]]\"\n    description: Alpha.\n  - id: character.beta\n    name: \"[[character.alpha]]\"\n    description: Beta.\n",
+    );
+    let diagnostic = cycle
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "reference_text.cycle")
+        .unwrap();
+    for related in &diagnostic.related {
+        let pointer = related.pointer.as_deref().unwrap();
+        let line = related.range.unwrap().start.line;
+        match pointer {
+            "/characters/0/name" => assert_eq!(line, 3),
+            "/characters/1/name" => assert_eq!(line, 6),
+            other => panic!("unexpected cycle pointer {other}"),
+        }
+    }
 }

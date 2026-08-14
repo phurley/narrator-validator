@@ -92,3 +92,7 @@ Rust runtimes call `validate_with_supported_features`; browser runtimes call
 known to this validator may use the existing `validate`/`validateRepository`
 entry point. Parsing-only consumers can call `parse_reference_text` and retain
 its typed literal/reference segments without inventing a regular expression.
+Browser consumers use the async `parseReferenceText` wrapper for the same
+parsing-only contract. Expression `start` and `end` positions are zero-based
+UTF-8 byte offsets in both APIs; parse failures are returned as a typed result
+with the same byte offsets rather than thrown as JavaScript exceptions.

@@ -1,4 +1,5 @@
 import initWasm, {
+  parse_reference_text_json as parseReferenceTextJson,
   reference_text_metadata_json_export as referenceTextMetadataJson,
   validate_json as validateJson,
   validate_json_with_features as validateJsonWithFeatures,
@@ -68,4 +69,16 @@ export async function validateRepositoryWithFeatures(files, supportedFeatures) {
 export async function referenceTextMetadata() {
   await initializeNarratorValidator()
   return JSON.parse(referenceTextMetadataJson())
+}
+
+/**
+ * Parse reference-aware prose without validating a repository. Expression
+ * offsets are zero-based UTF-8 byte offsets, matching the Rust API.
+ *
+ * @param {string} source
+ * @returns {Promise<import('./index.js').ReferenceTextParseResult>}
+ */
+export async function parseReferenceText(source) {
+  await initializeNarratorValidator()
+  return JSON.parse(parseReferenceTextJson(source))
 }
