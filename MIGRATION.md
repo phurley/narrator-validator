@@ -1,5 +1,21 @@
 # Migrating story format 2 to format 3
 
+## Moving from Format 3.1 to 3.2 reference-aware text
+
+Format 3.1 stories require no changes. To use reference-aware prose, first
+update every validating and executing consumer to validator 1.2-capable code.
+Then set `case.format_version: "3.2.0"`, add the ordered unique feature list
+`features: [reference_text_v1]`, and replace copied narrative names/details only
+in fields and target paths listed in
+[the Format 3.2 matrix](docs/story-format-3.2.md#authoritative-disclosure-and-path-matrix).
+
+Do not add `features` before all consumers negotiate it: validator 1.1 rejects
+the field by design, and a 1.2 consumer that does not advertise
+`reference_text_v1` rejects the repository before interpreting prose. Escaped
+`\[[...]]` remains literal. IDs, gates, truth, effects, author notes, voice data,
+and other mechanical or private values cannot be exposed through player-safe
+text.
+
 Validator `1.0.0` authors story format `3.0.0`. Format 2 is a migration-only
 input: the validator reports one `format.incompatible_version` diagnostic and
 does not partially interpret the repository as format 3. Complete the changes

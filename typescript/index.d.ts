@@ -44,6 +44,75 @@ export interface ValidationReport {
   format_version?: string
   valid: boolean
   diagnostics: Diagnostic[]
+  features?: string[]
+  reference_text?: ResolvedReferenceText[]
+}
+
+export type DisclosureClass =
+  | 'player_safe'
+  | 'gated_player_safe'
+  | 'private_narrator'
+
+export interface ReferenceExpression {
+  authored: string
+  target_id: string
+  property_path: string[]
+  /** Zero-based UTF-8 byte offset of the opening delimiter. */
+  start: number
+  /** Exclusive zero-based UTF-8 byte offset after the closing delimiter. */
+  end: number
+}
+
+export type ReferenceTextSegment =
+  | { type: 'literal'; text: string }
+  | { type: 'reference'; expression: ReferenceExpression }
+
+export interface ParsedReferenceText {
+  source: string
+  segments: ReferenceTextSegment[]
+}
+
+export type ReferenceParseError =
+  | { type: 'unclosed'; start: number }
+  | { type: 'empty'; start: number; end: number }
+  | { type: 'invalid'; authored: string; start: number; end: number }
+  | { type: 'unexpected_close'; start: number }
+
+export type ReferenceTextParseResult =
+  | { status: 'parsed'; value: ParsedReferenceText }
+  | { status: 'error'; error: ReferenceParseError }
+
+export interface ReferenceProvenance {
+  expression: ReferenceExpression
+  path: string
+  pointer: string
+  range?: SourceRange
+  definition_pointer: string
+  resolved_path: string
+  resolved_value: string
+}
+
+export interface ResolvedReferenceText {
+  path: string
+  pointer: string
+  disclosure: DisclosureClass
+  authored: string
+  resolved: string
+  provenance: ReferenceProvenance[]
+}
+
+export interface ReferenceTextMetadata {
+  supported_features: string[]
+  consumer_fields: Array<{
+    kind: string
+    path: string
+    disclosure: DisclosureClass
+  }>
+  reference_kinds: Array<{
+    kind: string
+    default_path: string | null
+    paths: Array<{ path: string; disclosure: DisclosureClass }>
+  }>
 }
 
 export interface RulesetCommandParameter {
@@ -93,3 +162,15 @@ export function initializeNarratorValidator(
 export function validateRepository(
   files: readonly SourceFile[],
 ): Promise<ValidationReport>
+
+export function validateRepositoryWithFeatures(
+  files: readonly SourceFile[],
+  supportedFeatures: readonly string[],
+): Promise<ValidationReport>
+
+export function referenceTextMetadata(): Promise<ReferenceTextMetadata>
+
+/** Parse prose; expression offsets are zero-based UTF-8 byte offsets. */
+export function parseReferenceText(
+  source: string,
+): Promise<ReferenceTextParseResult>

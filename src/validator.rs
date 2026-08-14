@@ -5,9 +5,11 @@ use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
 
 use crate::{
-    resolve_ruleset, Diagnostic, Position, RelatedLocation, RulesetReference, Severity, SourceFile,
-    SourceRange, ValidationReport, STANDARD_MYSTERY_RULESET_ID, STANDARD_MYSTERY_RULESET_VERSION_2,
-    STORY_FORMAT_VERSION, VALIDATOR_VERSION,
+    parse_reference_text, reference_kind, resolve_ruleset, Diagnostic, DisclosureClass, Position,
+    ReferenceProvenance, ReferenceTextSegment, RelatedLocation, ResolvedReferenceText,
+    RulesetReference, Severity, SourceFile, SourceRange, ValidationReport, CONSUMER_FIELDS,
+    REFERENCE_TEXT_FEATURE, STANDARD_MYSTERY_RULESET_ID, STANDARD_MYSTERY_RULESET_VERSION_2,
+    STORY_FORMAT_VERSION, SUPPORTED_FEATURES, VALIDATOR_VERSION,
 };
 
 const MAX_REPOSITORY_FILES: usize = 512;
@@ -239,10 +241,30 @@ struct Validator<'a> {
     format_version: Option<Version>,
     format_compatible: bool,
     ruleset: Option<RulesetReference>,
+    features: Vec<String>,
+    supported_features: BTreeSet<String>,
+    feature_compatible: bool,
+    reference_text: Vec<ResolvedReferenceText>,
 }
 
 /// Validate a complete, immutable repository snapshot.
 pub fn validate(files: &[SourceFile]) -> ValidationReport {
+    validate_with_supported_features(
+        files,
+        &SUPPORTED_FEATURES
+            .iter()
+            .map(|feature| (*feature).to_string())
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Validate using the exact feature set implemented by the calling consumer.
+/// Declared capabilities not present in `supported_features` stop validation
+/// before story prose is interpreted.
+pub fn validate_with_supported_features(
+    files: &[SourceFile],
+    supported_features: &[String],
+) -> ValidationReport {
     let mut validator = Validator {
         files,
         parsed: Vec::new(),
@@ -252,6 +274,10 @@ pub fn validate(files: &[SourceFile]) -> ValidationReport {
         format_version: None,
         format_compatible: true,
         ruleset: None,
+        features: Vec::new(),
+        supported_features: supported_features.iter().cloned().collect(),
+        feature_compatible: true,
+        reference_text: Vec::new(),
     };
     validator.run();
     validator.diagnostics.sort_by(|left, right| {
@@ -279,6 +305,8 @@ pub fn validate(files: &[SourceFile]) -> ValidationReport {
         format_version: validator.format_version.map(|version| version.to_string()),
         valid,
         diagnostics: validator.diagnostics,
+        features: validator.features,
+        reference_text: validator.reference_text,
     }
 }
 
@@ -295,6 +323,12 @@ impl<'a> Validator<'a> {
             .is_some_and(|version| version.major == 3 && version.minor >= 1)
     }
 
+    fn is_format_3_2_or_later(&self) -> bool {
+        self.format_version
+            .as_ref()
+            .is_some_and(|version| version.major == 3 && version.minor >= 2)
+    }
+
     fn run(&mut self) {
         if !self.validate_repository_bounds() {
             return;
@@ -304,7 +338,7 @@ impl<'a> Validator<'a> {
 
         let cases = self.items("case", Kind::Case, false);
         self.validate_case(&cases);
-        if !self.format_compatible {
+        if !self.format_compatible || !self.feature_compatible {
             return;
         }
         self.validate_section_filenames();
@@ -334,7 +368,7 @@ impl<'a> Validator<'a> {
         } else {
             Vec::new()
         };
-        self.nested_testimonies(&characters);
+        let testimonies = self.nested_testimonies(&characters);
         let facts_enabled = !facts.is_empty();
 
         if self.is_format_3() {
@@ -350,6 +384,23 @@ impl<'a> Validator<'a> {
                 &flags,
                 &commands,
                 &triggers,
+            );
+        }
+
+        if self.is_format_3_2_or_later() {
+            self.validate_reference_text(
+                &cases,
+                &settings,
+                &characters,
+                &entities,
+                &events,
+                &facts,
+                &deductions,
+                &flags,
+                &commands,
+                &triggers,
+                &testimonies,
+                &win_states,
             );
         }
 
@@ -1004,7 +1055,8 @@ impl<'a> Validator<'a> {
         result
     }
 
-    fn nested_testimonies(&mut self, characters: &[Item]) {
+    fn nested_testimonies(&mut self, characters: &[Item]) -> Vec<Item> {
+        let mut result = Vec::new();
         for character in characters {
             let Some(value) = character
                 .mapping
@@ -1100,10 +1152,19 @@ impl<'a> Validator<'a> {
                         }],
                     });
                 } else {
-                    self.definitions.insert(id, definition);
+                    self.definitions.insert(id.clone(), definition);
                 }
+                result.push(Item {
+                    kind: Kind::Testimony,
+                    id,
+                    path: character.path.clone(),
+                    source: character.source.clone(),
+                    pointer,
+                    mapping,
+                });
             }
         }
+        result
     }
 
     fn validate_case(&mut self, cases: &[Item]) {
@@ -1195,6 +1256,10 @@ impl<'a> Validator<'a> {
             ),
         }
         if !self.format_compatible {
+            return;
+        }
+        self.validate_features(case);
+        if !self.feature_compatible {
             return;
         }
         for field in ["entry_settings", "exit_settings"] {
@@ -1298,6 +1363,95 @@ impl<'a> Validator<'a> {
                     None,
                     Some(case.id.clone()),
                 ),
+            }
+        }
+    }
+
+    fn validate_features(&mut self, case: &Item) {
+        let Some(value) = case.mapping.get(Value::String("features".to_string())) else {
+            return;
+        };
+        let pointer = format!("{}/features", case.pointer);
+        if !self.is_format_3_2_or_later() {
+            self.feature_compatible = false;
+            self.push(
+                Severity::Error,
+                "feature.format_incompatible",
+                "`case.features` requires story format 3.2.0 or later".to_string(),
+                &case.path,
+                Some(pointer),
+                None,
+                Some(case.id.clone()),
+            );
+            return;
+        }
+        let Some(entries) = value.as_sequence() else {
+            self.feature_compatible = false;
+            self.push(
+                Severity::Error,
+                "feature.list_type",
+                "`case.features` must be an ordered sequence of unique feature names".to_string(),
+                &case.path,
+                Some(pointer),
+                None,
+                Some(case.id.clone()),
+            );
+            return;
+        };
+        let mut seen = HashSet::new();
+        for (index, entry) in entries.iter().enumerate() {
+            let entry_pointer = format!("{pointer}/{index}");
+            let Some(feature) = entry.as_str().filter(|feature| !feature.trim().is_empty()) else {
+                self.feature_compatible = false;
+                self.push(
+                    Severity::Error,
+                    "feature.name_type",
+                    "feature names must be non-empty strings".to_string(),
+                    &case.path,
+                    Some(entry_pointer),
+                    None,
+                    Some(case.id.clone()),
+                );
+                continue;
+            };
+            self.features.push(feature.to_string());
+            if !seen.insert(feature) {
+                self.feature_compatible = false;
+                self.push(
+                    Severity::Error,
+                    "feature.duplicate",
+                    format!("feature `{feature}` is declared more than once"),
+                    &case.path,
+                    Some(entry_pointer),
+                    locate_scalar(&case.source, feature),
+                    Some(case.id.clone()),
+                );
+                continue;
+            }
+            if !SUPPORTED_FEATURES.contains(&feature) {
+                self.feature_compatible = false;
+                self.push(
+                    Severity::Error,
+                    "feature.unknown",
+                    format!(
+                        "feature `{feature}` is not recognized by validator {VALIDATOR_VERSION}"
+                    ),
+                    &case.path,
+                    Some(entry_pointer),
+                    locate_scalar(&case.source, feature),
+                    Some(case.id.clone()),
+                );
+            } else if !self.supported_features.contains(feature) {
+                self.feature_compatible = false;
+                self.push(
+                    Severity::Error,
+                    "feature.consumer_unsupported",
+                    format!("this consumer does not advertise support for feature `{feature}`"),
+                    &case.path,
+                    Some(entry_pointer),
+                    locate_scalar(&case.source, feature),
+                    Some(case.id.clone()),
+                );
             }
         }
     }
@@ -1571,25 +1725,26 @@ impl<'a> Validator<'a> {
         commands: &[Item],
         triggers: &[Item],
     ) {
-        self.validate_item_fields(
-            cases,
-            &[
-                "id",
-                "format_version",
-                "ruleset",
-                "title",
-                "genre",
-                "tone",
-                "players",
-                "estimated_duration_minutes",
-                "entry_settings",
-                "exit_settings",
-                "initial_time",
-                "premise",
-                "opening",
-                "author_notes",
-            ],
-        );
+        let mut case_fields = vec![
+            "id",
+            "format_version",
+            "ruleset",
+            "title",
+            "genre",
+            "tone",
+            "players",
+            "estimated_duration_minutes",
+            "entry_settings",
+            "exit_settings",
+            "initial_time",
+            "premise",
+            "opening",
+            "author_notes",
+        ];
+        if self.is_format_3_2_or_later() {
+            case_fields.push("features");
+        }
+        self.validate_item_fields(cases, &case_fields);
         self.validate_item_fields(
             settings,
             &[
@@ -6326,6 +6481,196 @@ impl<'a> Validator<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn validate_reference_text(
+        &mut self,
+        cases: &[Item],
+        settings: &[Item],
+        characters: &[Item],
+        entities: &[Item],
+        events: &[Item],
+        facts: &[Item],
+        deductions: &[Item],
+        flags: &[Item],
+        commands: &[Item],
+        triggers: &[Item],
+        testimonies: &[Item],
+        win_states: &[Item],
+    ) {
+        let mut definitions = BTreeMap::new();
+        for items in [
+            cases,
+            settings,
+            characters,
+            entities,
+            events,
+            facts,
+            deductions,
+            flags,
+            commands,
+            triggers,
+            testimonies,
+            win_states,
+        ] {
+            for item in items {
+                if reference_kind(item.kind.name()).is_some() {
+                    definitions.insert(item.id.clone(), TextDefinition::from(item));
+                }
+            }
+        }
+
+        let mut consumers = Vec::new();
+        for items in [
+            cases,
+            settings,
+            characters,
+            entities,
+            events,
+            facts,
+            deductions,
+            flags,
+            commands,
+            triggers,
+            testimonies,
+            win_states,
+        ] {
+            for item in items {
+                collect_item_text_consumers(item, &mut consumers);
+            }
+        }
+        collect_nested_command_text(commands, &mut consumers);
+        collect_nested_command_text(triggers, &mut consumers);
+        for file in &self.parsed {
+            let Some(solution) = file
+                .value
+                .as_mapping()
+                .and_then(|root| root.get(Value::String("solution".to_string())))
+                .and_then(Value::as_mapping)
+            else {
+                continue;
+            };
+            for field in CONSUMER_FIELDS
+                .iter()
+                .filter(|field| field.kind == "solution")
+            {
+                if let Some(text) = mapping_path(solution, field.path).and_then(Value::as_str) {
+                    consumers.push(TextConsumer {
+                        owner_id: None,
+                        path: file.path.to_string(),
+                        source: file.source.to_string(),
+                        pointer: format!("/solution/{}", field.path.replace('.', "/")),
+                        authored: text.to_string(),
+                        disclosure: field.disclosure,
+                    });
+                }
+            }
+        }
+
+        let enabled = self
+            .features
+            .iter()
+            .any(|feature| feature == REFERENCE_TEXT_FEATURE);
+        if !enabled {
+            for consumer in consumers {
+                if parse_reference_text(&consumer.authored).is_ok_and(|parsed| {
+                    parsed
+                        .segments
+                        .iter()
+                        .any(|segment| matches!(segment, ReferenceTextSegment::Reference { .. }))
+                }) {
+                    self.push(
+                        Severity::Error,
+                        "reference_text.feature_required",
+                        "reference expression requires `case.features: [reference_text_v1]`"
+                            .to_string(),
+                        &consumer.path,
+                        Some(consumer.pointer.clone()),
+                        locate_yaml_scalar_token(
+                            &consumer.source,
+                            &consumer.pointer,
+                            &consumer.authored,
+                            "[[",
+                            0,
+                        ),
+                        consumer.owner_id,
+                    );
+                }
+            }
+            return;
+        }
+
+        for consumer in consumers {
+            let parsed = match parse_reference_text(&consumer.authored) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    let (start, end) = parse_error_offsets(&error, consumer.authored.len());
+                    self.push(
+                        Severity::Error,
+                        "reference_text.malformed",
+                        error.to_string(),
+                        &consumer.path,
+                        Some(consumer.pointer.clone()),
+                        locate_yaml_scalar_offset(
+                            &consumer.source,
+                            &consumer.pointer,
+                            &consumer.authored,
+                            start,
+                            end,
+                        ),
+                        consumer.owner_id,
+                    );
+                    continue;
+                }
+            };
+            if !parsed
+                .segments
+                .iter()
+                .any(|segment| matches!(segment, ReferenceTextSegment::Reference { .. }))
+            {
+                continue;
+            }
+            let mut resolver = TextResolver::new(&definitions);
+            let location = TextLocation {
+                path: &consumer.path,
+                source: &consumer.source,
+                pointer: &consumer.pointer,
+                authored: &consumer.authored,
+            };
+            match resolver.resolve_parsed(&parsed, consumer.disclosure, &mut Vec::new(), location) {
+                Ok(node) => self.reference_text.push(ResolvedReferenceText {
+                    path: consumer.path,
+                    pointer: consumer.pointer,
+                    disclosure: consumer.disclosure,
+                    authored: consumer.authored,
+                    resolved: node.text,
+                    provenance: node.provenance,
+                }),
+                Err(error) => {
+                    let range = error.range.or_else(|| {
+                        error.expression.as_ref().and_then(|expression| {
+                            locate_reference_expression(
+                                &error.source,
+                                &error.pointer,
+                                &error.authored,
+                                expression,
+                            )
+                        })
+                    });
+                    self.diagnostics.push(Diagnostic {
+                        severity: Severity::Error,
+                        code: error.code.to_string(),
+                        message: error.message,
+                        path: error.path,
+                        pointer: Some(error.pointer),
+                        range,
+                        subject_id: consumer.owner_id,
+                        related: error.related,
+                    });
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn push(
         &mut self,
         severity: Severity,
@@ -6347,6 +6692,837 @@ impl<'a> Validator<'a> {
             related: Vec::new(),
         });
     }
+}
+
+#[derive(Clone)]
+struct TextDefinition {
+    id: String,
+    kind: &'static str,
+    path: String,
+    source: String,
+    pointer: String,
+    mapping: Mapping,
+}
+
+impl From<&Item> for TextDefinition {
+    fn from(item: &Item) -> Self {
+        Self {
+            id: item.id.clone(),
+            kind: item.kind.name(),
+            path: item.path.clone(),
+            source: item.source.clone(),
+            pointer: item.pointer.clone(),
+            mapping: item.mapping.clone(),
+        }
+    }
+}
+
+struct TextConsumer {
+    owner_id: Option<String>,
+    path: String,
+    source: String,
+    pointer: String,
+    authored: String,
+    disclosure: DisclosureClass,
+}
+
+#[derive(Clone)]
+struct ResolvedNode {
+    text: String,
+    provenance: Vec<ReferenceProvenance>,
+}
+
+struct TextResolveError {
+    code: &'static str,
+    message: String,
+    path: String,
+    source: String,
+    pointer: String,
+    authored: String,
+    expression: Option<crate::ReferenceExpression>,
+    range: Option<SourceRange>,
+    related: Vec<RelatedLocation>,
+}
+
+#[derive(Clone, Copy)]
+struct TextLocation<'a> {
+    path: &'a str,
+    source: &'a str,
+    pointer: &'a str,
+    authored: &'a str,
+}
+
+#[derive(Clone)]
+struct ResolveEdge {
+    target: (String, String),
+    expression: crate::ReferenceExpression,
+    path: String,
+    source: String,
+    pointer: String,
+    authored: String,
+}
+
+impl ResolveEdge {
+    fn new(
+        target: (String, String),
+        expression: &crate::ReferenceExpression,
+        location: TextLocation<'_>,
+    ) -> Self {
+        Self {
+            target,
+            expression: expression.clone(),
+            path: location.path.to_string(),
+            source: location.source.to_string(),
+            pointer: location.pointer.to_string(),
+            authored: location.authored.to_string(),
+        }
+    }
+
+    fn related_location(&self) -> RelatedLocation {
+        RelatedLocation {
+            message: format!(
+                "cycle edge references `{}.{}`",
+                self.target.0, self.target.1
+            ),
+            path: self.path.clone(),
+            pointer: Some(self.pointer.clone()),
+            range: locate_reference_expression(
+                &self.source,
+                &self.pointer,
+                &self.authored,
+                &self.expression,
+            ),
+        }
+    }
+}
+
+struct TextResolver<'a> {
+    definitions: &'a BTreeMap<String, TextDefinition>,
+    memo: HashMap<(String, String, DisclosureClass), ResolvedNode>,
+}
+
+impl<'a> TextResolver<'a> {
+    fn new(definitions: &'a BTreeMap<String, TextDefinition>) -> Self {
+        Self {
+            definitions,
+            memo: HashMap::new(),
+        }
+    }
+
+    fn resolve_parsed(
+        &mut self,
+        parsed: &crate::ParsedReferenceText,
+        disclosure: DisclosureClass,
+        stack: &mut Vec<ResolveEdge>,
+        location: TextLocation<'_>,
+    ) -> Result<ResolvedNode, Box<TextResolveError>> {
+        let mut text = String::new();
+        let mut provenance = Vec::new();
+        for segment in &parsed.segments {
+            match segment {
+                ReferenceTextSegment::Literal { text: literal } => text.push_str(literal),
+                ReferenceTextSegment::Reference { expression } => {
+                    let Some(definition) = self.definitions.get(&expression.target_id) else {
+                        return Err(text_error(
+                            "reference_text.unknown_id",
+                            format!(
+                                "reference expression names unknown ID `{}`",
+                                expression.target_id
+                            ),
+                            parsed,
+                            expression,
+                            location,
+                        ));
+                    };
+                    let Some(kind) = reference_kind(definition.kind) else {
+                        return Err(text_error(
+                            "reference_text.unsupported_kind",
+                            format!(
+                                "`{}` is not a referenceable definition kind",
+                                definition.kind
+                            ),
+                            parsed,
+                            expression,
+                            location,
+                        ));
+                    };
+                    let property_path = if expression.property_path.is_empty() {
+                        kind.default_path
+                            .ok_or_else(|| {
+                                text_error(
+                                    "reference_text.default_missing",
+                                    format!(
+                                        "{} references require an explicit property path",
+                                        definition.kind
+                                    ),
+                                    parsed,
+                                    expression,
+                                    location,
+                                )
+                            })?
+                            .to_string()
+                    } else {
+                        expression.property_path.join(".")
+                    };
+                    let Some(path_contract) =
+                        kind.paths.iter().find(|path| path.path == property_path)
+                    else {
+                        return Err(text_error(
+                            "reference_text.path_disallowed",
+                            format!(
+                                "path `{property_path}` is not an allowed narrative path for `{}`",
+                                definition.id
+                            ),
+                            parsed,
+                            expression,
+                            location,
+                        ));
+                    };
+                    if !crate::reference_text::disclosure_allows(
+                        disclosure,
+                        path_contract.disclosure,
+                    ) {
+                        return Err(text_error(
+                            "reference_text.disclosure",
+                            disclosure_mismatch_message(
+                                disclosure,
+                                path_contract.disclosure,
+                                &format!("{}.{property_path}", definition.id),
+                            ),
+                            parsed,
+                            expression,
+                            location,
+                        ));
+                    }
+                    let key = (definition.id.clone(), property_path.clone());
+                    if let Some(cycle_start) = stack.iter().position(|edge| edge.target == key) {
+                        // The edge that first entered the repeated target came
+                        // from outside the cycle. Participating edges begin
+                        // with the following frame and end with this expression.
+                        let mut related = stack[cycle_start + 1..]
+                            .iter()
+                            .map(ResolveEdge::related_location)
+                            .collect::<Vec<_>>();
+                        related.push(
+                            ResolveEdge::new(key.clone(), expression, location).related_location(),
+                        );
+                        let mut error = text_error(
+                            "reference_text.cycle",
+                            format!(
+                                "reference cycle detected at `{}.{property_path}`",
+                                definition.id
+                            ),
+                            parsed,
+                            expression,
+                            location,
+                        );
+                        error.related = related;
+                        return Err(error);
+                    }
+                    let memo_key = (definition.id.clone(), property_path.clone(), disclosure);
+                    let node = if let Some(node) = self.memo.get(&memo_key) {
+                        node.clone()
+                    } else {
+                        let Some(value) = mapping_path(&definition.mapping, &property_path) else {
+                            return Err(text_error(
+                                "reference_text.unknown_path",
+                                format!(
+                                    "`{}` has no value at allowed path `{property_path}`",
+                                    definition.id
+                                ),
+                                parsed,
+                                expression,
+                                location,
+                            ));
+                        };
+                        let Some(value) = value.as_str() else {
+                            return Err(text_error(
+                                "reference_text.non_string",
+                                format!(
+                                    "`{}.{property_path}` must be a string to be referenced",
+                                    definition.id
+                                ),
+                                parsed,
+                                expression,
+                                location,
+                            ));
+                        };
+                        if value.trim().is_empty() {
+                            return Err(text_error(
+                                "reference_text.empty",
+                                format!(
+                                    "`{}.{property_path}` cannot be empty when referenced",
+                                    definition.id
+                                ),
+                                parsed,
+                                expression,
+                                location,
+                            ));
+                        }
+                        let target_parsed = parse_reference_text(value).map_err(|error| {
+                            let (start, end) = parse_error_offsets(&error, value.len());
+                            Box::new(TextResolveError {
+                                code: "reference_text.malformed",
+                                message: format!(
+                                    "malformed reference in `{}.{property_path}`: {error}",
+                                    definition.id
+                                ),
+                                path: definition.path.clone(),
+                                source: definition.source.clone(),
+                                pointer: format!(
+                                    "{}/{}",
+                                    definition.pointer,
+                                    property_path.replace('.', "/")
+                                ),
+                                authored: value.to_string(),
+                                expression: None,
+                                range: locate_yaml_scalar_offset(
+                                    &definition.source,
+                                    &format!(
+                                        "{}/{}",
+                                        definition.pointer,
+                                        property_path.replace('.', "/")
+                                    ),
+                                    value,
+                                    start,
+                                    end,
+                                ),
+                                related: Vec::new(),
+                            })
+                        })?;
+                        stack.push(ResolveEdge::new(key.clone(), expression, location));
+                        let target_pointer =
+                            format!("{}/{}", definition.pointer, property_path.replace('.', "/"));
+                        let target_location = TextLocation {
+                            path: &definition.path,
+                            source: &definition.source,
+                            pointer: &target_pointer,
+                            authored: value,
+                        };
+                        let result =
+                            self.resolve_parsed(&target_parsed, disclosure, stack, target_location);
+                        stack.pop();
+                        let node = result?;
+                        self.memo.insert(memo_key, node.clone());
+                        node
+                    };
+                    text.push_str(&node.text);
+                    provenance.push(ReferenceProvenance {
+                        expression: expression.clone(),
+                        path: location.path.to_string(),
+                        pointer: location.pointer.to_string(),
+                        range: locate_reference_expression(
+                            location.source,
+                            location.pointer,
+                            location.authored,
+                            expression,
+                        ),
+                        definition_pointer: format!(
+                            "{}/{}",
+                            definition.pointer,
+                            property_path.replace('.', "/")
+                        ),
+                        resolved_path: property_path,
+                        resolved_value: node.text.clone(),
+                    });
+                    provenance.extend(node.provenance);
+                }
+            }
+        }
+        Ok(ResolvedNode { text, provenance })
+    }
+}
+
+fn disclosure_mismatch_message(
+    consumer: DisclosureClass,
+    target: DisclosureClass,
+    target_path: &str,
+) -> String {
+    let consumer_name = match consumer {
+        DisclosureClass::PlayerSafe => "baseline player-safe",
+        DisclosureClass::GatedPlayerSafe => "gated player-safe",
+        DisclosureClass::PrivateNarrator => "private narrator",
+    };
+    let target_name = match target {
+        DisclosureClass::PlayerSafe => "baseline player-safe",
+        DisclosureClass::GatedPlayerSafe => "gated player-safe",
+        DisclosureClass::PrivateNarrator => "private narrator",
+    };
+    let mut message =
+        format!("{consumer_name} prose cannot reference {target_name} path `{target_path}`");
+    if target == DisclosureClass::GatedPlayerSafe {
+        message.push_str("; this would bypass the target's disclosure gate");
+    }
+    message
+}
+
+fn text_error(
+    code: &'static str,
+    message: String,
+    _parsed: &crate::ParsedReferenceText,
+    expression: &crate::ReferenceExpression,
+    location: TextLocation<'_>,
+) -> Box<TextResolveError> {
+    Box::new(TextResolveError {
+        code,
+        message,
+        path: location.path.to_string(),
+        source: location.source.to_string(),
+        pointer: location.pointer.to_string(),
+        authored: location.authored.to_string(),
+        expression: Some(expression.clone()),
+        range: None,
+        related: Vec::new(),
+    })
+}
+
+fn mapping_path<'a>(mapping: &'a Mapping, path: &str) -> Option<&'a Value> {
+    let mut components = path.split('.');
+    let first = components.next()?;
+    let mut value = mapping.get(Value::String(first.to_string()))?;
+    for component in components {
+        value = value
+            .as_mapping()?
+            .get(Value::String(component.to_string()))?;
+    }
+    Some(value)
+}
+
+fn collect_item_text_consumers(item: &Item, consumers: &mut Vec<TextConsumer>) {
+    for field in CONSUMER_FIELDS
+        .iter()
+        .filter(|field| field.kind == item.kind.name())
+    {
+        if let Some(text) = mapping_path(&item.mapping, field.path).and_then(Value::as_str) {
+            consumers.push(TextConsumer {
+                owner_id: Some(item.id.clone()),
+                path: item.path.clone(),
+                source: item.source.clone(),
+                pointer: format!("{}/{}", item.pointer, field.path.replace('.', "/")),
+                authored: text.to_string(),
+                disclosure: field.disclosure,
+            });
+        }
+    }
+}
+
+fn collect_nested_command_text(items: &[Item], consumers: &mut Vec<TextConsumer>) {
+    for item in items {
+        let parameter_disclosure = CONSUMER_FIELDS
+            .iter()
+            .find(|field| field.kind == "command_parameter" && field.path == "description")
+            .expect("command parameter prose is registered")
+            .disclosure;
+        let effect_kind = if item.kind == Kind::Trigger {
+            "trigger_effect"
+        } else {
+            "command_effect"
+        };
+        let effect_disclosure = CONSUMER_FIELDS
+            .iter()
+            .find(|field| field.kind == effect_kind && field.path == "text")
+            .expect("effect prose is registered")
+            .disclosure;
+        if let Some(parameters) = item
+            .mapping
+            .get(Value::String("parameters".to_string()))
+            .and_then(Value::as_sequence)
+        {
+            for (index, parameter) in parameters.iter().enumerate() {
+                if let Some(text) = parameter
+                    .as_mapping()
+                    .and_then(|mapping| string_field(mapping, "description"))
+                {
+                    consumers.push(TextConsumer {
+                        owner_id: Some(item.id.clone()),
+                        path: item.path.clone(),
+                        source: item.source.clone(),
+                        pointer: format!("{}/parameters/{index}/description", item.pointer),
+                        authored: text.to_string(),
+                        disclosure: parameter_disclosure,
+                    });
+                }
+            }
+        }
+        if let Some(effects) = item
+            .mapping
+            .get(Value::String("effects".to_string()))
+            .and_then(Value::as_sequence)
+        {
+            for (index, effect) in effects.iter().enumerate() {
+                if let Some(text) = effect
+                    .as_mapping()
+                    .and_then(|mapping| string_field(mapping, "text"))
+                {
+                    consumers.push(TextConsumer {
+                        owner_id: Some(item.id.clone()),
+                        path: item.path.clone(),
+                        source: item.source.clone(),
+                        pointer: format!("{}/effects/{index}/text", item.pointer),
+                        authored: text.to_string(),
+                        disclosure: effect_disclosure,
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn parse_error_offsets(error: &crate::ReferenceParseError, source_len: usize) -> (usize, usize) {
+    match error {
+        crate::ReferenceParseError::Unclosed { start } => (*start, source_len),
+        crate::ReferenceParseError::Empty { start, end }
+        | crate::ReferenceParseError::Invalid { start, end, .. } => (*start, *end),
+        crate::ReferenceParseError::UnexpectedClose { start } => {
+            (*start, (*start + 2).min(source_len))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct YamlNodeSpan {
+    start: usize,
+    end: usize,
+    indent: isize,
+    value_start: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct YamlLine<'a> {
+    start: usize,
+    indent: usize,
+    text: &'a str,
+}
+
+fn yaml_lines(source: &str) -> Vec<YamlLine<'_>> {
+    let mut offset = 0;
+    source
+        .split_inclusive('\n')
+        .map(|raw| {
+            let without_lf = raw.strip_suffix('\n').unwrap_or(raw);
+            let text = without_lf.strip_suffix('\r').unwrap_or(without_lf);
+            let line = YamlLine {
+                start: offset,
+                indent: text.bytes().take_while(|byte| *byte == b' ').count(),
+                text,
+            };
+            offset += raw.len();
+            line
+        })
+        .collect()
+}
+
+fn flow_skip_whitespace(source: &str, mut offset: usize, end: usize) -> usize {
+    while offset < end && source.as_bytes()[offset].is_ascii_whitespace() {
+        offset += 1;
+    }
+    offset
+}
+
+fn flow_top_level_delimiter(
+    source: &str,
+    start: usize,
+    end: usize,
+    delimiters: &[u8],
+) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut offset = start;
+    let mut depth = 0usize;
+    let mut quote = None;
+    while offset < end {
+        let byte = bytes[offset];
+        if let Some(active_quote) = quote {
+            if byte == active_quote {
+                if active_quote == b'\'' && bytes.get(offset + 1) == Some(&b'\'') {
+                    offset += 2;
+                    continue;
+                }
+                quote = None;
+            } else if active_quote == b'"' && byte == b'\\' {
+                offset += 2;
+                continue;
+            }
+        } else {
+            match byte {
+                b'\'' | b'"' => quote = Some(byte),
+                b'{' | b'[' => depth += 1,
+                b'}' | b']' if depth > 0 => depth -= 1,
+                _ if depth == 0 && delimiters.contains(&byte) => return Some(offset),
+                _ => {}
+            }
+        }
+        offset += 1;
+    }
+    None
+}
+
+fn flow_entries(
+    source: &str,
+    node: YamlNodeSpan,
+    open: u8,
+    close: u8,
+) -> Option<Vec<(usize, usize)>> {
+    let start = flow_skip_whitespace(source, node.value_start, node.end);
+    if source.as_bytes().get(start) != Some(&open) {
+        return None;
+    }
+    let mut entries = Vec::new();
+    let mut entry_start = flow_skip_whitespace(source, start + 1, node.end);
+    loop {
+        if source.as_bytes().get(entry_start) == Some(&close) {
+            break;
+        }
+        let entry_end = flow_top_level_delimiter(source, entry_start, node.end, &[b',', close])?;
+        entries.push((entry_start, entry_end));
+        if source.as_bytes()[entry_end] == close {
+            break;
+        }
+        entry_start = flow_skip_whitespace(source, entry_end + 1, node.end);
+    }
+    Some(entries)
+}
+
+fn yaml_flow_child_span(source: &str, node: YamlNodeSpan, component: &str) -> Option<YamlNodeSpan> {
+    let start = flow_skip_whitespace(source, node.value_start, node.end);
+    match source.as_bytes().get(start)? {
+        b'[' => {
+            let index = component.parse::<usize>().ok()?;
+            let (value_start, end) = *flow_entries(source, node, b'[', b']')?.get(index)?;
+            Some(YamlNodeSpan {
+                start: value_start,
+                end,
+                indent: node.indent,
+                value_start,
+            })
+        }
+        b'{' => {
+            for (entry_start, entry_end) in flow_entries(source, node, b'{', b'}')? {
+                let colon = flow_top_level_delimiter(source, entry_start, entry_end, &[b':'])?;
+                let authored_key = source[entry_start..colon].trim();
+                let authored_key = authored_key
+                    .strip_prefix(['\'', '"'])
+                    .and_then(|key| key.strip_suffix(['\'', '"']))
+                    .unwrap_or(authored_key);
+                if authored_key == component {
+                    let value_start = flow_skip_whitespace(source, colon + 1, entry_end);
+                    return Some(YamlNodeSpan {
+                        start: entry_start,
+                        end: entry_end,
+                        indent: node.indent,
+                        value_start,
+                    });
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn yaml_pointer_component(component: &str) -> String {
+    component.replace("~1", "/").replace("~0", "~")
+}
+
+fn yaml_line_key_value_start(line: YamlLine<'_>, key: &str) -> Option<usize> {
+    let mut content = &line.text[line.indent..];
+    let mut content_offset = line.start + line.indent;
+    if let Some(rest) = content.strip_prefix("- ") {
+        content = rest;
+        content_offset += 2;
+    }
+    let rest = content.strip_prefix(key)?;
+    let rest = rest.strip_prefix(':')?;
+    let colon_offset = content_offset + key.len();
+    let whitespace = rest.bytes().take_while(u8::is_ascii_whitespace).count();
+    Some(colon_offset + 1 + whitespace)
+}
+
+fn yaml_node_end(
+    lines: &[YamlLine<'_>],
+    line_index: usize,
+    indent: usize,
+    fallback: usize,
+    allow_indentless_sequence: bool,
+) -> usize {
+    lines[line_index + 1..]
+        .iter()
+        .find(|line| {
+            let trimmed = line.text.trim();
+            !trimmed.is_empty()
+                && !trimmed.starts_with('#')
+                && (line.indent < indent
+                    || (line.indent == indent
+                        && !(allow_indentless_sequence
+                            && (trimmed == "-" || trimmed.starts_with("- ")))))
+        })
+        .map_or(fallback, |line| line.start)
+}
+
+fn yaml_scalar_span(source: &str, pointer: &str) -> Option<YamlNodeSpan> {
+    let lines = yaml_lines(source);
+    let mut node = YamlNodeSpan {
+        start: 0,
+        end: source.len(),
+        indent: -1,
+        value_start: 0,
+    };
+    for raw_component in pointer.split('/').skip(1) {
+        let component = yaml_pointer_component(raw_component);
+        if let Some(flow_node) = yaml_flow_child_span(source, node, &component) {
+            node = flow_node;
+            continue;
+        }
+        let sequence_index = component.parse::<usize>().ok();
+        let candidates = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, line)| {
+                line.start >= node.start
+                    && line.start < node.end
+                    && if sequence_index.is_some() {
+                        line.indent as isize >= node.indent
+                    } else {
+                        line.indent as isize > node.indent
+                    }
+                    && !line.text.trim().is_empty()
+                    && !line.text.trim_start().starts_with('#')
+            })
+            .collect::<Vec<_>>();
+        if let Some(sequence_index) = sequence_index {
+            let direct_indent = candidates
+                .iter()
+                .filter(|(_, line)| {
+                    let trimmed = line.text.trim_start();
+                    trimmed == "-" || trimmed.starts_with("- ")
+                })
+                .map(|(_, line)| line.indent)
+                .min()?;
+            let (line_index, line) = candidates
+                .into_iter()
+                .filter(|(_, line)| {
+                    line.indent == direct_indent
+                        && (line.text.trim_start() == "-"
+                            || line.text.trim_start().starts_with("- "))
+                })
+                .nth(sequence_index)?;
+            let dash = line.text.find('-')?;
+            node = YamlNodeSpan {
+                start: line.start,
+                end: yaml_node_end(&lines, line_index, line.indent, node.end, false),
+                indent: line.indent as isize,
+                value_start: line.start + dash + 1,
+            };
+        } else {
+            let matches = candidates
+                .into_iter()
+                .filter_map(|(line_index, line)| {
+                    yaml_line_key_value_start(*line, &component)
+                        .map(|value_start| (line_index, *line, value_start))
+                })
+                .collect::<Vec<_>>();
+            let direct_indent = matches.iter().map(|(_, line, _)| line.indent).min()?;
+            let (line_index, line, value_start) = matches
+                .into_iter()
+                .find(|(_, line, _)| line.indent == direct_indent)?;
+            node = YamlNodeSpan {
+                start: line.start,
+                end: yaml_node_end(&lines, line_index, line.indent, node.end, true),
+                indent: line.indent as isize,
+                value_start,
+            };
+        }
+    }
+    Some(node)
+}
+
+fn source_range(source: &str, start: usize, end: usize) -> SourceRange {
+    let position = |offset: usize| {
+        let prefix = &source[..offset];
+        Position {
+            line: prefix.bytes().filter(|byte| *byte == b'\n').count() + 1,
+            column: prefix
+                .rsplit_once('\n')
+                .map_or(prefix.len() + 1, |(_, tail)| tail.len() + 1),
+        }
+    };
+    SourceRange {
+        start: position(start),
+        end: position(end),
+    }
+}
+
+fn locate_yaml_scalar_token(
+    source: &str,
+    pointer: &str,
+    authored: &str,
+    token: &str,
+    ordinal: usize,
+) -> Option<SourceRange> {
+    let span = yaml_scalar_span(source, pointer)?;
+    let authored_ordinal = authored.match_indices(token).nth(ordinal)?.0;
+    let same_token_ordinal = authored[..authored_ordinal].matches(token).count();
+    let relative = source[span.value_start..span.end]
+        .match_indices(token)
+        .nth(same_token_ordinal)?
+        .0;
+    let start = span.value_start + relative;
+    Some(source_range(source, start, start + token.len()))
+}
+
+fn locate_yaml_scalar_offset(
+    source: &str,
+    pointer: &str,
+    authored: &str,
+    start: usize,
+    end: usize,
+) -> Option<SourceRange> {
+    let span = yaml_scalar_span(source, pointer)?;
+    let fragment = authored.get(start..end)?;
+    let ordinal = authored[..start].matches(fragment).count();
+    if !fragment.is_empty() {
+        if let Some(relative) = source[span.value_start..span.end]
+            .match_indices(fragment)
+            .nth(ordinal)
+            .map(|(offset, _)| offset)
+        {
+            let absolute = span.value_start + relative;
+            return Some(source_range(source, absolute, absolute + fragment.len()));
+        }
+    }
+    // Folded block scalars change authored whitespace. Delimiters themselves
+    // remain byte-for-byte in source, so retain a useful field-local range.
+    for token in ["[[", "]]", "[[]]"] {
+        if authored
+            .get(start..)
+            .is_some_and(|tail| tail.starts_with(token))
+        {
+            let token_ordinal = authored[..start].matches(token).count();
+            let relative = source[span.value_start..span.end]
+                .match_indices(token)
+                .nth(token_ordinal)?
+                .0;
+            let absolute = span.value_start + relative;
+            return Some(source_range(source, absolute, absolute + token.len()));
+        }
+    }
+    None
+}
+
+fn locate_reference_expression(
+    source: &str,
+    pointer: &str,
+    authored: &str,
+    expression: &crate::ReferenceExpression,
+) -> Option<SourceRange> {
+    let needle = format!("[[{}]]", expression.authored);
+    let ordinal = authored[..expression.start].matches(&needle).count();
+    let span = yaml_scalar_span(source, pointer)?;
+    let relative = source[span.value_start..span.end]
+        .match_indices(&needle)
+        .nth(ordinal)?
+        .0;
+    let start = span.value_start + relative;
+    Some(source_range(source, start, start + needle.len()))
 }
 
 #[derive(Debug)]

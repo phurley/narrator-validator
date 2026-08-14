@@ -1,0 +1,9 @@
+case:
+  id: case.reference_conformance
+  format_version: "3.2.0"
+  features:
+    - reference_text_v1
+  title: Reference conformance
+  opening: "[[character.echo]] waits."
+  players: { min: 1, max: 1 }
+  initial_time: "20:00"

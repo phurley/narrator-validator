@@ -1,4 +1,9 @@
-import initWasm, { validate_json as validateJson } from './narrator_validator.js'
+import initWasm, {
+  parse_reference_text_json as parseReferenceTextJson,
+  reference_text_metadata_json_export as referenceTextMetadataJson,
+  validate_json as validateJson,
+  validate_json_with_features as validateJsonWithFeatures,
+} from './narrator_validator.js'
 
 export { STANDARD_MYSTERY_RULESET, STANDARD_MYSTERY_RULESETS } from './rulesets.js'
 
@@ -39,4 +44,41 @@ export function initializeNarratorValidator(input) {
 export async function validateRepository(files) {
   await initializeNarratorValidator()
   return JSON.parse(validateJson(JSON.stringify(files)))
+}
+
+/**
+ * Validate after negotiating the exact capabilities implemented by a consumer.
+ * This is the required entry point for runtimes that may support fewer features
+ * than the validator itself.
+ *
+ * @param {readonly import('./index.js').SourceFile[]} files
+ * @param {readonly string[]} supportedFeatures
+ * @returns {Promise<import('./index.js').ValidationReport>}
+ */
+export async function validateRepositoryWithFeatures(files, supportedFeatures) {
+  await initializeNarratorValidator()
+  return JSON.parse(
+    validateJsonWithFeatures(
+      JSON.stringify(files),
+      JSON.stringify(supportedFeatures),
+    ),
+  )
+}
+
+/** @returns {Promise<import('./index.js').ReferenceTextMetadata>} */
+export async function referenceTextMetadata() {
+  await initializeNarratorValidator()
+  return JSON.parse(referenceTextMetadataJson())
+}
+
+/**
+ * Parse reference-aware prose without validating a repository. Expression
+ * offsets are zero-based UTF-8 byte offsets, matching the Rust API.
+ *
+ * @param {string} source
+ * @returns {Promise<import('./index.js').ReferenceTextParseResult>}
+ */
+export async function parseReferenceText(source) {
+  await initializeNarratorValidator()
+  return JSON.parse(parseReferenceTextJson(source))
 }

@@ -131,9 +131,11 @@ It builds the pinned validator revision and emits native GitHub annotations.
 ## Story format versions
 
 Every story declares a quoted semantic version at `case.format_version`.
-This validator authors format `3.1.0`. Format 3 minor and patch releases remain
-compatible within the major format. The format-1 validation path remains for
-legacy repositories, while format-2 repositories stop with focused migration
+This validator authors format `3.2.0`. Format 3 minor and patch releases remain
+structurally compatible within the major format, while capabilities added by a
+minor release must be explicitly negotiated through `case.features`. The
+format-1 validation path remains for legacy repositories, while format-2
+repositories stop with focused migration
 guidance before the strict format-3 schema runs.
 
 Validator `1.1.0` is the coordinated release for the format-3.1 contract. See
@@ -143,7 +145,8 @@ for the exact consumer commit matrix.
 
 The normative placement, presence, candidate-selection, compatibility, and
 privacy decisions are recorded in
-[Story Format 3.1](docs/story-format-3.1.md) and
+[Story Format 3.1](docs/story-format-3.1.md),
+[Story Format 3.2](docs/story-format-3.2.md), and
 [ADR 0001](docs/adr/0001-story-format-3.1-character-presence-and-command-candidates.md).
 The [ADR index](docs/adr/README.md) is the discovery point for architecture
 decisions shared by validator consumers.
@@ -152,6 +155,16 @@ Legacy integer versions, missing versions, and versions outside the supported
 range stop validation with migration guidance before version-specific schema
 rules run. This prevents an older story from producing a misleading cascade of
 unrelated field errors.
+
+## Format 3.2 reference-aware text
+
+Format 3.2 stories may opt into stable prose references with
+`case.features: [reference_text_v1]`. `[[character.echo]]` uses a per-kind
+display default; `[[character.echo.portrayal.demeanor]]` selects an explicitly
+allowed named narrative path. Resolution is recursive, disclosure-aware, and
+retains ordered provenance. See the [Format 3.2 contract](docs/story-format-3.2.md)
+for feature negotiation, grammar, escaping, the authoritative path matrix, and
+consumer APIs.
 
 ## Format 3 document and disclosure contract
 

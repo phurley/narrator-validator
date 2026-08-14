@@ -3,7 +3,10 @@ import { readFile } from 'node:fs/promises'
 
 import {
   initializeNarratorValidator,
+  parseReferenceText,
+  referenceTextMetadata,
   validateRepository,
+  validateRepositoryWithFeatures,
 } from '../pkg/index.js'
 
 const wasm = await readFile(
@@ -23,6 +26,81 @@ assert.ok(
     (diagnostic) => diagnostic.code === 'schema.missing_section',
   ),
 )
+
+const metadata = await referenceTextMetadata()
+assert.deepEqual(metadata.supported_features, ['reference_text_v1'])
+assert.ok(
+  metadata.reference_kinds.some(
+    (kind) => kind.kind === 'character' && kind.default_path === 'name',
+  ),
+)
+
+const parsedText = await parseReferenceText('é [[character.echo.name]]!')
+assert.equal(parsedText.status, 'parsed')
+assert.deepEqual(parsedText.value.segments, [
+  { type: 'literal', text: 'é ' },
+  {
+    type: 'reference',
+    expression: {
+      authored: 'character.echo.name',
+      target_id: 'character.echo',
+      property_path: ['name'],
+      start: 3,
+      end: 26,
+    },
+  },
+  { type: 'literal', text: '!' },
+])
+
+const escapedText = await parseReferenceText(
+  String.raw`literal \[[character.echo]]`,
+)
+assert.equal(escapedText.status, 'parsed')
+assert.deepEqual(escapedText.value.segments, [
+  { type: 'literal', text: 'literal [[character.echo]]' },
+])
+
+const parseError = await parseReferenceText('é [[character.echo')
+assert.deepEqual(parseError, {
+  status: 'error',
+  error: { type: 'unclosed', start: 3 },
+})
+
+const featureFiles = [
+  {
+    path: 'case.yaml',
+    source:
+      'case:\n  id: case.smoke\n  format_version: "3.2.0"\n  features: [reference_text_v1]\n  players: { min: 1, max: 1 }\n  initial_time: "20:00"\n  opening: "Hello, [[character.echo]]."\n',
+  },
+  {
+    path: 'characters.yaml',
+    source:
+      'characters:\n  - id: character.echo\n    name: Echo Vale\n    description: A composed witness.\n',
+  },
+]
+const unsupportedFeatureReport = await validateRepositoryWithFeatures(
+  featureFiles,
+  [],
+)
+assert.equal(unsupportedFeatureReport.reference_text, undefined)
+assert.deepEqual(unsupportedFeatureReport.features, ['reference_text_v1'])
+assert.equal(
+  unsupportedFeatureReport.diagnostics[0].code,
+  'feature.consumer_unsupported',
+)
+
+const supportedFeatureReport = await validateRepositoryWithFeatures(
+  featureFiles,
+  ['reference_text_v1'],
+)
+assert.deepEqual(supportedFeatureReport.features, ['reference_text_v1'])
+assert.equal(supportedFeatureReport.reference_text.length, 1)
+assert.equal(supportedFeatureReport.reference_text[0].resolved, 'Hello, Echo Vale.')
+assert.equal(
+  supportedFeatureReport.reference_text[0].provenance[0].expression.target_id,
+  'character.echo',
+)
+assert.ok(supportedFeatureReport.reference_text[0].provenance[0].range)
 
 const entityReport = await validateRepository([
   {

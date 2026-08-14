@@ -3,7 +3,7 @@ use std::fs;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use narrator_validator::{validate, Severity, SourceFile};
+use narrator_validator::{validate, validate_with_supported_features, Severity, SourceFile};
 use serde_yaml::{Mapping, Value};
 
 const VALID_STORY: &str = r#"
@@ -376,7 +376,7 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_3_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_3_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "1.1.0");
+    assert_eq!(report.validator_version, "1.2.0");
     assert_eq!(report.format_version.as_deref(), Some("3.0.0"));
     assert!(report.diagnostics.is_empty());
 }
@@ -3453,4 +3453,526 @@ fn github_cli_supports_repository_level_annotations() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("::error title=schema.missing_section::"));
     assert!(!stdout.contains("file=,"));
+}
+
+fn format_3_2_reference_story() -> String {
+    VALID_FORMAT_3_STORY
+        .replace(
+            "  format_version: \"3.0.0\"",
+            "  format_version: \"3.2.0\"\n  features: [reference_text_v1]\n  title: The Last Tide\n  opening: \"[[character.victim]] waits in [[setting.foyer.name]].\"",
+        )
+        .replace(
+            "  - id: character.victim\n",
+            "  - id: character.victim\n    name: Morgan Vale\n",
+        )
+        .replace(
+            "  - id: setting.foyer\n",
+            "  - id: setting.foyer\n    name: The Foyer\n",
+        )
+}
+
+#[test]
+fn format_3_2_negotiates_features_and_retains_ordered_reference_provenance() {
+    let report = report(format_3_2_reference_story());
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert_eq!(report.features, ["reference_text_v1"]);
+    let opening = report
+        .reference_text
+        .iter()
+        .find(|field| field.pointer == "/case/opening")
+        .expect("opening was resolved");
+    assert_eq!(opening.resolved, "Morgan Vale waits in The Foyer.");
+    assert_eq!(opening.provenance.len(), 2);
+    assert_eq!(
+        opening.provenance[0].expression.target_id,
+        "character.victim"
+    );
+    assert_eq!(opening.provenance[0].resolved_path, "name");
+    assert_eq!(opening.provenance[1].expression.target_id, "setting.foyer");
+    assert_eq!(opening.provenance[1].resolved_path, "name");
+}
+
+#[test]
+fn format_3_2_feature_negotiation_fails_closed_before_reference_interpretation() {
+    let files = story_files(format_3_2_reference_story());
+    let consumer_report = validate_with_supported_features(&files, &[]);
+    assert_eq!(consumer_report.features, ["reference_text_v1"]);
+    assert!(consumer_report.reference_text.is_empty());
+    assert_eq!(consumer_report.diagnostics.len(), 1);
+    assert_eq!(
+        consumer_report.diagnostics[0].code,
+        "feature.consumer_unsupported"
+    );
+
+    let duplicate = report(format_3_2_reference_story().replace(
+        "features: [reference_text_v1]",
+        "features: [reference_text_v1, reference_text_v1]",
+    ));
+    assert!(duplicate
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "feature.duplicate"));
+
+    let unknown = report(format_3_2_reference_story().replace(
+        "features: [reference_text_v1]",
+        "features: [reference_text_v2]",
+    ));
+    assert!(unknown
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "feature.unknown"));
+}
+
+#[test]
+fn reference_text_requires_opt_in_and_preserves_format_3_1_literals() {
+    let without_feature =
+        format_3_2_reference_story().replace("  features: [reference_text_v1]\n", "");
+    assert!(report(without_feature)
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "reference_text.feature_required"));
+
+    let format_3_1 = format_3_2_reference_story()
+        .replace("\"3.2.0\"", "\"3.1.0\"")
+        .replace("  features: [reference_text_v1]\n", "");
+    let report = report(format_3_1);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert!(report.reference_text.is_empty());
+}
+
+#[test]
+fn reference_text_enforces_paths_disclosure_and_cycles() {
+    let mechanical = format_3_2_reference_story().replace(
+        "[[character.victim]] waits",
+        "[[character.victim.voice_id]] waits",
+    );
+    assert!(report(mechanical)
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "reference_text.path_disallowed"));
+
+    let private = format_3_2_reference_story()
+        .replace(
+            "    name: Morgan Vale\n",
+            "    name: Morgan Vale\n    narrator_guidance:\n      secret: Morgan knows the answer.\n",
+        )
+        .replace("[[character.victim]] waits", "[[character.victim.narrator_guidance.secret]] waits");
+    let private_report = report(private);
+    let private_diagnostic = private_report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "reference_text.disclosure")
+        .expect("private disclosure diagnostic");
+    assert_eq!(private_diagnostic.pointer.as_deref(), Some("/case/opening"));
+    assert!(private_diagnostic.range.is_some());
+    assert_eq!(
+        private_diagnostic.message,
+        "baseline player-safe prose cannot reference private narrator path `character.victim.narrator_guidance.secret`"
+    );
+
+    let cycle = format_3_2_reference_story()
+        .replace("name: Morgan Vale", "name: '[[setting.foyer.name]]'")
+        .replace("name: The Foyer", "name: '[[character.victim.name]]'");
+    let cycle_report = report(cycle);
+    let diagnostic = cycle_report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "reference_text.cycle")
+        .expect("cycle diagnostic");
+    assert!(diagnostic.related.len() >= 2);
+    assert!(diagnostic
+        .related
+        .iter()
+        .all(|location| location.pointer.is_some() && location.range.is_some()));
+}
+
+#[test]
+fn reference_text_resolves_multihop_nested_facts_and_testimony() {
+    let multihop =
+        format_3_2_reference_story().replace("name: Morgan Vale", "name: '[[setting.foyer.name]]'");
+    let multihop_report = report(multihop);
+    assert!(multihop_report.valid, "{:#?}", multihop_report.diagnostics);
+    let opening = multihop_report
+        .reference_text
+        .iter()
+        .find(|field| field.pointer == "/case/opening")
+        .unwrap();
+    assert_eq!(opening.resolved, "The Foyer waits in The Foyer.");
+    assert_eq!(opening.provenance.len(), 3);
+    assert!(
+        opening
+            .provenance
+            .iter()
+            .all(|origin| origin.range.is_some()),
+        "{opening:#?}"
+    );
+
+    let fact = format_3_2_reference_story()
+        .replace(
+            "The knife is present.",
+            "'[[character.victim.name]] saw the knife.'",
+        )
+        .replace(
+            "conclusion: The knife was used in the study.",
+            "conclusion: '[[fact.knife_is_present]]'",
+        );
+    let fact_report = report(fact);
+    assert!(fact_report.valid, "{:#?}", fact_report.diagnostics);
+    assert!(fact_report.reference_text.iter().any(|field| {
+        field.pointer == "/deductions/0/conclusion"
+            && field.resolved == "Morgan Vale saw the knife."
+    }));
+
+    let testimony = format_3_2_reference_story()
+        .replace(
+            "  format_version: \"3.2.0\"",
+            "  format_version: \"3.2.0\"\n  ruleset:\n    id: ruleset.standard_mystery\n    version: \"2.0.0\"",
+        )
+        .replace(
+            "    name: Morgan Vale\n",
+            "    name: Morgan Vale\n    testimony:\n      - id: testimony.victim_account\n        text: Morgan heard the storm.\n        requires: [command.question, character.victim]\n        reveals: []\n",
+        )
+        .replace(
+            "conclusion: The knife was used in the study.",
+            "conclusion: '[[testimony.victim_account]]'",
+        );
+    let testimony_report = report(testimony);
+    assert!(
+        testimony_report.valid,
+        "{:#?}",
+        testimony_report.diagnostics
+    );
+    assert!(testimony_report.reference_text.iter().any(|field| {
+        field.pointer == "/deductions/0/conclusion" && field.resolved == "Morgan heard the storm."
+    }));
+}
+
+#[test]
+fn reference_text_reports_unknown_missing_non_string_empty_and_malformed_targets() {
+    let cases = [
+        ("[[character.unknown]]", "reference_text.unknown_id"),
+        (
+            "[[character.victim.portrayal.demeanor]]",
+            "reference_text.unknown_path",
+        ),
+        ("[[character.victim.role]]", "reference_text.non_string"),
+        ("[[character.victim.name]]", "reference_text.empty"),
+        ("[[character.victim", "reference_text.malformed"),
+    ];
+    for (expression, expected) in cases {
+        let mut source = format_3_2_reference_story().replace(
+            "[[character.victim]] waits in [[setting.foyer.name]].",
+            expression,
+        );
+        if expected == "reference_text.non_string" {
+            source = source.replace("name: Morgan Vale", "name: Morgan Vale\n    role: 42");
+        }
+        if expected == "reference_text.empty" {
+            source = source.replace("name: Morgan Vale", "name: ''");
+        }
+        let report = report(source);
+        let diagnostic = report
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == expected)
+            .unwrap_or_else(|| panic!("missing {expected}: {:#?}", report.diagnostics));
+        assert_eq!(diagnostic.pointer.as_deref(), Some("/case/opening"));
+        assert!(diagnostic.range.is_some(), "{diagnostic:#?}");
+    }
+
+    for non_string in ["{}", "[lead]"] {
+        let source = format_3_2_reference_story()
+            .replace(
+                "[[character.victim]] waits in [[setting.foyer.name]].",
+                "[[character.victim.role]]",
+            )
+            .replace(
+                "name: Morgan Vale",
+                &format!("name: Morgan Vale\n    role: {non_string}"),
+            );
+        assert!(report(source)
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "reference_text.non_string"));
+    }
+
+    let nested_malformed =
+        format_3_2_reference_story().replace("name: Morgan Vale", "name: '[[setting.foyer'");
+    let nested_report = report(nested_malformed);
+    let nested_diagnostic = nested_report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "reference_text.malformed")
+        .expect("nested malformed diagnostic");
+    assert_eq!(
+        nested_diagnostic.pointer.as_deref(),
+        Some("/characters/0/name")
+    );
+    assert!(nested_diagnostic.range.is_some());
+}
+
+#[test]
+fn private_reference_text_can_reference_public_and_private_but_public_cannot_reveal_gated() {
+    let private = format_3_2_reference_story()
+        .replace(
+            "    name: Morgan Vale\n",
+            "    name: Morgan Vale\n    narrator_guidance:\n      secret: The private answer.\n      goal: 'Protect [[character.victim.name]] and [[character.victim.narrator_guidance.secret]]'\n",
+        );
+    let private_report = report(private);
+    assert!(private_report.valid, "{:#?}", private_report.diagnostics);
+    assert!(private_report.reference_text.iter().any(|field| {
+        field.pointer == "/characters/0/narrator_guidance/goal"
+            && field.resolved == "Protect Morgan Vale and The private answer."
+    }));
+
+    let gated_leak = format_3_2_reference_story().replace(
+        "[[character.victim]] waits in [[setting.foyer.name]].",
+        "[[fact.knife_is_present]]",
+    );
+    let gated_report = report(gated_leak);
+    let gated_diagnostic = gated_report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "reference_text.disclosure")
+        .expect("gated disclosure diagnostic");
+    assert_eq!(gated_diagnostic.pointer.as_deref(), Some("/case/opening"));
+    assert!(gated_diagnostic.range.is_some());
+    assert_eq!(
+        gated_diagnostic.message,
+        "baseline player-safe prose cannot reference gated player-safe path `fact.knife_is_present.statement`; this would bypass the target's disclosure gate"
+    );
+
+    let gated_to_private = format_3_2_reference_story()
+        .replace(
+            "    name: Morgan Vale\n",
+            "    name: Morgan Vale\n    narrator_guidance:\n      secret: The private answer.\n",
+        )
+        .replace(
+            "statement: The knife is present.",
+            "statement: '[[character.victim.narrator_guidance.secret]]'",
+        );
+    let gated_private_report = report(gated_to_private);
+    let gated_private_diagnostic = gated_private_report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.code == "reference_text.disclosure"
+                && diagnostic.pointer.as_deref() == Some("/entities/0/facts/0/statement")
+        })
+        .expect("gated-to-private disclosure diagnostic");
+    assert!(gated_private_diagnostic.range.is_some());
+    assert_eq!(
+        gated_private_diagnostic.message,
+        "gated player-safe prose cannot reference private narrator path `character.victim.narrator_guidance.secret`"
+    );
+}
+
+#[test]
+fn reference_text_handles_multiline_repeated_and_escaped_expressions() {
+    let source = format_3_2_reference_story().replace(
+        "  opening: \"[[character.victim]] waits in [[setting.foyer.name]].\"",
+        "  opening: |\n    [[character.victim]] greets [[character.victim]].\n    \\[[character.victim]] stays literal.",
+    );
+    let report = report(source);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    let opening = report
+        .reference_text
+        .iter()
+        .find(|field| field.pointer == "/case/opening")
+        .unwrap();
+    assert_eq!(
+        opening.resolved,
+        "Morgan Vale greets Morgan Vale.\n[[character.victim]] stays literal.\n"
+    );
+    assert_eq!(opening.provenance.len(), 2);
+    let ranges = opening
+        .provenance
+        .iter()
+        .map(|origin| origin.range.unwrap())
+        .collect::<Vec<_>>();
+    assert_ne!(ranges[0], ranges[1]);
+}
+
+#[test]
+fn features_are_rejected_before_format_3_2() {
+    let source = format_3_2_reference_story().replace("\"3.2.0\"", "\"3.1.0\"");
+    let report = report(source);
+    assert_eq!(report.diagnostics.len(), 1, "{:#?}", report.diagnostics);
+    assert_eq!(report.diagnostics[0].code, "feature.format_incompatible");
+    assert!(report.reference_text.is_empty());
+}
+
+fn reference_range_report(
+    case_source: &str,
+    character_source: &str,
+) -> narrator_validator::ValidationReport {
+    validate(&[
+        SourceFile {
+            path: "case.yaml".to_string(),
+            source: case_source.to_string(),
+        },
+        SourceFile {
+            path: "characters.yaml".to_string(),
+            source: character_source.to_string(),
+        },
+    ])
+}
+
+#[test]
+fn reference_ranges_are_anchored_to_identical_owning_scalars_and_repetitions() {
+    let report = reference_range_report(
+        "case:\n  id: case.ranges\n  format_version: \"3.2.0\"\n  features: [reference_text_v1]\n  players: { min: 1, max: 1 }\n  initial_time: \"20:00\"\n  title: \"[[character.echo]]\"\n  premise: \"[[character.echo]]\"\n  opening: \"[[character.echo]] then [[character.echo]]\"\n",
+        "characters:\n  - id: character.echo\n    name: Echo Vale\n    description: A witness.\n",
+    );
+    let field = |pointer: &str| {
+        report
+            .reference_text
+            .iter()
+            .find(|field| field.pointer == pointer)
+            .unwrap_or_else(|| panic!("missing {pointer}: {:#?}", report.diagnostics))
+    };
+    assert_eq!(
+        field("/case/title").provenance[0].range.unwrap().start.line,
+        7
+    );
+    assert_eq!(
+        field("/case/premise").provenance[0]
+            .range
+            .unwrap()
+            .start
+            .line,
+        8
+    );
+    let opening = field("/case/opening");
+    assert_eq!(opening.provenance[0].range.unwrap().start.line, 9);
+    assert_eq!(opening.provenance[1].range.unwrap().start.line, 9);
+    assert_ne!(
+        opening.provenance[0].range.unwrap().start.column,
+        opening.provenance[1].range.unwrap().start.column
+    );
+}
+
+#[test]
+fn reference_ranges_follow_literal_and_folded_block_scalar_lines() {
+    let report = reference_range_report(
+        "case:\n  id: case.blocks\n  format_version: \"3.2.0\"\n  features: [reference_text_v1]\n  players: { min: 1, max: 1 }\n  initial_time: \"20:00\"\n  title: Block ranges\n  premise: |\n    First line.\n    [[character.echo]] literal line.\n  opening: >\n    Folded lead\n    [[character.echo]] folded line.\n",
+        "characters:\n  - id: character.echo\n    name: Echo Vale\n    description: A witness.\n",
+    );
+    let premise = report
+        .reference_text
+        .iter()
+        .find(|field| field.pointer == "/case/premise")
+        .unwrap();
+    let opening = report
+        .reference_text
+        .iter()
+        .find(|field| field.pointer == "/case/opening")
+        .unwrap();
+    assert_eq!(premise.provenance[0].range.unwrap().start.line, 10);
+    assert_eq!(opening.provenance[0].range.unwrap().start.line, 13);
+}
+
+#[test]
+fn reference_ranges_follow_flow_mapping_and_sequence_pointers() {
+    let report = reference_range_report(
+        "case: { id: case.flow, format_version: \"3.2.0\", features: [reference_text_v1], players: { min: 1, max: 1 }, initial_time: \"20:00\", title: \"[[character.echo]]\", opening: \"[[character.echo]]\" }\n",
+        "characters: [{ id: character.echo, name: Echo Vale, description: A witness. }]\n",
+    );
+    let title = report
+        .reference_text
+        .iter()
+        .find(|field| field.pointer == "/case/title")
+        .unwrap();
+    let opening = report
+        .reference_text
+        .iter()
+        .find(|field| field.pointer == "/case/opening")
+        .unwrap();
+    assert_eq!(title.provenance[0].range.unwrap().start.line, 1);
+    assert_eq!(opening.provenance[0].range.unwrap().start.line, 1);
+    assert_ne!(
+        title.provenance[0].range.unwrap().start.column,
+        opening.provenance[0].range.unwrap().start.column
+    );
+}
+
+#[test]
+fn malformed_and_cycle_ranges_match_their_exact_field_pointers() {
+    let malformed = reference_range_report(
+        "case:\n  id: case.malformed\n  format_version: \"3.2.0\"\n  features: [reference_text_v1]\n  players: { min: 1, max: 1 }\n  initial_time: \"20:00\"\n  title: \"[[character.echo\"\n  opening: \"[[character.echo\"\n",
+        "characters:\n  - id: character.echo\n    name: Echo Vale\n    description: A witness.\n",
+    );
+    let malformed_fields = malformed
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code == "reference_text.malformed")
+        .map(|diagnostic| {
+            (
+                diagnostic.pointer.as_deref().unwrap(),
+                diagnostic.range.unwrap().start.line,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(malformed_fields["/case/title"], 7);
+    assert_eq!(malformed_fields["/case/opening"], 8);
+
+    let cycle = reference_range_report(
+        "case:\n  id: case.cycle_ranges\n  format_version: \"3.2.0\"\n  features: [reference_text_v1]\n  players: { min: 1, max: 1 }\n  initial_time: \"20:00\"\n  title: Cycle ranges\n  opening: \"[[character.alpha]]\"\n",
+        "characters:\n  - id: character.alpha\n    name: \"[[character.beta]]\"\n    description: Alpha.\n  - id: character.beta\n    name: \"[[character.alpha]]\"\n    description: Beta.\n",
+    );
+    let diagnostic = cycle
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "reference_text.cycle")
+        .unwrap();
+    for related in &diagnostic.related {
+        let pointer = related.pointer.as_deref().unwrap();
+        let line = related.range.unwrap().start.line;
+        match pointer {
+            "/characters/0/name" => assert_eq!(line, 3),
+            "/characters/1/name" => assert_eq!(line, 6),
+            other => panic!("unexpected cycle pointer {other}"),
+        }
+    }
+}
+
+#[test]
+fn cycle_ranges_follow_the_participating_expression_not_the_first_reference() {
+    let characters = "characters:\n  - id: character.alpha\n    name: \"[[setting.foyer]] and [[character.beta]]\"\n    description: Alpha.\n  - id: character.beta\n    name: \"[[character.alpha]]\"\n    description: Beta.\n";
+    let report = validate(&[
+        SourceFile {
+            path: "case.yaml".to_string(),
+            source: "case:\n  id: case.cycle_edge\n  format_version: \"3.2.0\"\n  features: [reference_text_v1]\n  players: { min: 1, max: 1 }\n  initial_time: \"20:00\"\n  title: Cycle edge\n  opening: \"[[character.alpha]]\"\n"
+                .to_string(),
+        },
+        SourceFile {
+            path: "characters.yaml".to_string(),
+            source: characters.to_string(),
+        },
+        SourceFile {
+            path: "settings.yaml".to_string(),
+            source: "settings:\n  - id: setting.foyer\n    name: The Foyer\n    description: An entry room.\nroutes: []\n".to_string(),
+        },
+    ]);
+    let diagnostic = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "reference_text.cycle")
+        .expect("cycle diagnostic");
+    let alpha_edge = diagnostic
+        .related
+        .iter()
+        .find(|location| location.pointer.as_deref() == Some("/characters/0/name"))
+        .expect("alpha cycle edge");
+    let range = alpha_edge.range.expect("alpha edge range");
+    let alpha_line = characters.lines().nth(2).unwrap();
+    let expected_column = alpha_line.find("[[character.beta]]").unwrap() + 1;
+    let unrelated_column = alpha_line.find("[[setting.foyer]]").unwrap() + 1;
+    assert_eq!(range.start.line, 3);
+    assert_eq!(range.start.column, expected_column);
+    assert_ne!(range.start.column, unrelated_column);
+    assert_eq!(
+        range.end.column - range.start.column,
+        "[[character.beta]]".len()
+    );
 }
