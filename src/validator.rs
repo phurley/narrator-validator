@@ -5,9 +5,11 @@ use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
 
 use crate::{
-    resolve_ruleset, Diagnostic, Position, RelatedLocation, RulesetReference, Severity, SourceFile,
-    SourceRange, ValidationReport, STANDARD_MYSTERY_RULESET_ID, STANDARD_MYSTERY_RULESET_VERSION_2,
-    STORY_FORMAT_VERSION, VALIDATOR_VERSION,
+    parse_reference_text, reference_kind, resolve_ruleset, Diagnostic, DisclosureClass, Position,
+    ReferenceProvenance, ReferenceTextSegment, RelatedLocation, ResolvedReferenceText,
+    RulesetReference, Severity, SourceFile, SourceRange, ValidationReport, CONSUMER_FIELDS,
+    REFERENCE_TEXT_FEATURE, STANDARD_MYSTERY_RULESET_ID, STANDARD_MYSTERY_RULESET_VERSION_2,
+    STORY_FORMAT_VERSION, SUPPORTED_FEATURES, VALIDATOR_VERSION,
 };
 
 const MAX_REPOSITORY_FILES: usize = 512;
@@ -239,10 +241,30 @@ struct Validator<'a> {
     format_version: Option<Version>,
     format_compatible: bool,
     ruleset: Option<RulesetReference>,
+    features: Vec<String>,
+    supported_features: BTreeSet<String>,
+    feature_compatible: bool,
+    reference_text: Vec<ResolvedReferenceText>,
 }
 
 /// Validate a complete, immutable repository snapshot.
 pub fn validate(files: &[SourceFile]) -> ValidationReport {
+    validate_with_supported_features(
+        files,
+        &SUPPORTED_FEATURES
+            .iter()
+            .map(|feature| (*feature).to_string())
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Validate using the exact feature set implemented by the calling consumer.
+/// Declared capabilities not present in `supported_features` stop validation
+/// before story prose is interpreted.
+pub fn validate_with_supported_features(
+    files: &[SourceFile],
+    supported_features: &[String],
+) -> ValidationReport {
     let mut validator = Validator {
         files,
         parsed: Vec::new(),
@@ -252,6 +274,10 @@ pub fn validate(files: &[SourceFile]) -> ValidationReport {
         format_version: None,
         format_compatible: true,
         ruleset: None,
+        features: Vec::new(),
+        supported_features: supported_features.iter().cloned().collect(),
+        feature_compatible: true,
+        reference_text: Vec::new(),
     };
     validator.run();
     validator.diagnostics.sort_by(|left, right| {
@@ -279,6 +305,8 @@ pub fn validate(files: &[SourceFile]) -> ValidationReport {
         format_version: validator.format_version.map(|version| version.to_string()),
         valid,
         diagnostics: validator.diagnostics,
+        features: validator.features,
+        reference_text: validator.reference_text,
     }
 }
 
@@ -295,6 +323,12 @@ impl<'a> Validator<'a> {
             .is_some_and(|version| version.major == 3 && version.minor >= 1)
     }
 
+    fn is_format_3_2_or_later(&self) -> bool {
+        self.format_version
+            .as_ref()
+            .is_some_and(|version| version.major == 3 && version.minor >= 2)
+    }
+
     fn run(&mut self) {
         if !self.validate_repository_bounds() {
             return;
@@ -304,7 +338,7 @@ impl<'a> Validator<'a> {
 
         let cases = self.items("case", Kind::Case, false);
         self.validate_case(&cases);
-        if !self.format_compatible {
+        if !self.format_compatible || !self.feature_compatible {
             return;
         }
         self.validate_section_filenames();
@@ -334,7 +368,7 @@ impl<'a> Validator<'a> {
         } else {
             Vec::new()
         };
-        self.nested_testimonies(&characters);
+        let testimonies = self.nested_testimonies(&characters);
         let facts_enabled = !facts.is_empty();
 
         if self.is_format_3() {
@@ -350,6 +384,23 @@ impl<'a> Validator<'a> {
                 &flags,
                 &commands,
                 &triggers,
+            );
+        }
+
+        if self.is_format_3_2_or_later() {
+            self.validate_reference_text(
+                &cases,
+                &settings,
+                &characters,
+                &entities,
+                &events,
+                &facts,
+                &deductions,
+                &flags,
+                &commands,
+                &triggers,
+                &testimonies,
+                &win_states,
             );
         }
 
@@ -1004,7 +1055,8 @@ impl<'a> Validator<'a> {
         result
     }
 
-    fn nested_testimonies(&mut self, characters: &[Item]) {
+    fn nested_testimonies(&mut self, characters: &[Item]) -> Vec<Item> {
+        let mut result = Vec::new();
         for character in characters {
             let Some(value) = character
                 .mapping
@@ -1100,10 +1152,19 @@ impl<'a> Validator<'a> {
                         }],
                     });
                 } else {
-                    self.definitions.insert(id, definition);
+                    self.definitions.insert(id.clone(), definition);
                 }
+                result.push(Item {
+                    kind: Kind::Testimony,
+                    id,
+                    path: character.path.clone(),
+                    source: character.source.clone(),
+                    pointer,
+                    mapping,
+                });
             }
         }
+        result
     }
 
     fn validate_case(&mut self, cases: &[Item]) {
@@ -1195,6 +1256,10 @@ impl<'a> Validator<'a> {
             ),
         }
         if !self.format_compatible {
+            return;
+        }
+        self.validate_features(case);
+        if !self.feature_compatible {
             return;
         }
         for field in ["entry_settings", "exit_settings"] {
@@ -1298,6 +1363,95 @@ impl<'a> Validator<'a> {
                     None,
                     Some(case.id.clone()),
                 ),
+            }
+        }
+    }
+
+    fn validate_features(&mut self, case: &Item) {
+        let Some(value) = case.mapping.get(Value::String("features".to_string())) else {
+            return;
+        };
+        let pointer = format!("{}/features", case.pointer);
+        if !self.is_format_3_2_or_later() {
+            self.feature_compatible = false;
+            self.push(
+                Severity::Error,
+                "feature.format_incompatible",
+                "`case.features` requires story format 3.2.0 or later".to_string(),
+                &case.path,
+                Some(pointer),
+                None,
+                Some(case.id.clone()),
+            );
+            return;
+        }
+        let Some(entries) = value.as_sequence() else {
+            self.feature_compatible = false;
+            self.push(
+                Severity::Error,
+                "feature.list_type",
+                "`case.features` must be an ordered sequence of unique feature names".to_string(),
+                &case.path,
+                Some(pointer),
+                None,
+                Some(case.id.clone()),
+            );
+            return;
+        };
+        let mut seen = HashSet::new();
+        for (index, entry) in entries.iter().enumerate() {
+            let entry_pointer = format!("{pointer}/{index}");
+            let Some(feature) = entry.as_str().filter(|feature| !feature.trim().is_empty()) else {
+                self.feature_compatible = false;
+                self.push(
+                    Severity::Error,
+                    "feature.name_type",
+                    "feature names must be non-empty strings".to_string(),
+                    &case.path,
+                    Some(entry_pointer),
+                    None,
+                    Some(case.id.clone()),
+                );
+                continue;
+            };
+            self.features.push(feature.to_string());
+            if !seen.insert(feature) {
+                self.feature_compatible = false;
+                self.push(
+                    Severity::Error,
+                    "feature.duplicate",
+                    format!("feature `{feature}` is declared more than once"),
+                    &case.path,
+                    Some(entry_pointer),
+                    locate_scalar(&case.source, feature),
+                    Some(case.id.clone()),
+                );
+                continue;
+            }
+            if !SUPPORTED_FEATURES.contains(&feature) {
+                self.feature_compatible = false;
+                self.push(
+                    Severity::Error,
+                    "feature.unknown",
+                    format!(
+                        "feature `{feature}` is not recognized by validator {VALIDATOR_VERSION}"
+                    ),
+                    &case.path,
+                    Some(entry_pointer),
+                    locate_scalar(&case.source, feature),
+                    Some(case.id.clone()),
+                );
+            } else if !self.supported_features.contains(feature) {
+                self.feature_compatible = false;
+                self.push(
+                    Severity::Error,
+                    "feature.consumer_unsupported",
+                    format!("this consumer does not advertise support for feature `{feature}`"),
+                    &case.path,
+                    Some(entry_pointer),
+                    locate_scalar(&case.source, feature),
+                    Some(case.id.clone()),
+                );
             }
         }
     }
@@ -1571,25 +1725,26 @@ impl<'a> Validator<'a> {
         commands: &[Item],
         triggers: &[Item],
     ) {
-        self.validate_item_fields(
-            cases,
-            &[
-                "id",
-                "format_version",
-                "ruleset",
-                "title",
-                "genre",
-                "tone",
-                "players",
-                "estimated_duration_minutes",
-                "entry_settings",
-                "exit_settings",
-                "initial_time",
-                "premise",
-                "opening",
-                "author_notes",
-            ],
-        );
+        let mut case_fields = vec![
+            "id",
+            "format_version",
+            "ruleset",
+            "title",
+            "genre",
+            "tone",
+            "players",
+            "estimated_duration_minutes",
+            "entry_settings",
+            "exit_settings",
+            "initial_time",
+            "premise",
+            "opening",
+            "author_notes",
+        ];
+        if self.is_format_3_2_or_later() {
+            case_fields.push("features");
+        }
+        self.validate_item_fields(cases, &case_fields);
         self.validate_item_fields(
             settings,
             &[
@@ -6326,6 +6481,179 @@ impl<'a> Validator<'a> {
     }
 
     #[allow(clippy::too_many_arguments)]
+    fn validate_reference_text(
+        &mut self,
+        cases: &[Item],
+        settings: &[Item],
+        characters: &[Item],
+        entities: &[Item],
+        events: &[Item],
+        facts: &[Item],
+        deductions: &[Item],
+        flags: &[Item],
+        commands: &[Item],
+        triggers: &[Item],
+        testimonies: &[Item],
+        win_states: &[Item],
+    ) {
+        let mut definitions = BTreeMap::new();
+        for items in [
+            cases,
+            settings,
+            characters,
+            entities,
+            events,
+            facts,
+            deductions,
+            flags,
+            commands,
+            triggers,
+            testimonies,
+            win_states,
+        ] {
+            for item in items {
+                if reference_kind(item.kind.name()).is_some() {
+                    definitions.insert(item.id.clone(), TextDefinition::from(item));
+                }
+            }
+        }
+
+        let mut consumers = Vec::new();
+        for items in [
+            cases,
+            settings,
+            characters,
+            entities,
+            events,
+            facts,
+            deductions,
+            flags,
+            commands,
+            triggers,
+            testimonies,
+            win_states,
+        ] {
+            for item in items {
+                collect_item_text_consumers(item, &mut consumers);
+            }
+        }
+        collect_nested_command_text(commands, &mut consumers);
+        collect_nested_command_text(triggers, &mut consumers);
+        for file in &self.parsed {
+            let Some(solution) = file
+                .value
+                .as_mapping()
+                .and_then(|root| root.get(Value::String("solution".to_string())))
+                .and_then(Value::as_mapping)
+            else {
+                continue;
+            };
+            for field in CONSUMER_FIELDS
+                .iter()
+                .filter(|field| field.kind == "solution")
+            {
+                if let Some(text) = mapping_path(solution, field.path).and_then(Value::as_str) {
+                    consumers.push(TextConsumer {
+                        owner_id: None,
+                        path: file.path.to_string(),
+                        source: file.source.to_string(),
+                        pointer: format!("/solution/{}", field.path.replace('.', "/")),
+                        authored: text.to_string(),
+                        disclosure: field.disclosure,
+                    });
+                }
+            }
+        }
+
+        let enabled = self
+            .features
+            .iter()
+            .any(|feature| feature == REFERENCE_TEXT_FEATURE);
+        if !enabled {
+            for consumer in consumers {
+                if parse_reference_text(&consumer.authored).is_ok_and(|parsed| {
+                    parsed
+                        .segments
+                        .iter()
+                        .any(|segment| matches!(segment, ReferenceTextSegment::Reference { .. }))
+                }) {
+                    self.push(
+                        Severity::Error,
+                        "reference_text.feature_required",
+                        "reference expression requires `case.features: [reference_text_v1]`"
+                            .to_string(),
+                        &consumer.path,
+                        Some(consumer.pointer),
+                        locate_scalar(&consumer.source, "[["),
+                        consumer.owner_id,
+                    );
+                }
+            }
+            return;
+        }
+
+        for consumer in consumers {
+            let parsed = match parse_reference_text(&consumer.authored) {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    let (start, end) = parse_error_offsets(&error, consumer.authored.len());
+                    self.push(
+                        Severity::Error,
+                        "reference_text.malformed",
+                        error.to_string(),
+                        &consumer.path,
+                        Some(consumer.pointer),
+                        locate_text_offset(&consumer.source, &consumer.authored, start, end),
+                        consumer.owner_id,
+                    );
+                    continue;
+                }
+            };
+            if !parsed
+                .segments
+                .iter()
+                .any(|segment| matches!(segment, ReferenceTextSegment::Reference { .. }))
+            {
+                continue;
+            }
+            let mut resolver = TextResolver::new(&definitions);
+            let location = TextLocation {
+                path: &consumer.path,
+                source: &consumer.source,
+                pointer: &consumer.pointer,
+                authored: &consumer.authored,
+            };
+            match resolver.resolve_parsed(&parsed, consumer.disclosure, &mut Vec::new(), location) {
+                Ok(node) => self.reference_text.push(ResolvedReferenceText {
+                    path: consumer.path,
+                    pointer: consumer.pointer,
+                    disclosure: consumer.disclosure,
+                    authored: consumer.authored,
+                    resolved: node.text,
+                    provenance: node.provenance,
+                }),
+                Err(error) => {
+                    let range = error.range.or_else(|| {
+                        error.expression.as_ref().and_then(|expression| {
+                            locate_reference_expression(&error.source, &error.authored, expression)
+                        })
+                    });
+                    self.diagnostics.push(Diagnostic {
+                        severity: Severity::Error,
+                        code: error.code.to_string(),
+                        message: error.message,
+                        path: error.path,
+                        pointer: Some(error.pointer),
+                        range,
+                        subject_id: consumer.owner_id,
+                        related: error.related,
+                    });
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn push(
         &mut self,
         severity: Severity,
@@ -6347,6 +6675,472 @@ impl<'a> Validator<'a> {
             related: Vec::new(),
         });
     }
+}
+
+#[derive(Clone)]
+struct TextDefinition {
+    id: String,
+    kind: &'static str,
+    path: String,
+    source: String,
+    pointer: String,
+    mapping: Mapping,
+}
+
+impl From<&Item> for TextDefinition {
+    fn from(item: &Item) -> Self {
+        Self {
+            id: item.id.clone(),
+            kind: item.kind.name(),
+            path: item.path.clone(),
+            source: item.source.clone(),
+            pointer: item.pointer.clone(),
+            mapping: item.mapping.clone(),
+        }
+    }
+}
+
+struct TextConsumer {
+    owner_id: Option<String>,
+    path: String,
+    source: String,
+    pointer: String,
+    authored: String,
+    disclosure: DisclosureClass,
+}
+
+#[derive(Clone)]
+struct ResolvedNode {
+    text: String,
+    provenance: Vec<ReferenceProvenance>,
+}
+
+struct TextResolveError {
+    code: &'static str,
+    message: String,
+    path: String,
+    source: String,
+    pointer: String,
+    authored: String,
+    expression: Option<crate::ReferenceExpression>,
+    range: Option<SourceRange>,
+    related: Vec<RelatedLocation>,
+}
+
+#[derive(Clone, Copy)]
+struct TextLocation<'a> {
+    path: &'a str,
+    source: &'a str,
+    pointer: &'a str,
+    authored: &'a str,
+}
+
+struct TextResolver<'a> {
+    definitions: &'a BTreeMap<String, TextDefinition>,
+    memo: HashMap<(String, String, DisclosureClass), ResolvedNode>,
+}
+
+impl<'a> TextResolver<'a> {
+    fn new(definitions: &'a BTreeMap<String, TextDefinition>) -> Self {
+        Self {
+            definitions,
+            memo: HashMap::new(),
+        }
+    }
+
+    fn resolve_parsed(
+        &mut self,
+        parsed: &crate::ParsedReferenceText,
+        disclosure: DisclosureClass,
+        stack: &mut Vec<(String, String)>,
+        location: TextLocation<'_>,
+    ) -> Result<ResolvedNode, Box<TextResolveError>> {
+        let mut text = String::new();
+        let mut provenance = Vec::new();
+        for segment in &parsed.segments {
+            match segment {
+                ReferenceTextSegment::Literal { text: literal } => text.push_str(literal),
+                ReferenceTextSegment::Reference { expression } => {
+                    let Some(definition) = self.definitions.get(&expression.target_id) else {
+                        return Err(text_error(
+                            "reference_text.unknown_id",
+                            format!(
+                                "reference expression names unknown ID `{}`",
+                                expression.target_id
+                            ),
+                            parsed,
+                            expression,
+                            location,
+                        ));
+                    };
+                    let Some(kind) = reference_kind(definition.kind) else {
+                        return Err(text_error(
+                            "reference_text.unsupported_kind",
+                            format!(
+                                "`{}` is not a referenceable definition kind",
+                                definition.kind
+                            ),
+                            parsed,
+                            expression,
+                            location,
+                        ));
+                    };
+                    let property_path = if expression.property_path.is_empty() {
+                        kind.default_path
+                            .ok_or_else(|| {
+                                text_error(
+                                    "reference_text.default_missing",
+                                    format!(
+                                        "{} references require an explicit property path",
+                                        definition.kind
+                                    ),
+                                    parsed,
+                                    expression,
+                                    location,
+                                )
+                            })?
+                            .to_string()
+                    } else {
+                        expression.property_path.join(".")
+                    };
+                    let Some(path_contract) =
+                        kind.paths.iter().find(|path| path.path == property_path)
+                    else {
+                        return Err(text_error(
+                            "reference_text.path_disallowed",
+                            format!(
+                                "path `{property_path}` is not an allowed narrative path for `{}`",
+                                definition.id
+                            ),
+                            parsed,
+                            expression,
+                            location,
+                        ));
+                    };
+                    if !crate::reference_text::disclosure_allows(
+                        disclosure,
+                        path_contract.disclosure,
+                    ) {
+                        return Err(text_error(
+                            "reference_text.disclosure",
+                            format!("player-safe prose cannot reference private path `{}.{property_path}`", definition.id),
+                            parsed,
+                            expression,
+                            location,
+                        ));
+                    }
+                    let key = (definition.id.clone(), property_path.clone());
+                    if let Some(cycle_start) = stack.iter().position(|entry| entry == &key) {
+                        let mut related = stack[cycle_start..]
+                            .iter()
+                            .filter_map(|(id, path)| {
+                                self.definitions.get(id).map(|definition| RelatedLocation {
+                                    message: format!("cycle includes `{id}.{path}`"),
+                                    path: definition.path.clone(),
+                                    pointer: Some(format!(
+                                        "{}/{}",
+                                        definition.pointer,
+                                        path.replace('.', "/")
+                                    )),
+                                    range: mapping_path(&definition.mapping, path)
+                                        .and_then(Value::as_str)
+                                        .and_then(|value| locate_scalar(&definition.source, value)),
+                                })
+                            })
+                            .collect::<Vec<_>>();
+                        related.push(RelatedLocation {
+                            message: format!(
+                                "cycle returns to `{}.{property_path}`",
+                                definition.id
+                            ),
+                            path: definition.path.clone(),
+                            pointer: Some(format!(
+                                "{}/{}",
+                                definition.pointer,
+                                property_path.replace('.', "/")
+                            )),
+                            range: mapping_path(&definition.mapping, &property_path)
+                                .and_then(Value::as_str)
+                                .and_then(|value| locate_scalar(&definition.source, value)),
+                        });
+                        let mut error = text_error(
+                            "reference_text.cycle",
+                            format!(
+                                "reference cycle detected at `{}.{property_path}`",
+                                definition.id
+                            ),
+                            parsed,
+                            expression,
+                            location,
+                        );
+                        error.related = related;
+                        return Err(error);
+                    }
+                    let memo_key = (definition.id.clone(), property_path.clone(), disclosure);
+                    let node = if let Some(node) = self.memo.get(&memo_key) {
+                        node.clone()
+                    } else {
+                        let Some(value) = mapping_path(&definition.mapping, &property_path) else {
+                            return Err(text_error(
+                                "reference_text.unknown_path",
+                                format!(
+                                    "`{}` has no value at allowed path `{property_path}`",
+                                    definition.id
+                                ),
+                                parsed,
+                                expression,
+                                location,
+                            ));
+                        };
+                        let Some(value) = value.as_str() else {
+                            return Err(text_error(
+                                "reference_text.non_string",
+                                format!(
+                                    "`{}.{property_path}` must be a string to be referenced",
+                                    definition.id
+                                ),
+                                parsed,
+                                expression,
+                                location,
+                            ));
+                        };
+                        if value.trim().is_empty() {
+                            return Err(text_error(
+                                "reference_text.empty",
+                                format!(
+                                    "`{}.{property_path}` cannot be empty when referenced",
+                                    definition.id
+                                ),
+                                parsed,
+                                expression,
+                                location,
+                            ));
+                        }
+                        let target_parsed = parse_reference_text(value).map_err(|error| {
+                            let (start, end) = parse_error_offsets(&error, value.len());
+                            Box::new(TextResolveError {
+                                code: "reference_text.malformed",
+                                message: format!(
+                                    "malformed reference in `{}.{property_path}`: {error}",
+                                    definition.id
+                                ),
+                                path: definition.path.clone(),
+                                source: definition.source.clone(),
+                                pointer: format!(
+                                    "{}/{}",
+                                    definition.pointer,
+                                    property_path.replace('.', "/")
+                                ),
+                                authored: value.to_string(),
+                                expression: None,
+                                range: locate_text_offset(&definition.source, value, start, end),
+                                related: Vec::new(),
+                            })
+                        })?;
+                        stack.push(key.clone());
+                        let target_pointer =
+                            format!("{}/{}", definition.pointer, property_path.replace('.', "/"));
+                        let target_location = TextLocation {
+                            path: &definition.path,
+                            source: &definition.source,
+                            pointer: &target_pointer,
+                            authored: value,
+                        };
+                        let result =
+                            self.resolve_parsed(&target_parsed, disclosure, stack, target_location);
+                        stack.pop();
+                        let node = result?;
+                        self.memo.insert(memo_key, node.clone());
+                        node
+                    };
+                    text.push_str(&node.text);
+                    provenance.push(ReferenceProvenance {
+                        expression: expression.clone(),
+                        path: location.path.to_string(),
+                        pointer: location.pointer.to_string(),
+                        range: locate_reference_expression(
+                            location.source,
+                            location.authored,
+                            expression,
+                        ),
+                        definition_pointer: format!(
+                            "{}/{}",
+                            definition.pointer,
+                            property_path.replace('.', "/")
+                        ),
+                        resolved_path: property_path,
+                        resolved_value: node.text.clone(),
+                    });
+                    provenance.extend(node.provenance);
+                }
+            }
+        }
+        Ok(ResolvedNode { text, provenance })
+    }
+}
+
+fn text_error(
+    code: &'static str,
+    message: String,
+    _parsed: &crate::ParsedReferenceText,
+    expression: &crate::ReferenceExpression,
+    location: TextLocation<'_>,
+) -> Box<TextResolveError> {
+    Box::new(TextResolveError {
+        code,
+        message,
+        path: location.path.to_string(),
+        source: location.source.to_string(),
+        pointer: location.pointer.to_string(),
+        authored: location.authored.to_string(),
+        expression: Some(expression.clone()),
+        range: None,
+        related: Vec::new(),
+    })
+}
+
+fn mapping_path<'a>(mapping: &'a Mapping, path: &str) -> Option<&'a Value> {
+    let mut components = path.split('.');
+    let first = components.next()?;
+    let mut value = mapping.get(Value::String(first.to_string()))?;
+    for component in components {
+        value = value
+            .as_mapping()?
+            .get(Value::String(component.to_string()))?;
+    }
+    Some(value)
+}
+
+fn collect_item_text_consumers(item: &Item, consumers: &mut Vec<TextConsumer>) {
+    for field in CONSUMER_FIELDS
+        .iter()
+        .filter(|field| field.kind == item.kind.name())
+    {
+        if let Some(text) = mapping_path(&item.mapping, field.path).and_then(Value::as_str) {
+            consumers.push(TextConsumer {
+                owner_id: Some(item.id.clone()),
+                path: item.path.clone(),
+                source: item.source.clone(),
+                pointer: format!("{}/{}", item.pointer, field.path.replace('.', "/")),
+                authored: text.to_string(),
+                disclosure: field.disclosure,
+            });
+        }
+    }
+}
+
+fn collect_nested_command_text(items: &[Item], consumers: &mut Vec<TextConsumer>) {
+    for item in items {
+        let parameter_disclosure = CONSUMER_FIELDS
+            .iter()
+            .find(|field| field.kind == "command_parameter" && field.path == "description")
+            .expect("command parameter prose is registered")
+            .disclosure;
+        let effect_kind = if item.kind == Kind::Trigger {
+            "trigger_effect"
+        } else {
+            "command_effect"
+        };
+        let effect_disclosure = CONSUMER_FIELDS
+            .iter()
+            .find(|field| field.kind == effect_kind && field.path == "text")
+            .expect("effect prose is registered")
+            .disclosure;
+        if let Some(parameters) = item
+            .mapping
+            .get(Value::String("parameters".to_string()))
+            .and_then(Value::as_sequence)
+        {
+            for (index, parameter) in parameters.iter().enumerate() {
+                if let Some(text) = parameter
+                    .as_mapping()
+                    .and_then(|mapping| string_field(mapping, "description"))
+                {
+                    consumers.push(TextConsumer {
+                        owner_id: Some(item.id.clone()),
+                        path: item.path.clone(),
+                        source: item.source.clone(),
+                        pointer: format!("{}/parameters/{index}/description", item.pointer),
+                        authored: text.to_string(),
+                        disclosure: parameter_disclosure,
+                    });
+                }
+            }
+        }
+        if let Some(effects) = item
+            .mapping
+            .get(Value::String("effects".to_string()))
+            .and_then(Value::as_sequence)
+        {
+            for (index, effect) in effects.iter().enumerate() {
+                if let Some(text) = effect
+                    .as_mapping()
+                    .and_then(|mapping| string_field(mapping, "text"))
+                {
+                    consumers.push(TextConsumer {
+                        owner_id: Some(item.id.clone()),
+                        path: item.path.clone(),
+                        source: item.source.clone(),
+                        pointer: format!("{}/effects/{index}/text", item.pointer),
+                        authored: text.to_string(),
+                        disclosure: effect_disclosure,
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn parse_error_offsets(error: &crate::ReferenceParseError, source_len: usize) -> (usize, usize) {
+    match error {
+        crate::ReferenceParseError::Unclosed { start } => (*start, source_len),
+        crate::ReferenceParseError::Empty { start, end }
+        | crate::ReferenceParseError::Invalid { start, end, .. } => (*start, *end),
+        crate::ReferenceParseError::UnexpectedClose { start } => {
+            (*start, (*start + 2).min(source_len))
+        }
+    }
+}
+
+fn locate_text_offset(source: &str, text: &str, start: usize, end: usize) -> Option<SourceRange> {
+    let base = source.find(text)?;
+    let absolute_start = base + start;
+    let absolute_end = base + end;
+    let position = |offset: usize| {
+        let prefix = &source[..offset];
+        let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+        let column = prefix
+            .rsplit_once('\n')
+            .map_or(prefix.len() + 1, |(_, tail)| tail.len() + 1);
+        Position { line, column }
+    };
+    Some(SourceRange {
+        start: position(absolute_start),
+        end: position(absolute_end),
+    })
+}
+
+fn locate_reference_expression(
+    source: &str,
+    authored: &str,
+    expression: &crate::ReferenceExpression,
+) -> Option<SourceRange> {
+    let needle = format!("[[{}]]", expression.authored);
+    let ordinal = authored[..expression.start].matches(&needle).count();
+    let start = source.match_indices(&needle).nth(ordinal)?.0;
+    let position = |offset: usize| {
+        let prefix = &source[..offset];
+        Position {
+            line: prefix.bytes().filter(|byte| *byte == b'\n').count() + 1,
+            column: prefix
+                .rsplit_once('\n')
+                .map_or(prefix.len() + 1, |(_, tail)| tail.len() + 1),
+        }
+    };
+    Some(SourceRange {
+        start: position(start),
+        end: position(start + needle.len()),
+    })
 }
 
 #[derive(Debug)]

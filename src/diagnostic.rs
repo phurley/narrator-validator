@@ -60,4 +60,10 @@ pub struct ValidationReport {
     pub format_version: Option<String>,
     pub valid: bool,
     pub diagnostics: Vec<Diagnostic>,
+    /// Ordered capabilities declared by `case.features`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub features: Vec<String>,
+    /// Successfully resolved reference-aware fields and their ordered origins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reference_text: Vec<crate::ResolvedReferenceText>,
 }

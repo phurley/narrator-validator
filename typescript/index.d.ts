@@ -44,6 +44,54 @@ export interface ValidationReport {
   format_version?: string
   valid: boolean
   diagnostics: Diagnostic[]
+  features?: string[]
+  reference_text?: ResolvedReferenceText[]
+}
+
+export type DisclosureClass =
+  | 'player_safe'
+  | 'gated_player_safe'
+  | 'private_narrator'
+
+export interface ReferenceExpression {
+  authored: string
+  target_id: string
+  property_path: string[]
+  start: number
+  end: number
+}
+
+export interface ReferenceProvenance {
+  expression: ReferenceExpression
+  path: string
+  pointer: string
+  range?: SourceRange
+  definition_pointer: string
+  resolved_path: string
+  resolved_value: string
+}
+
+export interface ResolvedReferenceText {
+  path: string
+  pointer: string
+  disclosure: DisclosureClass
+  authored: string
+  resolved: string
+  provenance: ReferenceProvenance[]
+}
+
+export interface ReferenceTextMetadata {
+  supported_features: string[]
+  consumer_fields: Array<{
+    kind: string
+    path: string
+    disclosure: DisclosureClass
+  }>
+  reference_kinds: Array<{
+    kind: string
+    default_path: string | null
+    paths: Array<{ path: string; disclosure: DisclosureClass }>
+  }>
 }
 
 export interface RulesetCommandParameter {
@@ -93,3 +141,10 @@ export function initializeNarratorValidator(
 export function validateRepository(
   files: readonly SourceFile[],
 ): Promise<ValidationReport>
+
+export function validateRepositoryWithFeatures(
+  files: readonly SourceFile[],
+  supportedFeatures: readonly string[],
+): Promise<ValidationReport>
+
+export function referenceTextMetadata(): Promise<ReferenceTextMetadata>
