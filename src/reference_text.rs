@@ -1,4 +1,4 @@
-//! Story Format 3.2 reference-aware prose.
+//! Story Format 3.2+ reference-aware prose.
 //!
 //! The tables in this module are the authoritative disclosure and path
 //! registry. Validation, Rust consumers, and the browser metadata export all
@@ -308,6 +308,11 @@ pub const CONSUMER_FIELDS: &[ConsumerField] = &[
         kind: "solution",
         path: "narrator_guidance.proof_summary",
         disclosure: PRIVATE,
+    },
+    ConsumerField {
+        kind: "solution_question",
+        path: "prompt",
+        disclosure: PUBLIC,
     },
 ];
 

@@ -57,7 +57,7 @@ await Promise.all([
   copyFile(join(root, 'typescript', 'index.d.ts'), join(output, 'index.d.ts')),
 ])
 
-const standardMysteryRulesets = ['1.0.0', '2.0.0'].map((version) =>
+const standardMysteryRulesets = ['1.0.0', '2.0.0', '3.0.0'].map((version) =>
   JSON.parse(
     execFileSync(
       'cargo',

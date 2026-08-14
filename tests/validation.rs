@@ -376,7 +376,7 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_3_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_3_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "1.2.0");
+    assert_eq!(report.validator_version, "1.3.0");
     assert_eq!(report.format_version.as_deref(), Some("3.0.0"));
     assert!(report.diagnostics.is_empty());
 }
@@ -420,6 +420,361 @@ fn standard_ruleset_2_0_requires_format_3_1() {
     }));
 }
 
+fn format_3_3_question_story() -> String {
+    VALID_FORMAT_3_STORY
+        .replace(
+            "  format_version: \"3.0.0\"",
+            "  format_version: \"3.3.0\"\n  features: [reference_text_v1]\n  ruleset:\n    id: ruleset.standard_mystery\n    version: \"3.0.0\"",
+        )
+        .replace(
+            "solution:\n  victim: character.victim\n  culprit: character.culprit\n  weapon: entity.knife\n  location: setting.study\n  deduction: deduction.solution\n",
+            "solution:\n  win_state: win.solve_case\n  questions:\n    - prompt: Who killed [[character.victim.description]]?\n      answer: [character.culprit]\n    - prompt: Which cards identify the weapon and location?\n      answer: [entity.knife, setting.study]\n      ordered: true\nwin_states:\n  - id: win.solve_case\n    name: Solved the case\n    text: You answer every question correctly.\n",
+        )
+        .replace(
+            "  - id: command.claim\n    name: Claim\n    description: Learn that the knife is present.\n    effects:\n      - operation: learn_fact\n        fact_id: fact.knife_is_present\n",
+            "",
+        )
+        .replace("    subject: command.claim", "    subject: command.solve")
+}
+
+#[test]
+fn format_3_3_authored_questions_are_private_exact_card_sets() {
+    let report = report(format_3_3_question_story());
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert!(report.diagnostics.is_empty(), "{:#?}", report.diagnostics);
+    let prompt = report
+        .reference_text
+        .iter()
+        .find(|field| field.pointer == "/solution/questions/0/prompt")
+        .expect("solution question prompt is a registered consumer");
+    assert_eq!(
+        prompt.resolved,
+        "Who killed The victim at the center of the mystery.?"
+    );
+    assert_eq!(
+        prompt.provenance[0].expression.target_id,
+        "character.victim"
+    );
+    assert!(report
+        .reference_text
+        .iter()
+        .all(|field| !field.pointer.contains("/answer")));
+}
+
+#[test]
+fn format_3_3_accepts_one_unordered_question_with_default_policy() {
+    let source = format_3_3_question_story().replace(
+        "    - prompt: Which cards identify the weapon and location?\n      answer: [entity.knife, setting.study]\n      ordered: true\n",
+        "",
+    );
+    let report = report(source);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+}
+
+#[test]
+fn format_3_3_solution_questions_enforce_bounds_uniqueness_deck_and_types() {
+    let source = format_3_3_question_story()
+        .replace(
+            "answer: [character.culprit]",
+            "answer: [character.culprit, character.culprit]",
+        )
+        .replace(
+            "answer: [entity.knife, setting.study]",
+            "answer: [character.culprit, deduction.solution, command.solve]",
+        );
+    let report = report(source);
+    for (code, pointer) in [
+        (
+            "solution.question_answer_duplicate",
+            "/solution/questions/0/answer/1",
+        ),
+        ("solution.answer_reused", "/solution/questions/1/answer/0"),
+        (
+            "solution.question_answer_type",
+            "/solution/questions/1/answer/1",
+        ),
+        (
+            "solution.question_answer_type",
+            "/solution/questions/1/answer/2",
+        ),
+    ] {
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code && diagnostic.pointer.as_deref() == Some(pointer)
+            }),
+            "missing {code} at {pointer}: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
+fn format_3_3_solution_questions_reject_every_shape_and_scanner_limit_violation() {
+    let cases = [
+        (
+            format_3_3_question_story().replace(
+                "  questions:\n    - prompt: Who killed",
+                "  questions: []\n  ignored_questions:\n    - prompt: Who killed",
+            ),
+            "solution.questions_count",
+            "/solution/questions",
+        ),
+        (
+            format_3_3_question_story().replace(
+                "prompt: Who killed [[character.victim.description]]?",
+                "prompt: ''",
+            ),
+            "solution.question_prompt",
+            "/solution/questions/0/prompt",
+        ),
+        (
+            format_3_3_question_story().replace(
+                "answer: [character.culprit]",
+                "answer: []",
+            ),
+            "solution.question_answer_count",
+            "/solution/questions/0/answer",
+        ),
+        (
+            format_3_3_question_story().replace("ordered: true", "ordered: first"),
+            "solution.question_ordered_type",
+            "/solution/questions/1/ordered",
+        ),
+        (
+            format_3_3_question_story().replace(
+                "      ordered: true",
+                "      ordered: true\n      explanation: private",
+            ),
+            "solution.question.unknown_field",
+            "/solution/questions/1/explanation",
+        ),
+        (
+            format_3_3_question_story().replace(
+                "answer: [entity.knife, setting.study]",
+                "answer: [entity.knife, setting.study, character.victim, character.culprit, entity.knife, setting.study]",
+            ),
+            "solution.question_answer_count",
+            "/solution/questions/1/answer",
+        ),
+        (
+            format_3_3_question_story().replace(
+                "answer: [character.culprit]",
+                "answer: [character.unknown]",
+            ),
+            "solution.question_answer_unknown",
+            "/solution/questions/0/answer/0",
+        ),
+        (
+            format_3_3_question_story().replace(
+                "  - tag_id: 4\n    subject: entity.knife\n",
+                "",
+            ),
+            "solution.question_answer_not_in_deck",
+            "/solution/questions/1/answer/0",
+        ),
+    ];
+    for (source, code, pointer) in cases {
+        let report = report(source);
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code && diagnostic.pointer.as_deref() == Some(pointer)
+            }),
+            "missing {code} at {pointer}: {:#?}",
+            report.diagnostics
+        );
+    }
+
+    let five_questions = report(format_3_3_question_story().replace(
+        "      ordered: true",
+        "      ordered: true\n    - { prompt: Third?, answer: [character.victim] }\n    - { prompt: Fourth?, answer: [setting.foyer] }\n    - { prompt: Fifth?, answer: [entity.knife] }",
+    ));
+    assert!(five_questions.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "solution.questions_count"
+            && diagnostic.pointer.as_deref() == Some("/solution/questions")
+    }));
+}
+
+#[test]
+fn format_3_3_solution_win_state_is_exclusive_and_ruleset_requires_the_contract() {
+    let conditional = report(format_3_3_question_story().replace(
+        "    text: You answer every question correctly.",
+        "    text: You answer every question correctly.\n    requires: [deduction.solution]",
+    ));
+    assert!(conditional.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "win_states.solution_condition_conflict"
+            && diagnostic.pointer.as_deref() == Some("/win_states/0")
+    }));
+
+    let missing = report(format_3_3_question_story().replace(
+        "solution:\n  win_state: win.solve_case\n  questions:\n    - prompt: Who killed [[character.victim.description]]?\n      answer: [character.culprit]\n    - prompt: Which cards identify the weapon and location?\n      answer: [entity.knife, setting.study]\n      ordered: true\n",
+        "",
+    ));
+    assert!(missing.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "solution.missing_question_contract"
+            && diagnostic.pointer.as_deref() == Some("/solution")
+    }));
+
+    for (replacement, code) in [
+        ("win.missing", "solution.win_state_unknown"),
+        ("character.culprit", "solution.win_state_type"),
+    ] {
+        let report = report(format_3_3_question_story().replace(
+            "win_state: win.solve_case",
+            &format!("win_state: {replacement}"),
+        ));
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code
+                    && diagnostic.pointer.as_deref() == Some("/solution/win_state")
+            }),
+            "missing {code}: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
+fn format_3_3_canonical_fixtures_match_native_and_cli_contracts() {
+    let fixture_root = "tests/fixtures/format-3.3-solve-card-sets";
+    let mut files = fs::read_dir(fixture_root)
+        .expect("fixture directory")
+        .map(|entry| {
+            let entry = entry.expect("fixture entry");
+            SourceFile {
+                path: entry.file_name().to_string_lossy().into_owned(),
+                source: fs::read_to_string(entry.path()).expect("fixture source"),
+            }
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    let valid = validate(&files);
+    assert!(valid.valid, "{:#?}", valid.diagnostics);
+
+    let invalid_case =
+        fs::read_to_string("tests/fixtures/format-3.3-solve-card-sets-invalid-case.yaml")
+            .expect("invalid case fixture");
+    files
+        .iter_mut()
+        .find(|file| file.path == "case.yaml")
+        .expect("case fixture")
+        .source = invalid_case;
+    let invalid = validate(&files);
+    for code in [
+        "solution.contract_mixed",
+        "solution.questions_count",
+        "solution.question_prompt",
+        "solution.question_answer_duplicate",
+        "solution.question_answer_type",
+        "solution.question_ordered_type",
+        "solution.answer_reused",
+        "solution.question_answer_count",
+    ] {
+        assert!(
+            invalid
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == code),
+            "missing {code}: {:#?}",
+            invalid.diagnostics
+        );
+    }
+
+    let output = Command::new(env!("CARGO_BIN_EXE_narrator-validator"))
+        .arg("--format")
+        .arg("json")
+        .arg(fixture_root)
+        .output()
+        .expect("run CLI fixture validation");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cli_report: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("CLI JSON report");
+    assert_eq!(cli_report["valid"], true);
+    assert_eq!(cli_report["format_version"], "3.3.0");
+
+    let action_output = Command::new(env!("CARGO_BIN_EXE_narrator-validator"))
+        .arg("--format")
+        .arg("github")
+        .arg(fixture_root)
+        .output()
+        .expect("run action-format fixture validation");
+    assert!(
+        action_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&action_output.stderr)
+    );
+}
+
+#[test]
+fn format_3_3_answers_require_the_canonical_physical_deck() {
+    let mut files = fs::read_dir("tests/fixtures/format-3.3-solve-card-sets")
+        .expect("fixture directory")
+        .map(|entry| {
+            let entry = entry.expect("fixture entry");
+            SourceFile {
+                path: entry.file_name().to_string_lossy().into_owned(),
+                source: fs::read_to_string(entry.path()).expect("fixture source"),
+            }
+        })
+        .collect::<Vec<_>>();
+    let deck = files
+        .iter_mut()
+        .find(|file| file.path == "deck.yaml")
+        .expect("deck");
+    deck.source = deck
+        .source
+        .replace("  - { tag_id: 2, subject: entity.knife }\n", "");
+    files.push(SourceFile {
+        path: "notes.yaml".to_string(),
+        source: "cards:\n  - { tag_id: 99, subject: entity.knife }\n".to_string(),
+    });
+    let report = validate(&files);
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "solution.question_answer_not_in_deck"
+            && diagnostic.pointer.as_deref() == Some("/solution/questions/1/answer/1")
+    }));
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "schema.noncanonical_filename" && diagnostic.path == "notes.yaml"
+    }));
+}
+
+#[test]
+fn format_3_3_solution_contract_fails_closed_across_migration_boundaries() {
+    let old_format = report(format_3_3_question_story().replace("3.3.0", "3.2.0"));
+    assert!(old_format.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "ruleset.format_incompatible"
+            && diagnostic.pointer.as_deref() == Some("/case/ruleset/version")
+    }));
+
+    let old_ruleset =
+        report(format_3_3_question_story().replace("version: \"3.0.0\"", "version: \"2.0.0\""));
+    assert!(old_ruleset.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "solution.ruleset_incompatible"
+            && diagnostic.pointer.as_deref() == Some("/solution")
+    }));
+
+    let mixed = report(format_3_3_question_story().replace(
+        "  win_state: win.solve_case",
+        "  win_state: win.solve_case\n  culprit: character.culprit",
+    ));
+    assert!(mixed.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "solution.contract_mixed"
+            && diagnostic.pointer.as_deref() == Some("/solution")
+    }));
+
+    let copied_legacy_solve = report(format_3_3_question_story().replace(
+        "commands:\n",
+        "commands:\n  - id: command.solve\n    name: Legacy Solve\n    parameters:\n      - { name: suspect, types: [character], min: 1, max: 1 }\n      - { name: theory, types: [deduction], min: 1, max: 1 }\n",
+    ));
+    assert!(copied_legacy_solve.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "ruleset.command_conflict"
+            && diagnostic.subject_id.as_deref() == Some("command.solve")
+    }));
+}
+
 #[test]
 fn rejects_unknown_and_incompatible_rulesets_with_version_guidance() {
     let unknown = report(
@@ -442,7 +797,7 @@ fn rejects_unknown_and_incompatible_rulesets_with_version_guidance() {
         .iter()
         .find(|diagnostic| diagnostic.code == "ruleset.unsupported")
         .expect("incompatible ruleset diagnostic");
-    assert!(diagnostic.message.contains("1.0.0 or 2.0.0"));
+    assert!(diagnostic.message.contains("1.0.0, 2.0.0, or 3.0.0"));
 }
 
 #[test]
@@ -556,7 +911,7 @@ fn accepts_semantically_compatible_story_format_versions() {
         let source = if version.starts_with('1') {
             VALID_STORY.replace("\"1.0.0\"", &format!("\"{version}\""))
         } else {
-            VALID_FORMAT_3_STORY.replace("\"3.0.0\"", &format!("\"{version}\""))
+            format_3_3_question_story().replacen("\"3.3.0\"", &format!("\"{version}\""), 1)
         };
         let report = report(source);
         assert!(report.valid, "{version}: {:#?}", report.diagnostics);

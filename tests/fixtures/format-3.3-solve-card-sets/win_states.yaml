@@ -1,0 +1,4 @@
+win_states:
+  - id: win.solve_case
+    name: Solved the case
+    text: You explain the complete solution.

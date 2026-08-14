@@ -6,6 +6,7 @@
 mod diagnostic;
 mod reference_text;
 mod ruleset;
+mod solution;
 mod validator;
 
 pub use diagnostic::{
@@ -21,15 +22,21 @@ pub use reference_text::{
 pub use ruleset::{
     resolve_ruleset, ResolvedRuleset, RulesetError, RulesetReference, STANDARD_MYSTERY_RULESET_ID,
     STANDARD_MYSTERY_RULESET_VERSION, STANDARD_MYSTERY_RULESET_VERSION_1,
-    STANDARD_MYSTERY_RULESET_VERSION_2,
+    STANDARD_MYSTERY_RULESET_VERSION_2, STANDARD_MYSTERY_RULESET_VERSION_3,
+};
+pub use solution::{
+    solution_answer_matches, solution_contract_metadata, solution_contract_metadata_json,
+    SolutionContractMetadata, MAX_SOLUTION_ANSWER_CARDS, MAX_SOLUTION_QUESTIONS,
+    MIN_SOLUTION_ANSWER_CARDS, MIN_SOLUTION_QUESTIONS, SOLUTION_STORY_FORMAT_VERSION,
 };
 pub use validator::{validate, validate_with_supported_features};
 
 pub const VALIDATOR_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Latest story format authored by this release.
-pub const STORY_FORMAT_VERSION: &str = "3.2.0";
+pub const STORY_FORMAT_VERSION: &str = "3.3.0";
 /// Semantic-version range this release can structurally validate. Format 3.2+
-/// execution also requires successful `case.features` negotiation.
+/// features still require successful `case.features` negotiation, while the
+/// Format 3.3 Solve contract is selected by its exact ruleset version.
 pub const SUPPORTED_STORY_FORMATS: &str = ">=1.0.0, <2.0.0 or >=3.0.0, <4.0.0";
 
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
@@ -37,8 +44,8 @@ mod wasm {
     use wasm_bindgen::prelude::*;
 
     use crate::{
-        parse_reference_text_result, reference_text_metadata_json, validate,
-        validate_with_supported_features, SourceFile,
+        parse_reference_text_result, reference_text_metadata_json, solution_answer_matches,
+        solution_contract_metadata_json, validate, validate_with_supported_features, SourceFile,
     };
 
     /// Validate a JSON array of `{ "path": string, "source": string }` values.
@@ -72,6 +79,26 @@ mod wasm {
     #[wasm_bindgen]
     pub fn reference_text_metadata_json_export() -> String {
         reference_text_metadata_json()
+    }
+
+    #[wasm_bindgen]
+    pub fn solution_contract_metadata_json_export() -> String {
+        solution_contract_metadata_json()
+    }
+
+    #[wasm_bindgen]
+    pub fn solution_answer_matches_json(
+        expected_json: &str,
+        submitted_json: &str,
+        ordered: bool,
+    ) -> Result<bool, JsValue> {
+        let expected: Vec<String> = serde_json::from_str(expected_json).map_err(|error| {
+            JsValue::from_str(&format!("invalid expected-answer JSON: {error}"))
+        })?;
+        let submitted: Vec<String> = serde_json::from_str(submitted_json).map_err(|error| {
+            JsValue::from_str(&format!("invalid submitted-answer JSON: {error}"))
+        })?;
+        Ok(solution_answer_matches(&expected, &submitted, ordered))
     }
 
     /// Parse reference-aware prose without validating a repository.

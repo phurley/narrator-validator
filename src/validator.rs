@@ -8,8 +8,10 @@ use crate::{
     parse_reference_text, reference_kind, resolve_ruleset, Diagnostic, DisclosureClass, Position,
     ReferenceProvenance, ReferenceTextSegment, RelatedLocation, ResolvedReferenceText,
     RulesetReference, Severity, SourceFile, SourceRange, ValidationReport, CONSUMER_FIELDS,
-    REFERENCE_TEXT_FEATURE, STANDARD_MYSTERY_RULESET_ID, STANDARD_MYSTERY_RULESET_VERSION_2,
-    STORY_FORMAT_VERSION, SUPPORTED_FEATURES, VALIDATOR_VERSION,
+    MAX_SOLUTION_ANSWER_CARDS, MAX_SOLUTION_QUESTIONS, MIN_SOLUTION_ANSWER_CARDS,
+    MIN_SOLUTION_QUESTIONS, REFERENCE_TEXT_FEATURE, STANDARD_MYSTERY_RULESET_ID,
+    STANDARD_MYSTERY_RULESET_VERSION_2, STANDARD_MYSTERY_RULESET_VERSION_3, STORY_FORMAT_VERSION,
+    SUPPORTED_FEATURES, VALIDATOR_VERSION,
 };
 
 const MAX_REPOSITORY_FILES: usize = 512;
@@ -327,6 +329,19 @@ impl<'a> Validator<'a> {
         self.format_version
             .as_ref()
             .is_some_and(|version| version.major == 3 && version.minor >= 2)
+    }
+
+    fn is_format_3_3_or_later(&self) -> bool {
+        self.format_version
+            .as_ref()
+            .is_some_and(|version| version.major == 3 && version.minor >= 3)
+    }
+
+    fn uses_question_solution_ruleset(&self) -> bool {
+        self.ruleset.as_ref().is_some_and(|ruleset| {
+            ruleset.id == STANDARD_MYSTERY_RULESET_ID
+                && ruleset.version == STANDARD_MYSTERY_RULESET_VERSION_3
+        })
     }
 
     fn run(&mut self) {
@@ -1494,6 +1509,22 @@ impl<'a> Validator<'a> {
             );
             return;
         }
+        if reference.id == STANDARD_MYSTERY_RULESET_ID
+            && reference.version == STANDARD_MYSTERY_RULESET_VERSION_3
+            && !self.is_format_3_3_or_later()
+        {
+            self.push(
+                Severity::Error,
+                "ruleset.format_incompatible",
+                "ruleset.standard_mystery@3.0.0 declares the Format 3.3 authored-question Solve contract; set `case.format_version` to \"3.3.0\" or select an earlier ruleset version"
+                    .to_string(),
+                &case.path,
+                Some(format!("{pointer}/version")),
+                None,
+                Some(case.id.clone()),
+            );
+            return;
+        }
         match resolve_ruleset(&reference) {
             Ok(_) => self.ruleset = Some(reference),
             Err(error) => self.push(
@@ -2137,8 +2168,20 @@ impl<'a> Validator<'a> {
             })
             .collect::<Vec<_>>();
         for (path, source, solution) in solutions {
-            self.validate_mapping_fields(
-                &solution,
+            let allowed = if self.is_format_3_3_or_later() {
+                &[
+                    "win_state",
+                    "questions",
+                    "victim",
+                    "culprit",
+                    "weapon",
+                    "location",
+                    "time",
+                    "deduction",
+                    "narrator_guidance",
+                    "author_notes",
+                ][..]
+            } else {
                 &[
                     "victim",
                     "culprit",
@@ -2148,7 +2191,11 @@ impl<'a> Validator<'a> {
                     "deduction",
                     "narrator_guidance",
                     "author_notes",
-                ],
+                ][..]
+            };
+            self.validate_mapping_fields(
+                &solution,
+                allowed,
                 "solution",
                 &path,
                 &source,
@@ -2200,7 +2247,70 @@ impl<'a> Validator<'a> {
                 Some((file.path.to_string(), file.source.to_string(), solution))
             })
             .collect();
+        if self.uses_question_solution_ruleset() && solutions.is_empty() {
+            self.push(
+                Severity::Error,
+                "solution.missing_question_contract",
+                "ruleset.standard_mystery@3.0.0 requires a Format 3.3 `solution` block with `win_state` and `questions`"
+                    .to_string(),
+                "case.yaml",
+                Some("/solution".to_string()),
+                None,
+                None,
+            );
+        }
         for (path, source, solution) in solutions {
+            let legacy_fields = [
+                "victim",
+                "culprit",
+                "weapon",
+                "location",
+                "time",
+                "deduction",
+            ];
+            let has_legacy = legacy_fields
+                .iter()
+                .any(|field| solution.contains_key(Value::String((*field).to_string())));
+            let has_questions = solution.contains_key(Value::String("questions".to_string()));
+            let has_win_state = solution.contains_key(Value::String("win_state".to_string()));
+
+            if self.is_format_3_3_or_later() {
+                if has_legacy {
+                    self.push(
+                        Severity::Error,
+                        if has_questions || has_win_state {
+                            "solution.contract_mixed"
+                        } else {
+                            "solution.legacy_contract"
+                        },
+                        "Format 3.3 replaces the legacy culprit/weapon/location/deduction solution with `win_state` and one to four authored `questions`; migrate the complete block instead of mixing contracts"
+                            .to_string(),
+                        &path,
+                        Some("/solution".to_string()),
+                        None,
+                        None,
+                    );
+                    if !has_questions && !has_win_state {
+                        continue;
+                    }
+                }
+                self.validate_question_solution(&path, &source, &solution);
+                continue;
+            }
+
+            if has_questions || has_win_state {
+                self.push(
+                    Severity::Error,
+                    "solution.format_incompatible",
+                    "authored solution questions require Format 3.3 and ruleset.standard_mystery@3.0.0"
+                        .to_string(),
+                    &path,
+                    Some("/solution".to_string()),
+                    None,
+                    None,
+                );
+                continue;
+            }
             for field in ["victim", "culprit", "weapon", "location"] {
                 if string_field(&solution, field).is_none() {
                     self.push(
@@ -2230,8 +2340,256 @@ impl<'a> Validator<'a> {
         }
     }
 
+    fn validate_question_solution(&mut self, path: &str, source: &str, solution: &Mapping) {
+        if !self.uses_question_solution_ruleset() {
+            self.push(
+                Severity::Error,
+                "solution.ruleset_incompatible",
+                "Format 3.3 authored questions require `case.ruleset` ruleset.standard_mystery@3.0.0"
+                    .to_string(),
+                path,
+                Some("/solution".to_string()),
+                None,
+                None,
+            );
+        }
+
+        let win_state = string_field(solution, "win_state");
+        match win_state.and_then(|id| self.definitions.get(id).map(|definition| (id, definition))) {
+            Some((_, definition)) if definition.kind == Kind::WinState => {}
+            Some((id, _)) => self.push(
+                Severity::Error,
+                "solution.win_state_type",
+                format!("solution `win_state` `{id}` must identify a win state"),
+                path,
+                Some("/solution/win_state".to_string()),
+                locate_scalar(source, id),
+                None,
+            ),
+            None => self.push(
+                Severity::Error,
+                "solution.win_state_unknown",
+                "solution `win_state` must identify a defined win state".to_string(),
+                path,
+                Some("/solution/win_state".to_string()),
+                win_state.and_then(|id| locate_scalar(source, id)),
+                None,
+            ),
+        }
+
+        let Some(questions) = solution
+            .get(Value::String("questions".to_string()))
+            .and_then(Value::as_sequence)
+        else {
+            self.push(
+                Severity::Error,
+                "solution.questions_type",
+                "solution `questions` must contain one to four question mappings".to_string(),
+                path,
+                Some("/solution/questions".to_string()),
+                None,
+                None,
+            );
+            return;
+        };
+        if !(MIN_SOLUTION_QUESTIONS..=MAX_SOLUTION_QUESTIONS).contains(&questions.len()) {
+            self.push(
+                Severity::Error,
+                "solution.questions_count",
+                "solution `questions` must contain one to four questions".to_string(),
+                path,
+                Some("/solution/questions".to_string()),
+                None,
+                None,
+            );
+        }
+
+        let deck_subjects = self.deck_subjects();
+        let mut seen_answers = BTreeMap::<String, String>::new();
+        for (question_index, question) in questions.iter().enumerate() {
+            let question_pointer = format!("/solution/questions/{question_index}");
+            let Some(question) = question.as_mapping() else {
+                self.push(
+                    Severity::Error,
+                    "solution.question_type",
+                    "each solution question must be a mapping with `prompt`, `answer`, and optional `ordered`"
+                        .to_string(),
+                    path,
+                    Some(question_pointer),
+                    None,
+                    None,
+                );
+                continue;
+            };
+            self.validate_mapping_fields(
+                question,
+                &["prompt", "answer", "ordered"],
+                "solution.question",
+                path,
+                source,
+                &question_pointer,
+                None,
+            );
+            if !string_field(question, "prompt").is_some_and(|prompt| !prompt.trim().is_empty()) {
+                self.push(
+                    Severity::Error,
+                    "solution.question_prompt",
+                    "solution question `prompt` must be a non-empty string".to_string(),
+                    path,
+                    Some(format!("{question_pointer}/prompt")),
+                    None,
+                    None,
+                );
+            }
+            if question
+                .get(Value::String("ordered".to_string()))
+                .is_some_and(|ordered| ordered.as_bool().is_none())
+            {
+                self.push(
+                    Severity::Error,
+                    "solution.question_ordered_type",
+                    "solution question `ordered` must be a boolean".to_string(),
+                    path,
+                    Some(format!("{question_pointer}/ordered")),
+                    None,
+                    None,
+                );
+            }
+            let Some(answers) = question
+                .get(Value::String("answer".to_string()))
+                .and_then(Value::as_sequence)
+            else {
+                self.push(
+                    Severity::Error,
+                    "solution.question_answer_type",
+                    "solution question `answer` must contain one to five physical-card IDs"
+                        .to_string(),
+                    path,
+                    Some(format!("{question_pointer}/answer")),
+                    None,
+                    None,
+                );
+                continue;
+            };
+            if !(MIN_SOLUTION_ANSWER_CARDS..=MAX_SOLUTION_ANSWER_CARDS).contains(&answers.len()) {
+                self.push(
+                    Severity::Error,
+                    "solution.question_answer_count",
+                    "solution question `answer` must contain one to five IDs".to_string(),
+                    path,
+                    Some(format!("{question_pointer}/answer")),
+                    None,
+                    None,
+                );
+            }
+            let mut row_answers = BTreeSet::new();
+            for (answer_index, answer) in answers.iter().enumerate() {
+                let answer_pointer = format!("{question_pointer}/answer/{answer_index}");
+                let Some(answer) = answer.as_str().filter(|answer| !answer.trim().is_empty())
+                else {
+                    self.push(
+                        Severity::Error,
+                        "solution.question_answer_id",
+                        "each solution answer must be a non-empty canonical ID".to_string(),
+                        path,
+                        Some(answer_pointer),
+                        None,
+                        None,
+                    );
+                    continue;
+                };
+                let answer_range = locate_scalar(source, answer);
+                if !row_answers.insert(answer.to_string()) {
+                    self.push(
+                        Severity::Error,
+                        "solution.question_answer_duplicate",
+                        format!("answer `{answer}` occurs more than once in this question"),
+                        path,
+                        Some(answer_pointer.clone()),
+                        answer_range,
+                        Some(answer.to_string()),
+                    );
+                    continue;
+                } else if let Some(previous_pointer) =
+                    seen_answers.insert(answer.to_string(), answer_pointer.clone())
+                {
+                    self.push(
+                        Severity::Error,
+                        "solution.answer_reused",
+                        format!("physical card `{answer}` may answer only one solution question; it was already used at `{previous_pointer}`"),
+                        path,
+                        Some(answer_pointer.clone()),
+                        answer_range,
+                        Some(answer.to_string()),
+                    );
+                }
+                let physical_subject = match self.definitions.get(answer) {
+                    Some(definition)
+                        if matches!(
+                            definition.kind,
+                            Kind::Setting | Kind::Character | Kind::Entity
+                        ) =>
+                    {
+                        true
+                    }
+                    Some(_) => {
+                        self.push(
+                            Severity::Error,
+                            "solution.question_answer_type",
+                            format!("solution answer `{answer}` must identify a setting, character, or entity physical card"),
+                            path,
+                            Some(answer_pointer.clone()),
+                            answer_range,
+                            Some(answer.to_string()),
+                        );
+                        false
+                    }
+                    None => {
+                        self.push(
+                            Severity::Error,
+                            "solution.question_answer_unknown",
+                            format!("solution answer `{answer}` is not defined"),
+                            path,
+                            Some(answer_pointer.clone()),
+                            answer_range,
+                            Some(answer.to_string()),
+                        );
+                        false
+                    }
+                };
+                if physical_subject && !deck_subjects.contains(answer) {
+                    self.push(
+                        Severity::Error,
+                        "solution.question_answer_not_in_deck",
+                        format!(
+                            "solution answer `{answer}` must have a physical card in `deck.yaml`"
+                        ),
+                        path,
+                        Some(answer_pointer),
+                        answer_range,
+                        Some(answer.to_string()),
+                    );
+                }
+            }
+        }
+    }
+
+    fn deck_subjects(&self) -> BTreeSet<String> {
+        self.parsed
+            .iter()
+            .filter(|file| file.path == "deck.yaml")
+            .filter_map(|file| file.value.as_mapping())
+            .filter_map(|root| root.get(Value::String("cards".to_string())))
+            .filter_map(Value::as_sequence)
+            .flatten()
+            .filter_map(Value::as_mapping)
+            .filter_map(|card| string_field(card, "subject"))
+            .map(str::to_string)
+            .collect()
+    }
+
     fn validate_terminal_configuration(&mut self, win_states: &[Item]) {
-        let has_legacy_solution = self.parsed.iter().any(|file| {
+        let has_solution = self.parsed.iter().any(|file| {
             file.value
                 .as_mapping()
                 .and_then(|root| root.get(Value::String("solution".to_string())))
@@ -2240,13 +2598,18 @@ impl<'a> Validator<'a> {
                     ["victim", "culprit", "weapon", "location"]
                         .iter()
                         .all(|field| string_field(solution, field).is_some())
+                        || (string_field(solution, "win_state").is_some()
+                            && solution
+                                .get(Value::String("questions".to_string()))
+                                .and_then(Value::as_sequence)
+                                .is_some_and(|questions| !questions.is_empty()))
                 })
         });
-        if win_states.is_empty() && !has_legacy_solution {
+        if win_states.is_empty() && !has_solution {
             self.push(
                 Severity::Error,
                 "win_states.missing_terminal_configuration",
-                "define at least one generic win state or a legacy `solution` block".to_string(),
+                "define at least one generic win state or a valid `solution` block".to_string(),
                 "",
                 Some("/win_states".to_string()),
                 None,
@@ -2256,6 +2619,18 @@ impl<'a> Validator<'a> {
     }
 
     fn validate_win_states(&mut self, win_states: &[Item]) {
+        let solution_win_state = if self.is_format_3_3_or_later() {
+            self.parsed.iter().find_map(|file| {
+                file.value
+                    .as_mapping()?
+                    .get(Value::String("solution".to_string()))?
+                    .as_mapping()
+                    .and_then(|solution| string_field(solution, "win_state"))
+                    .map(str::to_string)
+            })
+        } else {
+            None
+        };
         for win_state in win_states {
             for field in ["name", "text"] {
                 if string_field(&win_state.mapping, field)
@@ -2319,7 +2694,19 @@ impl<'a> Validator<'a> {
                 .get(Value::String("minimum_points".to_string()))
                 .and_then(Value::as_u64)
                 .is_some_and(|minimum| minimum > 0);
-            if !has_requirements && !has_point_threshold {
+            let is_solution_target = solution_win_state.as_deref() == Some(&win_state.id);
+            if is_solution_target && (has_requirements || has_point_threshold) {
+                self.push(
+                    Severity::Error,
+                    "win_states.solution_condition_conflict",
+                    "the win state selected by `solution.win_state` must not duplicate completion conditions; answering all solution questions is its condition"
+                        .to_string(),
+                    &win_state.path,
+                    Some(win_state.pointer.clone()),
+                    None,
+                    Some(win_state.id.clone()),
+                );
+            } else if !is_solution_target && !has_requirements && !has_point_threshold {
                 self.push(
                     Severity::Error,
                     "win_states.unconditional",
@@ -4677,9 +5064,13 @@ impl<'a> Validator<'a> {
                 matches!(known.as_slice(), [shape] if shape.types == [CommandParameterType::Setting] && shape.min == 1 && shape.max == 1)
             }
             "command.solve" => {
-                matches!(known.as_slice(), [suspect, theory]
-                    if suspect.types == [CommandParameterType::Character] && suspect.min == 1 && suspect.max == 1
-                        && theory.types == [CommandParameterType::Deduction] && theory.min == 1 && theory.max == 1)
+                if self.uses_question_solution_ruleset() {
+                    known.is_empty()
+                } else {
+                    matches!(known.as_slice(), [suspect, theory]
+                        if suspect.types == [CommandParameterType::Character] && suspect.min == 1 && suspect.max == 1
+                            && theory.types == [CommandParameterType::Deduction] && theory.min == 1 && theory.max == 1)
+                }
             }
             _ => true,
         };
@@ -4695,8 +5086,13 @@ impl<'a> Validator<'a> {
                         "`command.move` must declare exactly one setting parameter".to_string()
                     }
                     "command.solve" => {
-                        "`command.solve` must declare character then deduction parameters"
-                            .to_string()
+                        if self.uses_question_solution_ruleset() {
+                            "ruleset.standard_mystery@3.0.0 `command.solve` must not declare parameters; answers come from `solution.questions`"
+                                .to_string()
+                        } else {
+                            "`command.solve` must declare character then deduction parameters"
+                                .to_string()
+                        }
                     }
                     _ => unreachable!("only reserved runtime commands are checked"),
                 },
@@ -6561,6 +6957,31 @@ impl<'a> Validator<'a> {
                         authored: text.to_string(),
                         disclosure: field.disclosure,
                     });
+                }
+            }
+            if let Some(questions) = solution
+                .get(Value::String("questions".to_string()))
+                .and_then(Value::as_sequence)
+            {
+                let disclosure = CONSUMER_FIELDS
+                    .iter()
+                    .find(|field| field.kind == "solution_question" && field.path == "prompt")
+                    .expect("solution question prompt contract is registered")
+                    .disclosure;
+                for (index, question) in questions.iter().enumerate() {
+                    if let Some(text) = question
+                        .as_mapping()
+                        .and_then(|question| string_field(question, "prompt"))
+                    {
+                        consumers.push(TextConsumer {
+                            owner_id: None,
+                            path: file.path.to_string(),
+                            source: file.source.to_string(),
+                            pointer: format!("/solution/questions/{index}/prompt"),
+                            authored: text.to_string(),
+                            disclosure,
+                        });
+                    }
                 }
             }
         }

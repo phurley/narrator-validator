@@ -1,0 +1,12 @@
+settings:
+  - id: setting.world
+    type: estate
+    navigable: false
+    name: The estate
+    description: The grounds surrounding the mystery.
+  - id: setting.study
+    type: room
+    name: The study
+    description: A book-lined room.
+    parent: setting.world
+routes: []

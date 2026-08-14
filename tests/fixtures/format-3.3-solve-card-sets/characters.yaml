@@ -1,0 +1,7 @@
+characters:
+  - id: character.victim
+    name: Rowan Vale
+    description: The victim at the center of the mystery.
+  - id: character.culprit
+    name: Mara Voss
+    description: A guest with a carefully guarded secret.

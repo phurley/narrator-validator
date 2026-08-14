@@ -1,0 +1,28 @@
+# Replace the valid fixture's case.yaml with this file to exercise precise
+# mixed-contract, duplicate-card, command-answer, and scanner-limit failures.
+case:
+  id: case.solve_contract_invalid
+  format_version: "3.3.0"
+  ruleset:
+    id: ruleset.standard_mystery
+    version: "3.0.0"
+  players: { min: 1, max: 4 }
+  initial_time: "20:00"
+  entry_settings: [setting.study]
+  exit_settings: [setting.study]
+
+solution:
+  win_state: win.solve_case
+  culprit: character.culprit
+  questions:
+    - prompt: ""
+      answer: [character.culprit, character.culprit]
+    - prompt: Which command solves the case?
+      answer: [command.solve]
+      ordered: yes
+    - prompt: Which location is involved again?
+      answer: [character.culprit]
+    - prompt: Which six cards exceed a scanner row?
+      answer: [character.culprit, character.victim, setting.study, entity.knife, command.solve, character.culprit]
+    - prompt: Why is a fifth question unplayable?
+      answer: [setting.study]

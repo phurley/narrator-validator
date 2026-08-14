@@ -1,5 +1,25 @@
 # Migrating story format 2 to format 3
 
+## Moving from Format 3.2 to 3.3 authored Solve questions
+
+Update every validator/runtime/editor/scanner consumer before changing the
+story. Then select `case.format_version: "3.3.0"` and
+`ruleset.standard_mystery@3.0.0`. Replace the complete legacy
+victim/culprit/weapon/location/time/deduction solution with `win_state` and one
+to four `questions` as documented in
+[Story Format 3.3](docs/story-format-3.3.md). Do not mix the contracts.
+
+Each answer contains one to five unique physical setting, character, or entity
+IDs. Bind every answer subject in `deck.yaml`, and do not reuse a physical card
+between questions. Remove `requires` and positive `minimum_points` from the
+win state selected by `solution.win_state`; the exact question answers now own
+that completion condition. Keep conditions on unrelated generic endings.
+
+The 3.0 ruleset's Solve command has no authored parameters. Remove copied
+legacy Solve definitions and any runtime assumption that the command submits a
+fixed suspect plus deduction. Prompt references remain governed independently
+by the Format 3.2 `reference_text_v1` negotiation.
+
 ## Moving from Format 3.1 to 3.2 reference-aware text
 
 Format 3.1 stories require no changes. To use reference-aware prose, first

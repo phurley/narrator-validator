@@ -1,0 +1,5 @@
+entities:
+  - id: entity.knife
+    name: Diving knife
+    description: A narrow blade recovered from the study.
+    initial: { container: setting.study }

@@ -1,10 +1,14 @@
 import assert from 'node:assert/strict'
-import { readFile } from 'node:fs/promises'
+import { readFile, readdir } from 'node:fs/promises'
 
 import {
+  STANDARD_MYSTERY_RULESET,
+  STANDARD_MYSTERY_RULESETS,
   initializeNarratorValidator,
   parseReferenceText,
   referenceTextMetadata,
+  solutionAnswerMatches,
+  solutionContractMetadata,
   validateRepository,
   validateRepositoryWithFeatures,
 } from '../pkg/index.js'
@@ -17,6 +21,24 @@ const manifest = JSON.parse(
 )
 await initializeNarratorValidator(wasm)
 
+assert.deepEqual(
+  STANDARD_MYSTERY_RULESETS.map((ruleset) => ruleset.version),
+  ['1.0.0', '2.0.0', '3.0.0'],
+)
+assert.equal(STANDARD_MYSTERY_RULESET.version, '3.0.0')
+assert.equal(
+  STANDARD_MYSTERY_RULESET.commands.find(
+    (command) => command.id === 'command.solve',
+  ).parameters,
+  undefined,
+)
+assert.deepEqual(
+  STANDARD_MYSTERY_RULESETS[1].commands
+    .find((command) => command.id === 'command.solve')
+    .parameters.map((parameter) => parameter.name),
+  ['suspect', 'theory'],
+)
+
 const report = await validateRepository([])
 
 assert.equal(report.valid, false)
@@ -25,6 +47,64 @@ assert.ok(
   report.diagnostics.some(
     (diagnostic) => diagnostic.code === 'schema.missing_section',
   ),
+)
+
+const solutionContract = await solutionContractMetadata()
+assert.deepEqual(solutionContract, {
+  story_format_version: '3.3.0',
+  ruleset_id: 'ruleset.standard_mystery',
+  ruleset_version: '3.0.0',
+  min_questions: 1,
+  max_questions: 4,
+  min_answer_cards: 1,
+  max_answer_cards: 5,
+  ordered_default: false,
+  prompt_disclosure: 'player_safe',
+  expected_answer_disclosure: 'private_narrator',
+})
+assert.equal(
+  await solutionAnswerMatches(
+    ['entity.knife', 'entity.bottle'],
+    ['entity.bottle', 'entity.knife'],
+    false,
+  ),
+  true,
+)
+assert.equal(
+  await solutionAnswerMatches(
+    ['setting.shed', 'setting.observatory'],
+    ['setting.observatory', 'setting.shed'],
+    true,
+  ),
+  false,
+)
+
+const solveFixtureRoot = new URL(
+  '../tests/fixtures/format-3.3-solve-card-sets/',
+  import.meta.url,
+)
+const solveFixtureFiles = await Promise.all(
+  (await readdir(solveFixtureRoot)).map(async (path) => ({
+    path,
+    source: await readFile(new URL(path, solveFixtureRoot), 'utf8'),
+  })),
+)
+const solveReport = await validateRepositoryWithFeatures(solveFixtureFiles, [
+  'reference_text_v1',
+])
+assert.equal(solveReport.valid, true)
+assert.equal(solveReport.format_version, '3.3.0')
+assert.equal(
+  solveReport.reference_text.find(
+    (field) => field.pointer === '/solution/questions/0/prompt',
+  ).resolved,
+  'Who planned the crime against Rowan Vale?',
+)
+assert.equal(
+  solveReport.reference_text.some((field) =>
+    field.pointer.includes('/answer'),
+  ),
+  false,
 )
 
 const metadata = await referenceTextMetadata()
