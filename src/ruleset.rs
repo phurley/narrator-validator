@@ -1,12 +1,15 @@
 //! Immutable, versioned command catalogs supplied by Narrator.
 
+use std::sync::OnceLock;
+
 use serde::{Deserialize, Serialize};
 
 pub const STANDARD_MYSTERY_RULESET_ID: &str = "ruleset.standard_mystery";
 pub const STANDARD_MYSTERY_RULESET_VERSION_1: &str = "1.0.0";
 pub const STANDARD_MYSTERY_RULESET_VERSION_2: &str = "2.0.0";
+pub const STANDARD_MYSTERY_RULESET_VERSION_3: &str = "3.0.0";
 /// Latest standard mystery ruleset authored by this validator release.
-pub const STANDARD_MYSTERY_RULESET_VERSION: &str = STANDARD_MYSTERY_RULESET_VERSION_2;
+pub const STANDARD_MYSTERY_RULESET_VERSION: &str = STANDARD_MYSTERY_RULESET_VERSION_3;
 
 /// A story's exact ruleset selection. Released versions are append-only: an
 /// existing `(id, version)` pair must never be changed in place.
@@ -25,9 +28,11 @@ pub struct ResolvedRuleset {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RulesetError {
-    #[error("unknown ruleset `{id}`; supported rulesets: ruleset.standard_mystery@1.0.0 and ruleset.standard_mystery@2.0.0")]
+    #[error("unknown ruleset `{id}`; supported rulesets: ruleset.standard_mystery@1.0.0, @2.0.0, and @3.0.0")]
     Unknown { id: String },
-    #[error("ruleset `{id}` does not support version `{version}`; use version 1.0.0 or 2.0.0")]
+    #[error(
+        "ruleset `{id}` does not support version `{version}`; use version 1.0.0, 2.0.0, or 3.0.0"
+    )]
     IncompatibleVersion { id: String, version: String },
 }
 
@@ -40,6 +45,7 @@ pub fn resolve_ruleset(reference: &RulesetReference) -> Result<ResolvedRuleset, 
     let commands_yaml = match reference.version.as_str() {
         STANDARD_MYSTERY_RULESET_VERSION_1 => STANDARD_MYSTERY_COMMANDS_1_0_YAML,
         STANDARD_MYSTERY_RULESET_VERSION_2 => STANDARD_MYSTERY_COMMANDS_2_0_YAML,
+        STANDARD_MYSTERY_RULESET_VERSION_3 => standard_mystery_commands_3_0_yaml(),
         _ => {
             return Err(RulesetError::IncompatibleVersion {
                 id: reference.id.clone(),
@@ -317,6 +323,40 @@ const STANDARD_MYSTERY_COMMANDS_2_0_YAML: &str = r#"commands:
           from: [established]
 "#;
 
+fn standard_mystery_commands_3_0_yaml() -> &'static str {
+    const LEGACY_SOLVE: &str = r#"  - id: command.solve
+    name: Solve
+    description: Accuse a suspect using an established solution deduction.
+    parameters:
+      - name: suspect
+        description: The character being accused.
+        types: [character]
+        min: 1
+        max: 1
+        candidates:
+          from: [known]
+      - name: theory
+        description: The established deduction offered as the solution.
+        types: [deduction]
+        min: 1
+        max: 1
+        candidates:
+          from: [established]
+"#;
+    const QUESTION_SOLVE: &str = r#"  - id: command.solve
+    name: Solve
+    description: Answer the story's authored solution questions with physical cards.
+"#;
+    static CATALOG: OnceLock<String> = OnceLock::new();
+    CATALOG
+        .get_or_init(|| {
+            let resolved = STANDARD_MYSTERY_COMMANDS_2_0_YAML.replace(LEGACY_SOLVE, QUESTION_SOLVE);
+            assert_ne!(resolved, STANDARD_MYSTERY_COMMANDS_2_0_YAML);
+            resolved
+        })
+        .as_str()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,5 +484,42 @@ mod tests {
         ] {
             assert_eq!(contract(command, parameter), (from, capabilities));
         }
+    }
+
+    #[test]
+    fn standard_catalog_3_0_changes_only_solve_to_authored_questions() {
+        let version_2 = resolve_ruleset(&RulesetReference {
+            id: STANDARD_MYSTERY_RULESET_ID.to_string(),
+            version: STANDARD_MYSTERY_RULESET_VERSION_2.to_string(),
+        })
+        .expect("standard ruleset 2.0");
+        let version_3 = resolve_ruleset(&RulesetReference {
+            id: STANDARD_MYSTERY_RULESET_ID.to_string(),
+            version: STANDARD_MYSTERY_RULESET_VERSION_3.to_string(),
+        })
+        .expect("standard ruleset 3.0");
+        let document: serde_yaml::Value =
+            serde_yaml::from_str(version_3.commands_yaml).expect("catalog YAML");
+        let commands = document["commands"].as_sequence().expect("commands");
+        let solve = commands
+            .iter()
+            .find(|command| command["id"].as_str() == Some("command.solve"))
+            .expect("Solve command");
+        assert!(solve.get("parameters").is_none());
+        assert!(solve["description"]
+            .as_str()
+            .is_some_and(|description| description.contains("authored solution questions")));
+
+        let v2_without_solve = version_2
+            .commands_yaml
+            .split("  - id: command.solve\n")
+            .next()
+            .expect("v2 prefix");
+        let v3_without_solve = version_3
+            .commands_yaml
+            .split("  - id: command.solve\n")
+            .next()
+            .expect("v3 prefix");
+        assert_eq!(v3_without_solve, v2_without_solve);
     }
 }

@@ -1,6 +1,8 @@
 import initWasm, {
   parse_reference_text_json as parseReferenceTextJson,
   reference_text_metadata_json_export as referenceTextMetadataJson,
+  solution_answer_matches_json as solutionAnswerMatchesJson,
+  solution_contract_metadata_json_export as solutionContractMetadataJson,
   validate_json as validateJson,
   validate_json_with_features as validateJsonWithFeatures,
 } from './narrator_validator.js'
@@ -69,6 +71,30 @@ export async function validateRepositoryWithFeatures(files, supportedFeatures) {
 export async function referenceTextMetadata() {
   await initializeNarratorValidator()
   return JSON.parse(referenceTextMetadataJson())
+}
+
+/** @returns {Promise<import('./index.js').SolutionContractMetadata>} */
+export async function solutionContractMetadata() {
+  await initializeNarratorValidator()
+  return JSON.parse(solutionContractMetadataJson())
+}
+
+/**
+ * Compare one submitted row with an authored expected answer. Unordered rows
+ * require exact set equality; ordered rows require exact sequence equality.
+ *
+ * @param {readonly string[]} expected
+ * @param {readonly string[]} submitted
+ * @param {boolean} ordered
+ * @returns {Promise<boolean>}
+ */
+export async function solutionAnswerMatches(expected, submitted, ordered) {
+  await initializeNarratorValidator()
+  return solutionAnswerMatchesJson(
+    JSON.stringify(expected),
+    JSON.stringify(submitted),
+    ordered,
+  )
 }
 
 /**

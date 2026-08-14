@@ -123,7 +123,7 @@ This repository includes a composite action:
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: phurley/narrator-validator@v1.1.0
+- uses: phurley/narrator-validator@v1.3.0
 ```
 
 It builds the pinned validator revision and emits native GitHub annotations.
@@ -131,14 +131,16 @@ It builds the pinned validator revision and emits native GitHub annotations.
 ## Story format versions
 
 Every story declares a quoted semantic version at `case.format_version`.
-This validator authors format `3.2.0`. Format 3 minor and patch releases remain
+This validator authors format `3.3.0`. Format 3 minor and patch releases remain
 structurally compatible within the major format, while capabilities added by a
 minor release must be explicitly negotiated through `case.features`. The
 format-1 validation path remains for legacy repositories, while format-2
 repositories stop with focused migration
 guidance before the strict format-3 schema runs.
 
-Validator `1.1.0` is the coordinated release for the format-3.1 contract. See
+Validator `1.3.0` authors the Format 3.3 Solve contract while continuing to
+validate older supported formats. Validator `1.1.0` remains the coordinated
+release for the format-3.1 contract. See
 [MIGRATION.md](MIGRATION.md) for the complete format-2 migration and the
 [`v1.1.0` release](https://github.com/phurley/narrator-validator/releases/tag/v1.1.0)
 for the exact consumer commit matrix.
@@ -146,7 +148,8 @@ for the exact consumer commit matrix.
 The normative placement, presence, candidate-selection, compatibility, and
 privacy decisions are recorded in
 [Story Format 3.1](docs/story-format-3.1.md),
-[Story Format 3.2](docs/story-format-3.2.md), and
+[Story Format 3.2](docs/story-format-3.2.md),
+[Story Format 3.3](docs/story-format-3.3.md), and
 [ADR 0001](docs/adr/0001-story-format-3.1-character-presence-and-command-candidates.md).
 The [ADR index](docs/adr/README.md) is the discovery point for architecture
 decisions shared by validator consumers.
@@ -165,6 +168,17 @@ allowed named narrative path. Resolution is recursive, disclosure-aware, and
 retains ordered provenance. See the [Format 3.2 contract](docs/story-format-3.2.md)
 for feature negotiation, grammar, escaping, the authoritative path matrix, and
 consumer APIs.
+
+## Format 3.3 authored Solve questions
+
+Format 3.3 pairs `solution.questions` with
+`ruleset.standard_mystery@3.0.0`. A story asks one to four authored questions;
+each private expected answer contains one to five unique physical setting,
+character, or entity cards. Unordered rows require exact set equality and
+`ordered: true` rows require exact sequence equality. The solution points to
+one unconditional win state for terminal name/text while other generic endings
+remain available. See the [Format 3.3 contract](docs/story-format-3.3.md) for
+the schema, scanner bounds, migration, disclosure, and shared comparison APIs.
 
 ## Format 3 document and disclosure contract
 
@@ -207,12 +221,13 @@ material with no runtime projection.
 
 ## Versioned mystery ruleset
 
-`case.ruleset` selects an exact immutable command catalog. Both
-`ruleset.standard_mystery@1.0.0` and `@2.0.0` supply Move, Open, Search, Examine,
+`case.ruleset` selects an exact immutable command catalog.
+`ruleset.standard_mystery@1.0.0`, `@2.0.0`, and `@3.0.0` supply Move, Open, Search, Examine,
 Take, Drop, Use, Question, Deduce, and Solve with canonical ordered semantic
 parameter groups. Version 2 adds explicit candidate sources and portability
-filters; version 1 remains immutable for format-3.0 stories. Both deliberately
-omit `command.claim`: facts enter notebooks automatically, while Deduce remains
+filters; version 3 keeps that catalog but makes Solve parameterless so Format
+3.3 can supply authored card-set questions. Earlier versions remain immutable.
+All three deliberately omit `command.claim`: facts enter notebooks automatically, while Deduce remains
 the deliberate notebook action.
 
 Ruleset commands participate in global ID and reference validation, including

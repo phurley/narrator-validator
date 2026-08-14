@@ -75,6 +75,9 @@ fact prose; deduction `conclusion`; character portrayal and testimony text;
 command parameter descriptions; narrative command/trigger effect text; win
 state name/text; and private character/solution narrator guidance. The exact
 list and disclosure class is exported by the registry.
+Format 3.3 additionally registers each `solution.questions[*].prompt` as a
+baseline player-safe `solution_question:prompt` consumer; expected answer IDs
+remain private mechanical state and are never reference-text output.
 
 Baseline player-safe consumers can reach only baseline player-safe paths;
 gated player-safe consumers can reach baseline or gated paths. Neither can

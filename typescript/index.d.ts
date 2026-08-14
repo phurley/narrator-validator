@@ -137,8 +137,21 @@ export interface RulesetCommand {
 
 export interface StandardMysteryRuleset {
   id: 'ruleset.standard_mystery'
-  version: '1.0.0' | '2.0.0'
+  version: '1.0.0' | '2.0.0' | '3.0.0'
   commands: RulesetCommand[]
+}
+
+export interface SolutionContractMetadata {
+  story_format_version: '3.3.0'
+  ruleset_id: 'ruleset.standard_mystery'
+  ruleset_version: '3.0.0'
+  min_questions: 1
+  max_questions: 4
+  min_answer_cards: 1
+  max_answer_cards: 5
+  ordered_default: false
+  prompt_disclosure: 'player_safe'
+  expected_answer_disclosure: 'private_narrator'
 }
 
 export const STANDARD_MYSTERY_RULESET: StandardMysteryRuleset
@@ -169,6 +182,14 @@ export function validateRepositoryWithFeatures(
 ): Promise<ValidationReport>
 
 export function referenceTextMetadata(): Promise<ReferenceTextMetadata>
+
+export function solutionContractMetadata(): Promise<SolutionContractMetadata>
+
+export function solutionAnswerMatches(
+  expected: readonly string[],
+  submitted: readonly string[],
+  ordered: boolean,
+): Promise<boolean>
 
 /** Parse prose; expression offsets are zero-based UTF-8 byte offsets. */
 export function parseReferenceText(

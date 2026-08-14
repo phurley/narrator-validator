@@ -1,0 +1,5 @@
+cards:
+  - { tag_id: 0, subject: character.culprit }
+  - { tag_id: 1, subject: setting.study }
+  - { tag_id: 2, subject: entity.knife }
+  - { tag_id: 3, subject: command.solve }

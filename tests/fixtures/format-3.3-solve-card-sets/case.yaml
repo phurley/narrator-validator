@@ -1,0 +1,22 @@
+case:
+  id: case.solve_contract
+  format_version: "3.3.0"
+  features: [reference_text_v1]
+  ruleset:
+    id: ruleset.standard_mystery
+    version: "3.0.0"
+  title: Solve contract fixture
+  opening: The answer is hidden in the physical deck.
+  players: { min: 1, max: 4 }
+  initial_time: "20:00"
+  entry_settings: [setting.study]
+  exit_settings: [setting.study]
+
+solution:
+  win_state: win.solve_case
+  questions:
+    - prompt: Who planned the crime against [[character.victim]]?
+      answer: [character.culprit]
+    - prompt: Which cards identify the place and weapon?
+      answer: [setting.study, entity.knife]
+      ordered: true
