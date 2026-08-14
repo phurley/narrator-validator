@@ -3895,3 +3895,44 @@ fn malformed_and_cycle_ranges_match_their_exact_field_pointers() {
         }
     }
 }
+
+#[test]
+fn cycle_ranges_follow_the_participating_expression_not_the_first_reference() {
+    let characters = "characters:\n  - id: character.alpha\n    name: \"[[setting.foyer]] and [[character.beta]]\"\n    description: Alpha.\n  - id: character.beta\n    name: \"[[character.alpha]]\"\n    description: Beta.\n";
+    let report = validate(&[
+        SourceFile {
+            path: "case.yaml".to_string(),
+            source: "case:\n  id: case.cycle_edge\n  format_version: \"3.2.0\"\n  features: [reference_text_v1]\n  players: { min: 1, max: 1 }\n  initial_time: \"20:00\"\n  title: Cycle edge\n  opening: \"[[character.alpha]]\"\n"
+                .to_string(),
+        },
+        SourceFile {
+            path: "characters.yaml".to_string(),
+            source: characters.to_string(),
+        },
+        SourceFile {
+            path: "settings.yaml".to_string(),
+            source: "settings:\n  - id: setting.foyer\n    name: The Foyer\n    description: An entry room.\nroutes: []\n".to_string(),
+        },
+    ]);
+    let diagnostic = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "reference_text.cycle")
+        .expect("cycle diagnostic");
+    let alpha_edge = diagnostic
+        .related
+        .iter()
+        .find(|location| location.pointer.as_deref() == Some("/characters/0/name"))
+        .expect("alpha cycle edge");
+    let range = alpha_edge.range.expect("alpha edge range");
+    let alpha_line = characters.lines().nth(2).unwrap();
+    let expected_column = alpha_line.find("[[character.beta]]").unwrap() + 1;
+    let unrelated_column = alpha_line.find("[[setting.foyer]]").unwrap() + 1;
+    assert_eq!(range.start.line, 3);
+    assert_eq!(range.start.column, expected_column);
+    assert_ne!(range.start.column, unrelated_column);
+    assert_eq!(
+        range.end.column - range.start.column,
+        "[[character.beta]]".len()
+    );
+}

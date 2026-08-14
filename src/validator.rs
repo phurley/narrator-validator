@@ -6752,6 +6752,50 @@ struct TextLocation<'a> {
     authored: &'a str,
 }
 
+#[derive(Clone)]
+struct ResolveEdge {
+    target: (String, String),
+    expression: crate::ReferenceExpression,
+    path: String,
+    source: String,
+    pointer: String,
+    authored: String,
+}
+
+impl ResolveEdge {
+    fn new(
+        target: (String, String),
+        expression: &crate::ReferenceExpression,
+        location: TextLocation<'_>,
+    ) -> Self {
+        Self {
+            target,
+            expression: expression.clone(),
+            path: location.path.to_string(),
+            source: location.source.to_string(),
+            pointer: location.pointer.to_string(),
+            authored: location.authored.to_string(),
+        }
+    }
+
+    fn related_location(&self) -> RelatedLocation {
+        RelatedLocation {
+            message: format!(
+                "cycle edge references `{}.{}`",
+                self.target.0, self.target.1
+            ),
+            path: self.path.clone(),
+            pointer: Some(self.pointer.clone()),
+            range: locate_reference_expression(
+                &self.source,
+                &self.pointer,
+                &self.authored,
+                &self.expression,
+            ),
+        }
+    }
+}
+
 struct TextResolver<'a> {
     definitions: &'a BTreeMap<String, TextDefinition>,
     memo: HashMap<(String, String, DisclosureClass), ResolvedNode>,
@@ -6769,7 +6813,7 @@ impl<'a> TextResolver<'a> {
         &mut self,
         parsed: &crate::ParsedReferenceText,
         disclosure: DisclosureClass,
-        stack: &mut Vec<(String, String)>,
+        stack: &mut Vec<ResolveEdge>,
         location: TextLocation<'_>,
     ) -> Result<ResolvedNode, Box<TextResolveError>> {
         let mut text = String::new();
@@ -6847,59 +6891,17 @@ impl<'a> TextResolver<'a> {
                         ));
                     }
                     let key = (definition.id.clone(), property_path.clone());
-                    if let Some(cycle_start) = stack.iter().position(|entry| entry == &key) {
-                        let mut related = stack[cycle_start..]
+                    if let Some(cycle_start) = stack.iter().position(|edge| edge.target == key) {
+                        // The edge that first entered the repeated target came
+                        // from outside the cycle. Participating edges begin
+                        // with the following frame and end with this expression.
+                        let mut related = stack[cycle_start + 1..]
                             .iter()
-                            .filter_map(|(id, path)| {
-                                self.definitions.get(id).map(|definition| RelatedLocation {
-                                    message: format!("cycle includes `{id}.{path}`"),
-                                    path: definition.path.clone(),
-                                    pointer: Some(format!(
-                                        "{}/{}",
-                                        definition.pointer,
-                                        path.replace('.', "/")
-                                    )),
-                                    range: mapping_path(&definition.mapping, path)
-                                        .and_then(Value::as_str)
-                                        .and_then(|value| {
-                                            locate_first_reference_in_yaml_scalar(
-                                                &definition.source,
-                                                &format!(
-                                                    "{}/{}",
-                                                    definition.pointer,
-                                                    path.replace('.', "/")
-                                                ),
-                                                value,
-                                            )
-                                        }),
-                                })
-                            })
+                            .map(ResolveEdge::related_location)
                             .collect::<Vec<_>>();
-                        related.push(RelatedLocation {
-                            message: format!(
-                                "cycle returns to `{}.{property_path}`",
-                                definition.id
-                            ),
-                            path: definition.path.clone(),
-                            pointer: Some(format!(
-                                "{}/{}",
-                                definition.pointer,
-                                property_path.replace('.', "/")
-                            )),
-                            range: mapping_path(&definition.mapping, &property_path)
-                                .and_then(Value::as_str)
-                                .and_then(|value| {
-                                    locate_first_reference_in_yaml_scalar(
-                                        &definition.source,
-                                        &format!(
-                                            "{}/{}",
-                                            definition.pointer,
-                                            property_path.replace('.', "/")
-                                        ),
-                                        value,
-                                    )
-                                }),
-                        });
+                        related.push(
+                            ResolveEdge::new(key.clone(), expression, location).related_location(),
+                        );
                         let mut error = text_error(
                             "reference_text.cycle",
                             format!(
@@ -6984,7 +6986,7 @@ impl<'a> TextResolver<'a> {
                                 related: Vec::new(),
                             })
                         })?;
-                        stack.push(key.clone());
+                        stack.push(ResolveEdge::new(key.clone(), expression, location));
                         let target_pointer =
                             format!("{}/{}", definition.pointer, property_path.replace('.', "/"));
                         let target_location = TextLocation {
@@ -7494,20 +7496,6 @@ fn locate_reference_expression(
         .0;
     let start = span.value_start + relative;
     Some(source_range(source, start, start + needle.len()))
-}
-
-fn locate_first_reference_in_yaml_scalar(
-    source: &str,
-    pointer: &str,
-    authored: &str,
-) -> Option<SourceRange> {
-    let parsed = parse_reference_text(authored).ok()?;
-    parsed.segments.iter().find_map(|segment| match segment {
-        ReferenceTextSegment::Reference { expression } => {
-            locate_reference_expression(source, pointer, authored, expression)
-        }
-        ReferenceTextSegment::Literal { .. } => None,
-    })
 }
 
 #[derive(Debug)]
