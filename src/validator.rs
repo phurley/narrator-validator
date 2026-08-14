@@ -6884,7 +6884,11 @@ impl<'a> TextResolver<'a> {
                     ) {
                         return Err(text_error(
                             "reference_text.disclosure",
-                            format!("player-safe prose cannot reference private path `{}.{property_path}`", definition.id),
+                            disclosure_mismatch_message(
+                                disclosure,
+                                path_contract.disclosure,
+                                &format!("{}.{property_path}", definition.id),
+                            ),
                             parsed,
                             expression,
                             location,
@@ -7027,6 +7031,29 @@ impl<'a> TextResolver<'a> {
         }
         Ok(ResolvedNode { text, provenance })
     }
+}
+
+fn disclosure_mismatch_message(
+    consumer: DisclosureClass,
+    target: DisclosureClass,
+    target_path: &str,
+) -> String {
+    let consumer_name = match consumer {
+        DisclosureClass::PlayerSafe => "baseline player-safe",
+        DisclosureClass::GatedPlayerSafe => "gated player-safe",
+        DisclosureClass::PrivateNarrator => "private narrator",
+    };
+    let target_name = match target {
+        DisclosureClass::PlayerSafe => "baseline player-safe",
+        DisclosureClass::GatedPlayerSafe => "gated player-safe",
+        DisclosureClass::PrivateNarrator => "private narrator",
+    };
+    let mut message =
+        format!("{consumer_name} prose cannot reference {target_name} path `{target_path}`");
+    if target == DisclosureClass::GatedPlayerSafe {
+        message.push_str("; this would bypass the target's disclosure gate");
+    }
+    message
 }
 
 fn text_error(

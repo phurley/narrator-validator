@@ -3557,10 +3557,18 @@ fn reference_text_enforces_paths_disclosure_and_cycles() {
             "    name: Morgan Vale\n    narrator_guidance:\n      secret: Morgan knows the answer.\n",
         )
         .replace("[[character.victim]] waits", "[[character.victim.narrator_guidance.secret]] waits");
-    assert!(report(private)
+    let private_report = report(private);
+    let private_diagnostic = private_report
         .diagnostics
         .iter()
-        .any(|diagnostic| diagnostic.code == "reference_text.disclosure"));
+        .find(|diagnostic| diagnostic.code == "reference_text.disclosure")
+        .expect("private disclosure diagnostic");
+    assert_eq!(private_diagnostic.pointer.as_deref(), Some("/case/opening"));
+    assert!(private_diagnostic.range.is_some());
+    assert_eq!(
+        private_diagnostic.message,
+        "baseline player-safe prose cannot reference private narrator path `character.victim.narrator_guidance.secret`"
+    );
 
     let cycle = format_3_2_reference_story()
         .replace("name: Morgan Vale", "name: '[[setting.foyer.name]]'")
@@ -3721,10 +3729,42 @@ fn private_reference_text_can_reference_public_and_private_but_public_cannot_rev
         "[[character.victim]] waits in [[setting.foyer.name]].",
         "[[fact.knife_is_present]]",
     );
-    assert!(report(gated_leak)
+    let gated_report = report(gated_leak);
+    let gated_diagnostic = gated_report
         .diagnostics
         .iter()
-        .any(|diagnostic| diagnostic.code == "reference_text.disclosure"));
+        .find(|diagnostic| diagnostic.code == "reference_text.disclosure")
+        .expect("gated disclosure diagnostic");
+    assert_eq!(gated_diagnostic.pointer.as_deref(), Some("/case/opening"));
+    assert!(gated_diagnostic.range.is_some());
+    assert_eq!(
+        gated_diagnostic.message,
+        "baseline player-safe prose cannot reference gated player-safe path `fact.knife_is_present.statement`; this would bypass the target's disclosure gate"
+    );
+
+    let gated_to_private = format_3_2_reference_story()
+        .replace(
+            "    name: Morgan Vale\n",
+            "    name: Morgan Vale\n    narrator_guidance:\n      secret: The private answer.\n",
+        )
+        .replace(
+            "statement: The knife is present.",
+            "statement: '[[character.victim.narrator_guidance.secret]]'",
+        );
+    let gated_private_report = report(gated_to_private);
+    let gated_private_diagnostic = gated_private_report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.code == "reference_text.disclosure"
+                && diagnostic.pointer.as_deref() == Some("/entities/0/facts/0/statement")
+        })
+        .expect("gated-to-private disclosure diagnostic");
+    assert!(gated_private_diagnostic.range.is_some());
+    assert_eq!(
+        gated_private_diagnostic.message,
+        "gated player-safe prose cannot reference private narrator path `character.victim.narrator_guidance.secret`"
+    );
 }
 
 #[test]
