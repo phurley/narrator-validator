@@ -24,4 +24,3 @@ end_states:
     resolution: failure
     requires: [flag.knife_analysis_complete]
     text: The compromised analysis prevents a defensible conclusion.
-

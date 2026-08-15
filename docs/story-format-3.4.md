@@ -84,4 +84,3 @@ To migrate, rename the root file and section to `end_states.yaml` and
 `end_states`, preserve sequence order and IDs, and add `outcome: won` plus
 `resolution: full` to every entry. Do not retain both roots: two independent
 precedence sequences are rejected.
-
