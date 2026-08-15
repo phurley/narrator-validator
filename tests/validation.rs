@@ -4742,14 +4742,42 @@ fn detects_deduction_cycles_through_inputs() {
 
 #[test]
 fn rejects_false_deductions_that_automatic_policy_would_establish() {
-    let source = VALID_FORMAT_3_STORY.replace("truth: true", "truth: false");
-    let report = report(source);
+    let source = VALID_FORMAT_3_STORY
+        .replace("truth: true", "truth: false")
+        .replace(
+            "deductions:\n",
+            "deductions:\n  - id: deduction.earlier_false\n    conclusion: An earlier false theory.\n    inputs: [fact.knife_has_blood]\n    truth: false\n    contradicted_by: [fact.knife_connects_to_scene]\n",
+        );
+    let files = story_files(source);
+    let deductions_source = &files
+        .iter()
+        .find(|file| file.path == "deductions.yaml")
+        .expect("deductions file")
+        .source;
+    let (expected_line_index, expected_line_source) = deductions_source
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| line.trim() == "truth: false")
+        .nth(1)
+        .expect("second deduction truth line");
+    let expected_line = expected_line_index + 1;
+    let expected_column = expected_line_source.find("false").expect("false value") + 1;
+    let report = validate(&files);
     assert!(!report.valid, "{:#?}", report.diagnostics);
-    assert!(report
+    let diagnostic = report
         .diagnostics
         .iter()
-        .any(|item| item.code == "deduction.automatic_false"
-            && item.pointer.as_deref() == Some("/deductions/0/truth")));
+        .find(|item| {
+            item.code == "deduction.automatic_false"
+                && item.pointer.as_deref() == Some("/deductions/1/truth")
+        })
+        .expect("automatic false diagnostic");
+    assert_eq!(diagnostic.pointer.as_deref(), Some("/deductions/1/truth"));
+    assert_eq!(diagnostic.range.as_ref().unwrap().start.line, expected_line);
+    assert_eq!(
+        diagnostic.range.as_ref().unwrap().start.column,
+        expected_column
+    );
     assert!(report
         .diagnostics
         .iter()
@@ -4825,15 +4853,36 @@ fn automatic_deduction_health_finds_exact_solution_overlap_without_flagging_inte
 
 #[test]
 fn speculative_automatic_deduction_is_reviewable_and_source_located() {
-    let report = report(VALID_FORMAT_3_STORY.replace(
-        "The knife was used in the study.",
+    for conclusion in [
         "Perhaps the knife was used in the study.",
-    ));
-    assert!(report.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "deduction.automatic_speculative"
-            && diagnostic.pointer.as_deref() == Some("/deductions/0/conclusion")
-            && diagnostic.range.is_some()
-    }));
+        "The suspect might have entered through the study.",
+        "The culprit possibly entered through the study.",
+        "The culprit could have used the knife.",
+    ] {
+        let source = VALID_FORMAT_3_STORY.replace("The knife was used in the study.", conclusion);
+        let files = story_files(source);
+        let deductions_source = &files
+            .iter()
+            .find(|file| file.path == "deductions.yaml")
+            .expect("deductions file")
+            .source;
+        let expected_line = deductions_source
+            .lines()
+            .position(|line| line.contains(conclusion))
+            .expect("conclusion line")
+            + 1;
+        let report = validate(&files);
+        let diagnostic = report
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "deduction.automatic_speculative")
+            .expect("speculative deduction diagnostic");
+        assert_eq!(
+            diagnostic.pointer.as_deref(),
+            Some("/deductions/0/conclusion")
+        );
+        assert_eq!(diagnostic.range.as_ref().unwrap().start.line, expected_line);
+    }
 }
 
 #[test]
@@ -4847,15 +4896,35 @@ fn contradictable_and_terminal_solution_notes_are_explicit_case_health_findings(
             "    text: You answer every question correctly.",
             "    text: You answer every question correctly.\n    requires: [deduction.solution]",
         );
-    let report = report(source);
+    let files = story_files(source);
+    let win_states_source = &files
+        .iter()
+        .find(|file| file.path == "win_states.yaml")
+        .expect("win states file")
+        .source;
+    let terminal_requirement_line = win_states_source
+        .lines()
+        .position(|line| line.trim() == "- deduction.solution")
+        .expect("terminal requirement line")
+        + 1;
+    let report = validate(&files);
     assert!(report.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "deduction.automatic_contradictable"
             && diagnostic.pointer.as_deref() == Some("/deductions/0/contradicted_by")
     }));
-    assert!(report.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "end_state.solution_equivalent_deduction"
-            && diagnostic.pointer.as_deref() == Some("/win_states/0/requires/0")
-    }));
+    let terminal = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "end_state.solution_equivalent_deduction")
+        .expect("terminal solution-equivalent diagnostic");
+    assert_eq!(
+        terminal.pointer.as_deref(),
+        Some("/win_states/0/requires/0")
+    );
+    assert_eq!(
+        terminal.range.as_ref().unwrap().start.line,
+        terminal_requirement_line
+    );
 }
 
 #[test]

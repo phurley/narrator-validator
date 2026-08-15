@@ -4760,53 +4760,46 @@ impl<'a> Validator<'a> {
 
         for deduction in deductions {
             if bool_field(&deduction.mapping, "truth") == Some(false) {
+                let pointer = format!("{}/truth", deduction.pointer);
                 self.push(
                     Severity::Error,
                     "deduction.automatic_false",
                     "every authored deduction may be established automatically; retire false deductions or model a future non-authoritative hypothesis instead"
                         .to_string(),
                     &deduction.path,
-                    Some(format!("{}/truth", deduction.pointer)),
-                    locate_scalar(&deduction.source, "false"),
+                    Some(pointer.clone()),
+                    locate_yaml_pointer_value(&deduction.source, &pointer),
                     Some(deduction.id.clone()),
                 );
             }
 
             let conclusion = string_field(&deduction.mapping, "conclusion").unwrap_or_default();
             let normalized = normalize_notebook_prose(conclusion);
-            if [
-                "maybe ",
-                "perhaps ",
-                "possibly ",
-                "might ",
-                "could have ",
-                "appears to ",
-            ]
-            .iter()
-            .any(|marker| normalized.starts_with(marker))
-            {
+            if contains_speculative_language(&normalized) {
+                let pointer = format!("{}/conclusion", deduction.pointer);
                 self.push(
                     Severity::Warning,
                     "deduction.automatic_speculative",
                     "this conclusion is phrased as speculation but may be established automatically as authoritative notebook knowledge"
                         .to_string(),
                     &deduction.path,
-                    Some(format!("{}/conclusion", deduction.pointer)),
-                    locate_scalar(&deduction.source, conclusion),
+                    Some(pointer.clone()),
+                    locate_yaml_pointer_value(&deduction.source, &pointer),
                     Some(deduction.id.clone()),
                 );
             }
             if bool_field(&deduction.mapping, "truth") != Some(false)
                 && !string_list_field(&deduction.mapping, "contradicted_by").is_empty()
             {
+                let pointer = format!("{}/contradicted_by", deduction.pointer);
                 self.push(
                     Severity::Warning,
                     "deduction.automatic_contradictable",
                     "this authoritative deduction declares contradictory knowledge; review whether automatic establishment can expose a conclusion the story later retracts"
                         .to_string(),
                     &deduction.path,
-                    Some(format!("{}/contradicted_by", deduction.pointer)),
-                    None,
+                    Some(pointer.clone()),
+                    locate_yaml_pointer_value(&deduction.source, &pointer),
                     Some(deduction.id.clone()),
                 );
             }
@@ -4814,14 +4807,15 @@ impl<'a> Validator<'a> {
             if depended_on.contains(deduction.id.as_str())
                 && normalized.split_whitespace().count() <= 3
             {
+                let pointer = format!("{}/conclusion", deduction.pointer);
                 self.push(
                     Severity::Warning,
                     "deduction.mechanical_relay",
                     "this deduction is used as a relay node but contributes very little player-facing information; combine or rewrite the chain"
                         .to_string(),
                     &deduction.path,
-                    Some(format!("{}/conclusion", deduction.pointer)),
-                    locate_scalar(&deduction.source, conclusion),
+                    Some(pointer.clone()),
+                    locate_yaml_pointer_value(&deduction.source, &pointer),
                     Some(deduction.id.clone()),
                 );
             }
@@ -4874,33 +4868,35 @@ impl<'a> Validator<'a> {
                 .any(|answer| physical_answers.contains(answer));
             if fully_copies_row {
                 solution_equivalent.insert(deduction.id.clone());
+                let pointer = format!("{}/conclusion", deduction.pointer);
                 self.push(
                     Severity::Warning,
                     "deduction.solution_equivalent",
                     "this automatic notebook conclusion duplicates a complete authored Solve answer; keep the deduction as an intermediate insight and leave final commitment to `solution.questions`"
                         .to_string(),
                     &deduction.path,
-                    Some(format!("{}/conclusion", deduction.pointer)),
-                    locate_scalar(&deduction.source, conclusion),
+                    Some(pointer.clone()),
+                    locate_yaml_pointer_value(&deduction.source, &pointer),
                     Some(deduction.id.clone()),
                 );
             } else if explicit_overlap {
+                let pointer = format!(
+                    "{}/{}",
+                    deduction.pointer,
+                    if explicit.is_empty() {
+                        "requires"
+                    } else {
+                        "solves"
+                    }
+                );
                 self.push(
                     Severity::Warning,
                     "deduction.solution_answer_overlap",
                     "deduction `solves` repeats a physical authored Solve answer; review whether automatic establishment would pre-answer the question"
                         .to_string(),
                     &deduction.path,
-                    Some(format!(
-                        "{}/{}",
-                        deduction.pointer,
-                        if explicit.is_empty() {
-                            "requires"
-                        } else {
-                            "solves"
-                        }
-                    )),
-                    None,
+                    Some(pointer.clone()),
+                    locate_yaml_pointer_value(&deduction.source, &pointer),
                     Some(deduction.id.clone()),
                 );
             }
@@ -4913,14 +4909,15 @@ impl<'a> Validator<'a> {
                     .enumerate()
                 {
                     if solution_equivalent.contains(requirement) {
+                        let pointer = format!("{}/requires/{index}", terminal.pointer);
                         self.push(
                             Severity::Warning,
                             "end_state.solution_equivalent_deduction",
                             "this terminal path depends on a solution-equivalent deduction instead of the authoritative Solve result"
                                 .to_string(),
                             &terminal.path,
-                            Some(format!("{}/requires/{index}", terminal.pointer)),
-                            locate_scalar(&terminal.source, requirement),
+                            Some(pointer.clone()),
+                            locate_yaml_pointer_value(&terminal.source, &pointer),
                             Some(terminal.id.clone()),
                         );
                     }
@@ -8504,6 +8501,23 @@ fn yaml_scalar_span(source: &str, pointer: &str) -> Option<YamlNodeSpan> {
     Some(node)
 }
 
+/// Resolve a diagnostic JSON pointer to the authored YAML node instead of
+/// searching the whole file for a repeated scalar value. This deliberately
+/// returns the complete field value (including a flow collection or block
+/// scalar) so editor navigation remains exact even when decoded YAML text does
+/// not occur byte-for-byte in the source.
+fn locate_yaml_pointer_value(source: &str, pointer: &str) -> Option<SourceRange> {
+    let span = yaml_scalar_span(source, pointer)?;
+    let value = source.get(span.value_start..span.end)?;
+    let leading = value.len() - value.trim_start().len();
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Some(source_range(source, span.start, span.end));
+    }
+    let start = span.value_start + leading;
+    Some(source_range(source, start, start + trimmed.len()))
+}
+
 fn source_range(source: &str, start: usize, end: usize) -> SourceRange {
     let position = |offset: usize| {
         let prefix = &source[..offset];
@@ -9196,6 +9210,20 @@ fn normalize_notebook_prose(value: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn contains_speculative_language(normalized: &str) -> bool {
+    let padded = format!(" {normalized} ");
+    [
+        " maybe ",
+        " perhaps ",
+        " possibly ",
+        " might ",
+        " could have ",
+        " appears to ",
+    ]
+    .iter()
+    .any(|marker| padded.contains(marker))
 }
 
 fn integer_field(mapping: &Mapping, field: &str) -> Option<i64> {
