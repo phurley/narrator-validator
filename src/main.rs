@@ -3,7 +3,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use narrator_validator::{validate, Diagnostic, Severity, SourceFile};
+use narrator_validator::{
+    validate, Diagnostic, PlayabilityReport, PlayabilityStatus, Severity, SourceFile,
+};
 
 #[derive(Clone, Copy)]
 enum Format {
@@ -61,7 +63,11 @@ fn run(args: impl Iterator<Item = String>) -> Result<bool, String> {
     let files = read_sources(&root)?;
     let report = validate(&files);
     match format {
-        Format::Text => print_text(&report.diagnostics, report.valid),
+        Format::Text => print_text(
+            &report.diagnostics,
+            report.playability.as_ref(),
+            report.valid,
+        ),
         Format::Json => println!(
             "{}",
             serde_json::to_string_pretty(&report)
@@ -130,7 +136,7 @@ fn visit(root: &Path, directory: &Path, paths: &mut Vec<PathBuf>) -> Result<(), 
     Ok(())
 }
 
-fn print_text(diagnostics: &[Diagnostic], valid: bool) {
+fn print_text(diagnostics: &[Diagnostic], playability: Option<&PlayabilityReport>, valid: bool) {
     for diagnostic in diagnostics {
         let position = diagnostic
             .range
@@ -156,6 +162,23 @@ fn print_text(diagnostics: &[Diagnostic], valid: bool) {
             .filter(|item| item.severity == Severity::Warning)
             .count()
     );
+    if let Some(playability) = playability {
+        for terminal in &playability.terminal_paths {
+            let status = match terminal.status {
+                PlayabilityStatus::Proved => "proved",
+                PlayabilityStatus::NotProved => "not_proved",
+                PlayabilityStatus::Inconclusive => "inconclusive",
+            };
+            if let Some(bound) = &terminal.lower_bound {
+                println!("playability {}: {} ({} action(s), {} minute(s), {} route action(s), {} wait minute(s))", terminal.id, status, bound.action_count, bound.elapsed_minutes, bound.route_action_count, bound.wait_minutes);
+            } else if let Some(blocker) = &terminal.blocker {
+                println!(
+                    "{}: playability[{}] {}: {}",
+                    blocker.path, blocker.code, terminal.id, blocker.message
+                );
+            }
+        }
+    }
     if valid {
         println!("valid");
     }

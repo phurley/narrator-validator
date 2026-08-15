@@ -1,0 +1,7 @@
+deductions:
+  - id: deduction.solution
+    conclusion: The reachable sample proves the case.
+    inputs: [fact.sample_matches]
+    truth: true
+    points:
+      value: 5

@@ -124,7 +124,7 @@ This repository includes a composite action:
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: phurley/narrator-validator@v1.4.0
+- uses: phurley/narrator-validator@v1.5.0
 ```
 
 It builds the pinned validator revision and emits native GitHub annotations.
@@ -139,8 +139,9 @@ format-1 validation path remains for legacy repositories, while format-2
 repositories stop with focused migration
 guidance before the strict format-3 schema runs.
 
-Validator `1.4.0` authors ordered full/partial/failure end states while
-continuing to validate older supported formats. See
+Validator `1.5.0` adds the separate bounded playability report while retaining
+the Validator 1.4 ordered full/partial/failure end-state contract. It continues
+to validate older supported formats. See
 [Story Format 3.4](docs/story-format-3.4.md). Validator `1.1.0` remains the
 coordinated release for the format-3.1 contract. See
 [MIGRATION.md](MIGRATION.md) for the complete format-2 migration and the
@@ -697,6 +698,11 @@ and an optional structured `solves` answer. Deduction cycle detection follows
 both `requires` and deduction-valued `inputs`.
 
 ## Points and terminal states
+
+The validator also reports conservative action-level reachability separately
+from structural validity. See [Static playability analysis](docs/playability-analysis.md)
+for the deterministic supported subset, bounds, terminal statuses, lower-bound
+route/action/time evidence, and conspicuous handling of unsupported mechanics.
 
 Settings, entities, deductions, and commands may define an authoritative point
 award:

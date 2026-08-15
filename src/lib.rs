@@ -5,6 +5,7 @@
 
 mod diagnostic;
 mod end_state;
+mod playability;
 mod reference_text;
 mod ruleset;
 mod solution;
@@ -16,6 +17,10 @@ pub use diagnostic::{
 pub use end_state::{
     end_state_contract_metadata, end_state_contract_metadata_json, EndStateContractMetadata,
     OutcomeResolution, END_STATE_STORY_FORMAT_VERSION,
+};
+pub use playability::{
+    PlayabilityBlocker, PlayabilityLowerBound, PlayabilityReport, PlayabilityRequiredWait,
+    PlayabilityStatus, PlayabilityStep, TerminalPathAnalysis,
 };
 pub use reference_text::{
     parse_reference_text, parse_reference_text_result, reference_kind,

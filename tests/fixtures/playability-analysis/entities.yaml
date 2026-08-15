@@ -1,0 +1,12 @@
+entities:
+  - id: entity.sample
+    type: object
+    name: Sample
+    description: A sample in the reachable laboratory.
+    initial: { container: setting.lab }
+    facts:
+      - id: fact.sample_matches
+        statement: The sample matches the residue.
+        on:
+          command: command.examine
+          parameters: { target: owner }

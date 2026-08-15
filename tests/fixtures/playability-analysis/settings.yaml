@@ -1,0 +1,20 @@
+settings:
+  - id: setting.entry
+    type: room
+    name: Entry
+    description: The investigation begins here.
+  - id: setting.lab
+    type: room
+    name: Laboratory
+    description: A reachable laboratory.
+routes:
+  - id: route.entry_lab
+    from: setting.entry
+    to: setting.lab
+    bidirectional: false
+    travel_minutes: 10
+  - id: route.lab_entry
+    from: setting.lab
+    to: setting.entry
+    bidirectional: false
+    travel_minutes: 15

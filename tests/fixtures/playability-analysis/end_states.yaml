@@ -1,0 +1,21 @@
+end_states:
+  - id: end.delayed
+    name: Delayed proof
+    outcome: won
+    resolution: full
+    requires: [fact.delayed_analysis]
+    text: Travel advanced the delayed analysis to completion.
+  - id: end.proved
+    name: Reachable proof
+    outcome: won
+    resolution: full
+    requires: [deduction.solution]
+    minimum_points: 5
+    at_or_after: "20:10"
+    text: The reachable evidence proves the case.
+  - id: end.missing_action
+    name: Missing action
+    outcome: won
+    resolution: partial
+    requires: [flag.missing_action]
+    text: A missing authored action would prove this path.

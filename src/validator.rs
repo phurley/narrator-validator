@@ -353,13 +353,16 @@ pub fn validate_with_supported_features(
         .diagnostics
         .iter()
         .all(|diagnostic| diagnostic.severity != Severity::Error);
+    let format_version = validator.format_version.map(|version| version.to_string());
+    let playability = crate::playability::analyze(files, format_version.as_deref());
     ValidationReport {
         validator_version: VALIDATOR_VERSION.to_string(),
-        format_version: validator.format_version.map(|version| version.to_string()),
+        format_version,
         valid,
         diagnostics: validator.diagnostics,
         features: validator.features,
         reference_text: validator.reference_text,
+        playability,
     }
 }
 

@@ -1,0 +1,10 @@
+triggers:
+  - id: trigger.delayed_analysis
+    name: Delayed analysis
+    on:
+      command: command.investigate
+      parameters: { target: entity.sample }
+    after: 20m
+    facts:
+      - id: fact.delayed_analysis
+        statement: The delayed laboratory analysis is complete.

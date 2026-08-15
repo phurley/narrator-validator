@@ -1,0 +1,12 @@
+case:
+  id: case.playability
+  format_version: "3.4.0"
+  ruleset:
+    id: ruleset.standard_mystery
+    version: "2.0.0"
+  title: Playability analysis fixture
+  opening: A locked laboratory waits across the hall.
+  players: { min: 1, max: 2 }
+  initial_time: "20:00"
+  entry_settings: [setting.entry]
+  exit_settings: [setting.entry, setting.lab]
