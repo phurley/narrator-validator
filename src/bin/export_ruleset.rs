@@ -19,6 +19,7 @@ fn main() {
         "id": reference.id,
         "version": reference.version,
         "commands": commands,
+        "command_capabilities": resolved.command_capabilities,
     });
     println!("{}", serde_json::to_string(&payload).expect("ruleset JSON"));
 }

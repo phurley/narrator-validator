@@ -285,7 +285,7 @@ fn playability_report_proves_reachable_path_and_explains_action_and_time_blocks(
     let proved = paths["end.proved"];
     assert_eq!(proved.status, narrator_validator::PlayabilityStatus::Proved);
     let bound = proved.lower_bound.as_ref().unwrap();
-    assert_eq!(bound.action_count, 3);
+    assert_eq!(bound.action_count, 2);
     assert_eq!(bound.route_action_count, 1);
     assert_eq!(bound.elapsed_minutes, 10);
     assert_eq!(bound.ordered_steps[0].kind, "route");
@@ -332,6 +332,24 @@ fn playability_report_proves_reachable_path_and_explains_action_and_time_blocks(
         analysis, again,
         "analysis must be byte-stable over identical input"
     );
+    assert_eq!(analysis.notebook_policies.len(), 4);
+    let manual = analysis
+        .notebook_policies
+        .iter()
+        .find(|policy| !policy.auto_facts && !policy.auto_deductions)
+        .expect("explicit fully manual notebook analysis");
+    let manual_proved = manual
+        .terminal_paths
+        .iter()
+        .find(|path| path.id == "end.proved")
+        .expect("manual terminal path");
+    assert_eq!(
+        manual_proved.status,
+        narrator_validator::PlayabilityStatus::Inconclusive,
+        "ruleset 2 has no Claim command, so fully manual fact acquisition is explicitly unsupported"
+    );
+    assert_eq!(analysis.deduction_graph.maximum_depth, 1);
+    assert_eq!(analysis.deduction_graph.largest_cascade_size, 1);
 }
 
 #[test]
@@ -356,6 +374,97 @@ fn playability_json_cli_matches_native_report() {
         .unwrap();
     let cli: narrator_validator::ValidationReport = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(cli.playability, native.playability);
+}
+
+#[test]
+fn deduction_graph_reports_large_branching_cascades_deterministically() {
+    let source = VALID_FORMAT_3_STORY.replace(
+        "    truth: true\nflags:",
+        "    truth: true\n  - id: deduction.branch_a\n    conclusion: Blood and access identify a coordinated act.\n    inputs: [deduction.solution]\n    truth: true\n  - id: deduction.branch_b\n    conclusion: The same evidence fixes the sequence.\n    inputs: [deduction.solution]\n    truth: true\n  - id: deduction.joined\n    conclusion: The two branches support one chronology.\n    inputs: [deduction.branch_a, deduction.branch_b]\n    truth: true\n  - id: deduction.deep\n    conclusion: The chronology explains the final movement.\n    inputs: [deduction.joined]\n    truth: true\nflags:",
+    );
+    let first = report(source.clone()).playability.unwrap();
+    let second = report(source).playability.unwrap();
+    assert_eq!(first.deduction_graph, second.deduction_graph);
+    assert_eq!(first.deduction_graph.maximum_depth, 4);
+    assert_eq!(first.deduction_graph.largest_cascade_size, 5);
+    assert_eq!(
+        first.deduction_graph.largest_cascade_root.as_deref(),
+        Some("fact.knife_connects_to_scene")
+    );
+    assert_eq!(
+        first.deduction_graph.largest_cascade,
+        [
+            "deduction.branch_a",
+            "deduction.branch_b",
+            "deduction.deep",
+            "deduction.joined",
+            "deduction.solution",
+        ]
+    );
+}
+
+#[test]
+fn mechanical_relay_nodes_receive_focused_review_evidence() {
+    let source = VALID_FORMAT_3_STORY.replace(
+        "    truth: true\nflags:",
+        "    truth: true\n  - id: deduction.relay\n    conclusion: Therefore.\n    inputs: [deduction.solution]\n    truth: true\n  - id: deduction.followup\n    conclusion: The combined evidence fixes the chronology.\n    inputs: [deduction.relay]\n    truth: true\nflags:",
+    );
+    let report = report(source);
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "deduction.mechanical_relay"
+            && diagnostic.pointer.as_deref() == Some("/deductions/1/conclusion")
+            && diagnostic.subject_id.as_deref() == Some("deduction.relay")
+    }));
+}
+
+#[test]
+fn solution_answerability_is_proved_only_from_explicit_structural_overlap() {
+    let root = std::path::Path::new("tests/fixtures/playability-analysis");
+    let mut files = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let mut source = std::fs::read_to_string(path).unwrap();
+            if name == "case.yaml" {
+                source.push_str(
+                    "solution:\n  win_state: end.proved\n  questions:\n    - prompt: Which sample proves the case?\n      answer: [entity.sample]\n",
+                );
+            } else if name == "deductions.yaml" {
+                source.push_str("    solves:\n      weapon: entity.sample\n");
+            }
+            narrator_validator::SourceFile { path: name, source }
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    let analysis = narrator_validator::validate(&files).playability.unwrap();
+    let automatic = analysis
+        .notebook_policies
+        .iter()
+        .find(|policy| policy.auto_facts && policy.auto_deductions)
+        .unwrap();
+    assert_eq!(
+        automatic.solution_answerability.status,
+        narrator_validator::PlayabilityStatus::Proved
+    );
+    assert_eq!(
+        automatic
+            .solution_answerability
+            .solution_equivalent_deductions,
+        ["deduction.solution"]
+    );
+
+    let deductions = files
+        .iter_mut()
+        .find(|file| file.path == "deductions.yaml")
+        .unwrap();
+    deductions.source = deductions
+        .source
+        .replace("    solves:\n      weapon: entity.sample\n", "");
+    let ambiguous = narrator_validator::validate(&files).playability.unwrap();
+    assert!(ambiguous.notebook_policies.iter().all(|policy| {
+        policy.solution_answerability.status != narrator_validator::PlayabilityStatus::Proved
+    }));
 }
 
 #[test]
@@ -1079,7 +1188,7 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_3_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_3_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "1.5.0");
+    assert_eq!(report.validator_version, "1.6.0");
     assert_eq!(report.format_version.as_deref(), Some("3.0.0"));
     assert!(report.diagnostics.is_empty());
 }
@@ -1118,6 +1227,27 @@ fn standard_ruleset_2_0_requires_format_3_1() {
         .replace("version: \"1.0.0\"", "version: \"2.0.0\"");
     let report = report(source);
     assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "ruleset.format_incompatible"
+            && diagnostic.pointer.as_deref() == Some("/case/ruleset/version")
+    }));
+}
+
+#[test]
+fn standard_ruleset_4_0_is_the_format_3_4_manual_notebook_catalog() {
+    let source = format_3_3_question_story()
+        .replacen("format_version: \"3.3.0\"", "format_version: \"3.4.0\"", 1)
+        .replacen("version: \"3.0.0\"", "version: \"4.0.0\"", 1);
+    let valid_report = report(source);
+    assert!(valid_report.valid, "{:#?}", valid_report.diagnostics);
+    assert!(valid_report
+        .diagnostics
+        .iter()
+        .all(|diagnostic| { diagnostic.code == "win_states.legacy_compatibility" }));
+    assert_eq!(valid_report.playability.unwrap().notebook_policies.len(), 4);
+
+    let incompatible =
+        report(format_3_3_question_story().replacen("version: \"3.0.0\"", "version: \"4.0.0\"", 1));
+    assert!(incompatible.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "ruleset.format_incompatible"
             && diagnostic.pointer.as_deref() == Some("/case/ruleset/version")
     }));
@@ -1511,7 +1641,7 @@ fn rejects_unknown_and_incompatible_rulesets_with_version_guidance() {
         .iter()
         .find(|diagnostic| diagnostic.code == "ruleset.unsupported")
         .expect("incompatible ruleset diagnostic");
-    assert!(diagnostic.message.contains("1.0.0, 2.0.0, or 3.0.0"));
+    assert!(diagnostic.message.contains("1.0.0, 2.0.0, 3.0.0, or 4.0.0"));
 }
 
 #[test]
@@ -4611,14 +4741,121 @@ fn detects_deduction_cycles_through_inputs() {
 }
 
 #[test]
-fn warns_for_unrefutable_false_deductions() {
+fn rejects_false_deductions_that_automatic_policy_would_establish() {
     let source = VALID_FORMAT_3_STORY.replace("truth: true", "truth: false");
     let report = report(source);
-    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert!(!report.valid, "{:#?}", report.diagnostics);
+    assert!(report
+        .diagnostics
+        .iter()
+        .any(|item| item.code == "deduction.automatic_false"
+            && item.pointer.as_deref() == Some("/deductions/0/truth")));
     assert!(report
         .diagnostics
         .iter()
         .any(|item| item.code == "deduction.false_without_contradiction"));
+}
+
+#[test]
+fn automatic_deduction_health_finds_exact_solution_overlap_without_flagging_intermediate_notes() {
+    let exact = format_3_3_question_story().replace(
+        "    truth: true",
+        "    truth: true\n    solves:\n      culprit: character.culprit",
+    );
+    let exact_report = report(exact);
+    assert!(exact_report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "deduction.solution_equivalent"
+            && diagnostic.pointer.as_deref() == Some("/deductions/0/conclusion")
+            && diagnostic.subject_id.as_deref() == Some("deduction.solution")
+    }));
+
+    let partial = format_3_3_question_story().replace(
+        "    truth: true",
+        "    truth: true\n    solves:\n      weapon: entity.knife",
+    );
+    let partial_report = report(partial);
+    assert!(partial_report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "deduction.solution_answer_overlap"
+            && diagnostic.pointer.as_deref() == Some("/deductions/0/solves")
+    }));
+    assert!(!partial_report
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "deduction.solution_equivalent"));
+
+    for source in [
+        format_3_3_question_story().replace(
+            "    truth: true",
+            "    truth: true\n    solves:\n      weapon: entity.knife\n      location: setting.study",
+        ),
+        format_3_3_question_story()
+            .replace("      ordered: true", "")
+            .replace(
+                "    truth: true",
+                "    truth: true\n    solves:\n      weapon: entity.knife\n      location: setting.study",
+            ),
+    ] {
+        assert!(report(source)
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "deduction.solution_equivalent"));
+    }
+
+    let intermediate = report(format_3_3_question_story().replace(
+        "The knife was used in the study.",
+        "The suspect handled an object before entering the study.",
+    ));
+    assert!(!intermediate.diagnostics.iter().any(|diagnostic| {
+        matches!(
+            diagnostic.code.as_str(),
+            "deduction.solution_equivalent" | "deduction.solution_answer_overlap"
+        )
+    }));
+    let inconclusive = report(format_3_3_question_story().replace(
+        "The knife was used in the study.",
+        "The evidence bears on several possible answers.",
+    ));
+    assert!(!inconclusive.diagnostics.iter().any(|diagnostic| {
+        matches!(
+            diagnostic.code.as_str(),
+            "deduction.solution_equivalent" | "deduction.solution_answer_overlap"
+        )
+    }));
+}
+
+#[test]
+fn speculative_automatic_deduction_is_reviewable_and_source_located() {
+    let report = report(VALID_FORMAT_3_STORY.replace(
+        "The knife was used in the study.",
+        "Perhaps the knife was used in the study.",
+    ));
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "deduction.automatic_speculative"
+            && diagnostic.pointer.as_deref() == Some("/deductions/0/conclusion")
+            && diagnostic.range.is_some()
+    }));
+}
+
+#[test]
+fn contradictable_and_terminal_solution_notes_are_explicit_case_health_findings() {
+    let source = format_3_3_question_story()
+        .replace(
+            "    truth: true",
+            "    truth: true\n    contradicted_by: [fact.knife_has_blood]\n    solves:\n      culprit: character.culprit",
+        )
+        .replace(
+            "    text: You answer every question correctly.",
+            "    text: You answer every question correctly.\n    requires: [deduction.solution]",
+        );
+    let report = report(source);
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "deduction.automatic_contradictable"
+            && diagnostic.pointer.as_deref() == Some("/deductions/0/contradicted_by")
+    }));
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "end_state.solution_equivalent_deduction"
+            && diagnostic.pointer.as_deref() == Some("/win_states/0/requires/0")
+    }));
 }
 
 #[test]

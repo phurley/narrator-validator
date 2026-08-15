@@ -124,7 +124,7 @@ This repository includes a composite action:
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: phurley/narrator-validator@v1.5.0
+- uses: phurley/narrator-validator@v1.6.0
 ```
 
 It builds the pinned validator revision and emits native GitHub annotations.
@@ -139,9 +139,11 @@ format-1 validation path remains for legacy repositories, while format-2
 repositories stop with focused migration
 guidance before the strict format-3 schema runs.
 
-Validator `1.5.0` adds the separate bounded playability report while retaining
-the Validator 1.4 ordered full/partial/failure end-state contract. It continues
-to validate older supported formats. See
+Validator `1.6.0` makes automatic deduction closure the default playability
+policy, reports all four fact/deduction policy combinations, and adds
+automatic-notebook Case Health findings plus the append-only standard mystery
+ruleset `4.0.0`. Validator `1.5.0` introduced the separate bounded playability
+report. Older supported formats remain valid. See
 [Story Format 3.4](docs/story-format-3.4.md). Validator `1.1.0` remains the
 coordinated release for the format-3.1 contract. See
 [MIGRATION.md](MIGRATION.md) for the complete format-2 migration and the
@@ -236,13 +238,20 @@ material with no runtime projection.
 ## Versioned mystery ruleset
 
 `case.ruleset` selects an exact immutable command catalog.
-`ruleset.standard_mystery@1.0.0`, `@2.0.0`, and `@3.0.0` supply Move, Open, Search, Examine,
+`ruleset.standard_mystery@1.0.0`, `@2.0.0`, `@3.0.0`, and `@4.0.0` supply Move, Open, Search, Examine,
 Take, Drop, Use, Question, Deduce, and Solve with canonical ordered semantic
 parameter groups. Version 2 adds explicit candidate sources and portability
 filters; version 3 keeps that catalog but makes Solve parameterless so Format
-3.3 can supply authored card-set questions. Earlier versions remain immutable.
-All three deliberately omit `command.claim`: facts enter notebooks automatically, while Deduce remains
-the deliberate notebook action.
+3.3 can supply authored card-set questions. Version 4 adds the parameterless
+Claim command while retaining Deduce and question-based Solve, allowing one
+validated story to run under automatic or manual notebook policies. Earlier
+versions remain immutable.
+
+Each resolved ruleset exports `command_capabilities`. The stable
+`claim_fact`/`manual_facts`, `establish_deduction`/`manual_deductions`, and
+`submit_solution`/`always` identities let runtimes filter commands by game
+policy without copying command definitions. Versions 1 through 3 omit Claim
+and therefore report fully manual fact analysis as inconclusive.
 
 Ruleset commands participate in global ID and reference validation, including
 physical bindings in `deck.yaml`, without being copied into `commands.yaml`.
@@ -692,10 +701,22 @@ case:
   initial_time: "21:32"
 ```
 
-Gameplay deductions may define a player-facing `conclusion`, one to three
-fact/deduction `inputs`, hidden boolean `truth`, `contradicted_by` references,
-and an optional structured `solves` answer. Deduction cycle detection follows
-both `requires` and deduction-valued `inputs`.
+Gameplay deductions are concise, authoritative player-visible notebook notes,
+not narrated world events or prompts for player role-play. They define a
+player-facing `conclusion` and one to three fact/deduction `inputs`; dependency
+closure is acyclic and deterministic. Every deduction may be established
+automatically, so `truth: false` is a contradictory contract and speculative
+wording receives a review warning. A future hypothesis mechanic should own
+false or provisional accusations.
+
+Stories are validated once and must remain coherent under automatic and manual
+fact/deduction policies. Story YAML never declares `auto_facts` or
+`auto_deductions`; those are immutable game-instance preferences. Automatic
+deduction mode repeatedly establishes every satisfied deduction to a
+player-scoped fixed point. Manual mode keeps Claim and Deduce available through
+ruleset 4. Solve remains a distinct final commitment graded only by
+`solution.questions` and end states. See
+[Automatic deductions and notebook safety](docs/automatic-deductions.md).
 
 ## Points and terminal states
 

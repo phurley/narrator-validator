@@ -28,9 +28,31 @@ assert.match(VALIDATOR_SOURCE_COMMIT, /^[0-9a-f]{40}$/)
 
 assert.deepEqual(
   STANDARD_MYSTERY_RULESETS.map((ruleset) => ruleset.version),
-  ['1.0.0', '2.0.0', '3.0.0'],
+  ['1.0.0', '2.0.0', '3.0.0', '4.0.0'],
 )
-assert.equal(STANDARD_MYSTERY_RULESET.version, '3.0.0')
+assert.equal(STANDARD_MYSTERY_RULESET.version, '4.0.0')
+assert.ok(
+  STANDARD_MYSTERY_RULESET.commands.some(
+    (command) => command.id === 'command.claim',
+  ),
+)
+assert.deepEqual(STANDARD_MYSTERY_RULESET.command_capabilities, [
+  {
+    command_id: 'command.claim',
+    mechanic: 'claim_fact',
+    enabled_when: 'manual_facts',
+  },
+  {
+    command_id: 'command.deduce',
+    mechanic: 'establish_deduction',
+    enabled_when: 'manual_deductions',
+  },
+  {
+    command_id: 'command.solve',
+    mechanic: 'submit_solution',
+    enabled_when: 'always',
+  },
+])
 assert.equal(
   STANDARD_MYSTERY_RULESET.commands.find(
     (command) => command.id === 'command.solve',
@@ -59,6 +81,7 @@ assert.deepEqual(solutionContract, {
   story_format_version: '3.3.0',
   ruleset_id: 'ruleset.standard_mystery',
   ruleset_version: '3.0.0',
+  compatible_ruleset_versions: ['3.0.0', '4.0.0'],
   min_questions: 1,
   max_questions: 4,
   min_answer_cards: 1,
@@ -166,6 +189,13 @@ assert.equal(
     .delay_minutes,
   20,
 )
+assert.equal(playabilityReport.playability.notebook_policies.length, 4)
+assert.deepEqual(playabilityReport.playability.deduction_graph, {
+  maximum_depth: 1,
+  largest_cascade_size: 1,
+  largest_cascade_root: 'fact.sample_matches',
+  largest_cascade: ['deduction.solution'],
+})
 
 const metadata = await referenceTextMetadata()
 assert.deepEqual(metadata.supported_features, ['reference_text_v1'])

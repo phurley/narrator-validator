@@ -19,8 +19,9 @@ pub use end_state::{
     OutcomeResolution, END_STATE_STORY_FORMAT_VERSION,
 };
 pub use playability::{
-    PlayabilityBlocker, PlayabilityLowerBound, PlayabilityReport, PlayabilityRequiredWait,
-    PlayabilityStatus, PlayabilityStep, TerminalPathAnalysis,
+    DeductionGraphAnalysis, NotebookPolicyAnalysis, PlayabilityBlocker, PlayabilityLowerBound,
+    PlayabilityReport, PlayabilityRequiredWait, PlayabilityStatus, PlayabilityStep,
+    SolutionAnswerability, TerminalPathAnalysis,
 };
 pub use reference_text::{
     parse_reference_text, parse_reference_text_result, reference_kind,
@@ -30,9 +31,10 @@ pub use reference_text::{
     REFERENCE_KINDS, REFERENCE_TEXT_FEATURE, SUPPORTED_FEATURES,
 };
 pub use ruleset::{
-    resolve_ruleset, ResolvedRuleset, RulesetError, RulesetReference, STANDARD_MYSTERY_RULESET_ID,
-    STANDARD_MYSTERY_RULESET_VERSION, STANDARD_MYSTERY_RULESET_VERSION_1,
-    STANDARD_MYSTERY_RULESET_VERSION_2, STANDARD_MYSTERY_RULESET_VERSION_3,
+    resolve_ruleset, ResolvedRuleset, RulesetCommandCapability, RulesetError, RulesetReference,
+    STANDARD_MYSTERY_RULESET_ID, STANDARD_MYSTERY_RULESET_VERSION,
+    STANDARD_MYSTERY_RULESET_VERSION_1, STANDARD_MYSTERY_RULESET_VERSION_2,
+    STANDARD_MYSTERY_RULESET_VERSION_3, STANDARD_MYSTERY_RULESET_VERSION_4,
 };
 pub use solution::{
     solution_answer_matches, solution_contract_metadata, solution_contract_metadata_json,

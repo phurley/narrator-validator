@@ -13,7 +13,7 @@ use serde_yaml::{Mapping, Value};
 
 use crate::{Position, SourceFile, SourceRange};
 
-const MODEL_VERSION: u32 = 1;
+const MODEL_VERSION: u32 = 2;
 const MAX_EXPLORED_STATES: usize = 25_000;
 const MAX_ACTIONS: u32 = 96;
 const MAX_ELAPSED_MINUTES: u32 = 2 * 24 * 60;
@@ -29,9 +29,42 @@ pub enum PlayabilityStatus {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PlayabilityReport {
     pub model_version: u32,
+    /// Compatibility summary for the default automatic-facts/automatic-
+    /// deductions policy. New consumers should use `notebook_policies`.
     pub explored_states: usize,
     pub bounded: bool,
     pub terminal_paths: Vec<TerminalPathAnalysis>,
+    pub notebook_policies: Vec<NotebookPolicyAnalysis>,
+    pub deduction_graph: DeductionGraphAnalysis,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotebookPolicyAnalysis {
+    pub auto_facts: bool,
+    pub auto_deductions: bool,
+    pub explored_states: usize,
+    pub bounded: bool,
+    pub terminal_paths: Vec<TerminalPathAnalysis>,
+    pub solution_answerability: SolutionAnswerability,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SolutionAnswerability {
+    pub status: PlayabilityStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_count: Option<u32>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub solution_equivalent_deductions: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DeductionGraphAnalysis {
+    pub maximum_depth: usize,
+    pub largest_cascade_size: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub largest_cascade_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub largest_cascade: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,6 +165,7 @@ struct DeductionRule {
     inputs: Vec<String>,
     inputs_range: Option<SourceRange>,
     dependencies: Vec<String>,
+    solves: BTreeSet<String>,
 }
 
 #[derive(Clone)]
@@ -217,6 +251,7 @@ struct Model {
     unsupported_commands: BTreeSet<String>,
     unsupported_triggers: BTreeSet<String>,
     solve_action: Option<String>,
+    solution_answer_rows: Vec<BTreeSet<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -231,6 +266,7 @@ struct State {
     location: String,
     elapsed: u32,
     facts: BTreeSet<String>,
+    available_facts: BTreeSet<String>,
     deductions: BTreeSet<String>,
     flags: BTreeSet<String>,
     completed: BTreeSet<String>,
@@ -293,7 +329,23 @@ pub(crate) fn analyze(
     }
     let mut model = Model::from_files(files);
     model.normalize();
-    Some(model.search())
+    let mut notebook_policies = Vec::new();
+    for auto_facts in [true, false] {
+        for auto_deductions in [true, false] {
+            notebook_policies.push(model.search(auto_facts, auto_deductions));
+        }
+    }
+    let default = notebook_policies
+        .first()
+        .expect("the default notebook policy is always analyzed");
+    Some(PlayabilityReport {
+        model_version: MODEL_VERSION,
+        explored_states: default.explored_states,
+        bounded: default.bounded,
+        terminal_paths: default.terminal_paths.clone(),
+        notebook_policies,
+        deduction_graph: model.deduction_graph_analysis(),
+    })
 }
 
 impl Model {
@@ -313,6 +365,28 @@ impl Model {
                     .unwrap_or(0);
                 if let Some(solution) = map(root, "solution") {
                     model.solution_target = string(solution, "win_state").map(str::to_string);
+                    if let Some(questions) =
+                        field(solution, "questions").and_then(Value::as_sequence)
+                    {
+                        model
+                            .solution_answer_rows
+                            .extend(questions.iter().filter_map(|question| {
+                                let question = question.as_mapping()?;
+                                let answers = strings(field(question, "answer"))
+                                    .into_iter()
+                                    .collect::<BTreeSet<_>>();
+                                (!answers.is_empty()).then_some(answers)
+                            }));
+                    } else {
+                        let answers = ["culprit", "weapon", "location"]
+                            .iter()
+                            .filter_map(|field| string(solution, field))
+                            .map(str::to_string)
+                            .collect::<BTreeSet<_>>();
+                        if !answers.is_empty() {
+                            model.solution_answer_rows.push(answers);
+                        }
+                    }
                     model.solve_action = field(solution, "questions")
                         .and_then(Value::as_sequence)
                         .filter(|questions| !questions.is_empty())
@@ -552,6 +626,16 @@ impl Model {
             let requirements = strings(field(&item.map, "requires"));
             let mut dependencies = inputs.clone();
             dependencies.extend(requirements.clone());
+            let solves = field(&item.map, "solves")
+                .and_then(Value::as_mapping)
+                .map(|solves| {
+                    ["culprit", "weapon", "location"]
+                        .iter()
+                        .filter_map(|field| string(solves, field))
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
             self.read_points(file, &item, "deduction");
             self.deductions.insert(
                 item.id.clone(),
@@ -560,6 +644,7 @@ impl Model {
                     inputs,
                     inputs_range,
                     dependencies,
+                    solves,
                 },
             );
         }
@@ -906,20 +991,112 @@ impl Model {
             .sort_by(|a, b| (&a.path, &a.pointer, &a.code).cmp(&(&b.path, &b.pointer, &b.code)));
     }
 
-    fn search(&self) -> PlayabilityReport {
+    fn solution_equivalent_deductions(&self) -> BTreeSet<String> {
+        self.deductions
+            .values()
+            .filter(|deduction| {
+                !deduction.solves.is_empty()
+                    && self.solution_answer_rows.iter().any(|row| {
+                        !row.is_empty()
+                            && row.iter().all(|answer| deduction.solves.contains(answer))
+                    })
+            })
+            .map(|deduction| deduction.item.id.clone())
+            .collect()
+    }
+
+    fn deduction_graph_analysis(&self) -> DeductionGraphAnalysis {
+        fn depth(
+            model: &Model,
+            id: &str,
+            visiting: &mut BTreeSet<String>,
+            memo: &mut BTreeMap<String, usize>,
+        ) -> usize {
+            if let Some(depth) = memo.get(id) {
+                return *depth;
+            }
+            if !visiting.insert(id.to_string()) {
+                return 0;
+            }
+            let result = model.deductions.get(id).map_or(0, |deduction| {
+                1 + deduction
+                    .dependencies
+                    .iter()
+                    .filter(|dependency| model.deductions.contains_key(*dependency))
+                    .map(|dependency| depth(model, dependency, visiting, memo))
+                    .max()
+                    .unwrap_or(0)
+            });
+            visiting.remove(id);
+            memo.insert(id.to_string(), result);
+            result
+        }
+
+        let mut memo = BTreeMap::new();
+        let maximum_depth = self
+            .deductions
+            .keys()
+            .map(|id| depth(self, id, &mut BTreeSet::new(), &mut memo))
+            .max()
+            .unwrap_or(0);
+        let roots = self
+            .deductions
+            .values()
+            .flat_map(|deduction| deduction.dependencies.iter().cloned())
+            .collect::<BTreeSet<_>>();
+        let mut largest_cascade_root = None;
+        let mut largest_cascade = Vec::new();
+        for root in roots {
+            let mut reached = BTreeSet::new();
+            loop {
+                let round = self
+                    .deductions
+                    .values()
+                    .filter(|deduction| {
+                        !reached.contains(&deduction.item.id)
+                            && deduction.dependencies.iter().any(|dependency| {
+                                dependency == &root || reached.contains(dependency)
+                            })
+                    })
+                    .map(|deduction| deduction.item.id.clone())
+                    .collect::<Vec<_>>();
+                if round.is_empty() {
+                    break;
+                }
+                reached.extend(round);
+            }
+            let candidate = reached.into_iter().collect::<Vec<_>>();
+            if candidate.len() > largest_cascade.len() {
+                largest_cascade_root = Some(root);
+                largest_cascade = candidate;
+            }
+        }
+        DeductionGraphAnalysis {
+            maximum_depth,
+            largest_cascade_size: largest_cascade.len(),
+            largest_cascade_root,
+            largest_cascade,
+        }
+    }
+
+    fn search(&self, auto_facts: bool, auto_deductions: bool) -> NotebookPolicyAnalysis {
         let mut queue = BinaryHeap::new();
         let mut best = BTreeMap::<State, (u32, u32)>::new();
         for entry in &self.entries {
+            let opening_facts = self
+                .facts
+                .values()
+                .filter(|fact| fact.opening)
+                .map(|fact| fact.item.id.clone())
+                .collect::<BTreeSet<_>>();
             let mut state = State {
                 entry: entry.clone(),
                 location: entry.clone(),
                 elapsed: 0,
-                facts: self
-                    .facts
-                    .values()
-                    .filter(|fact| fact.opening)
-                    .map(|fact| fact.item.id.clone())
-                    .collect(),
+                facts: auto_facts
+                    .then_some(opening_facts.clone())
+                    .unwrap_or_default(),
+                available_facts: (!auto_facts).then_some(opening_facts).unwrap_or_default(),
                 deductions: BTreeSet::new(),
                 flags: self.initial_flags.clone(),
                 completed: BTreeSet::new(),
@@ -928,8 +1105,10 @@ impl Model {
                 point_claims: BTreeMap::new(),
                 solution_solved: false,
             };
-            let mut unlocks = state.facts.clone();
-            self.settle(&mut state, None, &mut unlocks);
+            let mut unlocks = state.facts.union(&state.available_facts).cloned().collect();
+            self.settle(&mut state, None, &mut unlocks, auto_facts, auto_deductions);
+            let opening_deductions = state.deductions.clone();
+            self.apply_deduction_point_awards(&mut state, &opening_deductions, &mut unlocks);
             let node = Node {
                 state,
                 actions: 0,
@@ -944,12 +1123,27 @@ impl Model {
         let mut proofs = BTreeMap::<String, Node>::new();
         let mut explored = 0usize;
         let mut bounded = false;
+        let solution_equivalent = self.solution_equivalent_deductions();
+        let mut answerable: Option<(u32, Vec<String>)> = None;
         while let Some(QueueNode(node)) = queue.pop() {
             if explored >= MAX_EXPLORED_STATES {
                 bounded = true;
                 break;
             }
             explored += 1;
+            let established_solution_notes = node
+                .state
+                .deductions
+                .intersection(&solution_equivalent)
+                .cloned()
+                .collect::<Vec<_>>();
+            if !established_solution_notes.is_empty()
+                && answerable
+                    .as_ref()
+                    .map_or(true, |(actions, _)| node.actions < *actions)
+            {
+                answerable = Some((node.actions, established_solution_notes));
+            }
             if node.actions > 0 {
                 if let Some(end) = self
                     .ends
@@ -964,17 +1158,35 @@ impl Model {
                 bounded = true;
                 continue;
             }
-            for action in self.actions(&node.state) {
+            for action in self.actions(&node.state, auto_facts, auto_deductions) {
                 let mut next = node.clone();
                 next.actions += 1;
                 let before_elapsed = next.state.elapsed;
                 let before_unlocks = next.unlocks.clone();
+                let before_deductions = next.state.deductions.clone();
                 if action.kind == "route" {
                     next.route_actions += 1;
                 }
-                self.apply_action(&mut next.state, &action, &mut next.unlocks);
-                self.settle(&mut next.state, Some(&action), &mut next.unlocks);
-                self.apply_point_awards(&mut next.state, &action, &mut next.unlocks);
+                self.apply_action(&mut next.state, &action, &mut next.unlocks, auto_facts);
+                self.settle(
+                    &mut next.state,
+                    Some(&action),
+                    &mut next.unlocks,
+                    auto_facts,
+                    auto_deductions,
+                );
+                let newly_established = next
+                    .state
+                    .deductions
+                    .difference(&before_deductions)
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                self.apply_point_awards(
+                    &mut next.state,
+                    &action,
+                    &newly_established,
+                    &mut next.unlocks,
+                );
                 if next.state.elapsed > MAX_ELAPSED_MINUTES {
                     bounded = true;
                     continue;
@@ -1031,11 +1243,29 @@ impl Model {
                 TerminalPathAnalysis { id: end.item.id.clone(), outcome: end.outcome.clone(), status: if inconclusive { PlayabilityStatus::Inconclusive } else { PlayabilityStatus::NotProved }, path: end.item.path.clone(), pointer: end.item.pointer.clone(), range: end.item.range, lower_bound: None, blocker: Some(blocker) }
             }
         }).collect();
-        PlayabilityReport {
-            model_version: MODEL_VERSION,
+        NotebookPolicyAnalysis {
+            auto_facts,
+            auto_deductions,
             explored_states: explored,
             bounded,
             terminal_paths,
+            solution_answerability: if let Some((action_count, deductions)) = answerable {
+                SolutionAnswerability {
+                    status: PlayabilityStatus::Proved,
+                    action_count: Some(action_count),
+                    solution_equivalent_deductions: deductions,
+                }
+            } else {
+                SolutionAnswerability {
+                    status: if self.unsupported.is_empty() && !bounded {
+                        PlayabilityStatus::NotProved
+                    } else {
+                        PlayabilityStatus::Inconclusive
+                    },
+                    action_count: None,
+                    solution_equivalent_deductions: Vec::new(),
+                }
+            },
         }
     }
 
@@ -1055,7 +1285,12 @@ impl Model {
             })
     }
 
-    fn actions(&self, state: &State) -> Vec<CandidateAction> {
+    fn actions(
+        &self,
+        state: &State,
+        auto_facts: bool,
+        auto_deductions: bool,
+    ) -> Vec<CandidateAction> {
         let mut actions = Vec::new();
         for route in &self.routes {
             if route.from == state.location && route.requirements.iter().all(|id| has(state, id)) {
@@ -1113,6 +1348,7 @@ impl Model {
             .filter(|command| {
                 !(command.requires_binding
                     || self.unsupported_commands.contains(&command.id)
+                    || matches!(command.id.as_str(), "command.claim" | "command.deduce")
                     || (command.id == "command.solve" && self.solve_action.is_some())
                     || patterns
                         .values()
@@ -1169,21 +1405,38 @@ impl Model {
                 });
             }
         }
-        for deduction in self.deductions.values() {
-            if !state.deductions.contains(&deduction.item.id)
-                && deduction.dependencies.iter().all(|id| has(state, id))
-            {
+        if !auto_facts && self.commands.contains_key("command.claim") {
+            for fact_id in &state.available_facts {
                 actions.push(CandidateAction {
-                    kind: "deduction",
-                    id: format!("command.deduce {}", deduction.item.id),
+                    kind: "fact_claim",
+                    id: format!("command.claim {fact_id}"),
                     pattern: ActionPattern {
-                        command: "command.deduce".to_string(),
+                        command: "command.claim".to_string(),
                         bindings: BTreeMap::new(),
                     },
                     from: None,
                     to: None,
                     minutes: 0,
                 });
+            }
+        }
+        if !auto_deductions {
+            for deduction in self.deductions.values() {
+                if !state.deductions.contains(&deduction.item.id)
+                    && deduction.dependencies.iter().all(|id| has(state, id))
+                {
+                    actions.push(CandidateAction {
+                        kind: "deduction",
+                        id: format!("command.deduce {}", deduction.item.id),
+                        pattern: ActionPattern {
+                            command: "command.deduce".to_string(),
+                            bindings: BTreeMap::new(),
+                        },
+                        from: None,
+                        to: None,
+                        minutes: 0,
+                    });
+                }
             }
         }
         actions.sort_by(|a, b| (&a.kind, &a.id, &a.to).cmp(&(&b.kind, &b.id, &b.to)));
@@ -1223,6 +1476,7 @@ impl Model {
         &self,
         state: &mut State,
         action: &CandidateAction,
+        newly_established: &BTreeSet<String>,
         unlocks: &mut BTreeSet<String>,
     ) {
         let mut sources = vec![action.pattern.command.clone()];
@@ -1231,11 +1485,7 @@ impl Model {
                 sources.push(to.clone());
             }
         }
-        if action.kind == "deduction" {
-            if let Some(id) = action.id.strip_prefix("command.deduce ") {
-                sources.push(id.to_string());
-            }
-        }
+        sources.extend(newly_established.iter().cloned());
         if action.kind == "solve" {
             state.solution_solved = true;
             unlocks.insert("solution.correct".to_string());
@@ -1258,11 +1508,31 @@ impl Model {
         }
     }
 
+    fn apply_deduction_point_awards(
+        &self,
+        state: &mut State,
+        deductions: &BTreeSet<String>,
+        unlocks: &mut BTreeSet<String>,
+    ) {
+        for source in deductions {
+            let Some(award) = self.point_awards.get(source) else {
+                continue;
+            };
+            if !award.requirements.iter().all(|id| has(state, id)) {
+                continue;
+            }
+            state.point_claims.insert(award.source.clone(), 1);
+            state.score = state.score.saturating_add(award.value);
+            unlocks.insert(format!("score:{}:{}", award.kind, award.source));
+        }
+    }
+
     fn apply_action(
         &self,
         state: &mut State,
         action: &CandidateAction,
         unlocks: &mut BTreeSet<String>,
+        auto_facts: bool,
     ) {
         // The runtime decides which ordinary action triggers match before it
         // applies the mechanic or command effects. Preserve that snapshot so
@@ -1293,13 +1563,20 @@ impl Model {
                 unlocks.insert(id.to_string());
             }
         }
+        if action.kind == "fact_claim" {
+            if let Some(id) = action.id.strip_prefix("command.claim ") {
+                state.available_facts.remove(id);
+                state.facts.insert(id.to_string());
+                unlocks.insert(id.to_string());
+            }
+        }
         if action.kind == "route" {
             state.location = action.to.clone().unwrap_or_else(|| state.location.clone());
             state.elapsed = state.elapsed.saturating_add(action.minutes);
         }
         if let Some(command) = self.commands.get(&action.pattern.command) {
             for effect in &command.effects {
-                apply_effect(state, effect, unlocks);
+                apply_effect(state, effect, unlocks, auto_facts);
             }
         }
         for trigger_id in matching_triggers {
@@ -1311,7 +1588,7 @@ impl Model {
                 });
                 state.pending.sort();
             } else {
-                complete_trigger(state, trigger, unlocks);
+                complete_trigger(state, trigger, unlocks, auto_facts);
             }
         }
         // The runtime discovers action-gated facts after the already-matched
@@ -1324,8 +1601,7 @@ impl Model {
                 .is_some_and(|pattern| pattern_matches(pattern, &action.pattern))
                 && predicates_hold(&fact.when, state, self.initial_minutes)
             {
-                state.facts.insert(fact.item.id.clone());
-                unlocks.insert(fact.item.id.clone());
+                acquire_fact(state, &fact.item.id, unlocks, auto_facts);
             }
         }
     }
@@ -1335,10 +1611,13 @@ impl Model {
         state: &mut State,
         _action: Option<&CandidateAction>,
         unlocks: &mut BTreeSet<String>,
+        auto_facts: bool,
+        auto_deductions: bool,
     ) {
         loop {
             let before = (
                 state.facts.len(),
+                state.available_facts.len(),
                 state.deductions.len(),
                 state.flags.len(),
                 state.completed.len(),
@@ -1353,7 +1632,7 @@ impl Model {
             state.pending.retain(|pending| pending.due > state.elapsed);
             for pending in due {
                 if let Some(trigger) = self.triggers.get(&pending.trigger) {
-                    complete_trigger(state, trigger, unlocks);
+                    complete_trigger(state, trigger, unlocks, auto_facts);
                 }
             }
             for fact in self.facts.values() {
@@ -1366,8 +1645,7 @@ impl Model {
                         .as_ref()
                         .map_or(true, |owner| !owner.starts_with("trigger."))
                 {
-                    state.facts.insert(fact.item.id.clone());
-                    unlocks.insert(fact.item.id.clone());
+                    acquire_fact(state, &fact.item.id, unlocks, auto_facts);
                 }
             }
             for trigger in self.triggers.values() {
@@ -1389,12 +1667,23 @@ impl Model {
                         });
                         state.pending.sort();
                     } else {
-                        complete_trigger(state, trigger, unlocks);
+                        complete_trigger(state, trigger, unlocks, auto_facts);
+                    }
+                }
+            }
+            if auto_deductions {
+                for deduction in self.deductions.values() {
+                    if !state.deductions.contains(&deduction.item.id)
+                        && deduction.dependencies.iter().all(|id| has(state, id))
+                    {
+                        state.deductions.insert(deduction.item.id.clone());
+                        unlocks.insert(deduction.item.id.clone());
                     }
                 }
             }
             let after = (
                 state.facts.len(),
+                state.available_facts.len(),
                 state.deductions.len(),
                 state.flags.len(),
                 state.completed.len(),
@@ -1519,19 +1808,28 @@ impl Model {
     }
 }
 
-fn complete_trigger(state: &mut State, trigger: &TriggerRule, unlocks: &mut BTreeSet<String>) {
+fn complete_trigger(
+    state: &mut State,
+    trigger: &TriggerRule,
+    unlocks: &mut BTreeSet<String>,
+    auto_facts: bool,
+) {
     state.completed.insert(trigger.item.id.clone());
     unlocks.insert(trigger.item.id.clone());
     for fact in &trigger.facts {
-        state.facts.insert(fact.clone());
-        unlocks.insert(fact.clone());
+        acquire_fact(state, fact, unlocks, auto_facts);
     }
     for effect in &trigger.effects {
-        apply_effect(state, effect, unlocks);
+        apply_effect(state, effect, unlocks, auto_facts);
     }
 }
 
-fn apply_effect(state: &mut State, effect: &Effect, unlocks: &mut BTreeSet<String>) {
+fn apply_effect(
+    state: &mut State,
+    effect: &Effect,
+    unlocks: &mut BTreeSet<String>,
+    auto_facts: bool,
+) {
     match effect {
         Effect::SetFlag(id) => {
             state.flags.insert(id.clone());
@@ -1541,14 +1839,25 @@ fn apply_effect(state: &mut State, effect: &Effect, unlocks: &mut BTreeSet<Strin
             state.elapsed = state.elapsed.saturating_add(*minutes);
         }
         Effect::LearnFact(id) => {
-            state.facts.insert(id.clone());
-            unlocks.insert(id.clone());
+            acquire_fact(state, id, unlocks, auto_facts);
         }
         Effect::EstablishDeduction(id) => {
             state.deductions.insert(id.clone());
             unlocks.insert(id.clone());
         }
     }
+}
+
+fn acquire_fact(state: &mut State, id: &str, unlocks: &mut BTreeSet<String>, auto_facts: bool) {
+    if state.facts.contains(id) || state.available_facts.contains(id) {
+        return;
+    }
+    if auto_facts {
+        state.facts.insert(id.to_string());
+    } else {
+        state.available_facts.insert(id.to_string());
+    }
+    unlocks.insert(id.to_string());
 }
 
 fn predicates_hold(predicates: &[Predicate], state: &State, initial: u32) -> bool {

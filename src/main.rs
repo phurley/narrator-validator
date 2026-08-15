@@ -163,6 +163,17 @@ fn print_text(diagnostics: &[Diagnostic], playability: Option<&PlayabilityReport
             .count()
     );
     if let Some(playability) = playability {
+        println!(
+            "deduction graph: maximum depth {}, largest automatic cascade {}{}",
+            playability.deduction_graph.maximum_depth,
+            playability.deduction_graph.largest_cascade_size,
+            playability
+                .deduction_graph
+                .largest_cascade_root
+                .as_deref()
+                .map(|root| format!(" from {root}"))
+                .unwrap_or_default()
+        );
         for terminal in &playability.terminal_paths {
             let status = match terminal.status {
                 PlayabilityStatus::Proved => "proved",
@@ -177,6 +188,23 @@ fn print_text(diagnostics: &[Diagnostic], playability: Option<&PlayabilityReport
                     blocker.path, blocker.code, terminal.id, blocker.message
                 );
             }
+        }
+        for policy in playability
+            .notebook_policies
+            .iter()
+            .filter(|policy| !policy.auto_facts || !policy.auto_deductions)
+        {
+            let proved = policy
+                .terminal_paths
+                .iter()
+                .filter(|path| path.status == PlayabilityStatus::Proved)
+                .count();
+            println!(
+                "notebook policy auto_facts={} auto_deductions={}: {proved}/{} terminal path(s) proved",
+                policy.auto_facts,
+                policy.auto_deductions,
+                policy.terminal_paths.len()
+            );
         }
     }
     if valid {
