@@ -154,8 +154,25 @@ export interface SolutionContractMetadata {
   expected_answer_disclosure: 'private_narrator'
 }
 
+export interface EndStateContractMetadata {
+  story_format_version: '3.4.0'
+  canonical_section: 'end_states'
+  canonical_file: 'end_states.yaml'
+  legacy_section: 'win_states'
+  precedence: 'authored_order_first_satisfied'
+  evaluation_timing: 'after_every_resolved_turn'
+  score_semantics: 'snapshot_and_minimum_gate'
+  legacy_outcome: 'won'
+  legacy_resolution: 'full'
+  legal_outcome_resolutions: readonly [
+    { outcome: 'won'; resolutions: readonly ['full', 'partial'] },
+    { outcome: 'lost'; resolutions: readonly ['failure'] },
+  ]
+}
+
 export const STANDARD_MYSTERY_RULESET: StandardMysteryRuleset
 export const STANDARD_MYSTERY_RULESETS: readonly StandardMysteryRuleset[]
+export const VALIDATOR_SOURCE_COMMIT: '__NARRATOR_VALIDATOR_SOURCE_COMMIT__'
 
 /**
  * Load the validator WebAssembly module.
@@ -184,6 +201,8 @@ export function validateRepositoryWithFeatures(
 export function referenceTextMetadata(): Promise<ReferenceTextMetadata>
 
 export function solutionContractMetadata(): Promise<SolutionContractMetadata>
+
+export function endStateContractMetadata(): Promise<EndStateContractMetadata>
 
 export function solutionAnswerMatches(
   expected: readonly string[],

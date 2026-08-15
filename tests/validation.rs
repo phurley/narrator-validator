@@ -3,7 +3,9 @@ use std::fs;
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use narrator_validator::{validate, validate_with_supported_features, Severity, SourceFile};
+use narrator_validator::{
+    end_state_contract_metadata, validate, validate_with_supported_features, Severity, SourceFile,
+};
 use serde_yaml::{Mapping, Value};
 
 const VALID_STORY: &str = r#"
@@ -339,6 +341,7 @@ fn story_files(source: String) -> Vec<SourceFile> {
             Some("case" | "solution") => "case.yaml",
             Some("settings" | "routes") => "settings.yaml",
             Some("win_states") => "win_states.yaml",
+            Some("end_states") => "end_states.yaml",
             Some("characters") => "characters.yaml",
             Some("entities") => "entities.yaml",
             Some("events") => "events.yaml",
@@ -376,7 +379,7 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_3_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_3_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "1.3.0");
+    assert_eq!(report.validator_version, "1.4.0");
     assert_eq!(report.format_version.as_deref(), Some("3.0.0"));
     assert!(report.diagnostics.is_empty());
 }
@@ -435,6 +438,17 @@ fn format_3_3_question_story() -> String {
             "",
         )
         .replace("    subject: command.claim", "    subject: command.solve")
+}
+
+fn format_3_4_end_state_story() -> String {
+    let end_states = fs::read_to_string("tests/fixtures/format-3.4-end-states.yaml")
+        .expect("Format 3.4 end-state fixture");
+    format_3_3_question_story()
+        .replacen("format_version: \"3.3.0\"", "format_version: \"3.4.0\"", 1)
+        .replace(
+            "win_states:\n  - id: win.solve_case\n    name: Solved the case\n    text: You answer every question correctly.\n",
+            &end_states,
+        )
 }
 
 #[test]
@@ -1096,6 +1110,187 @@ fn generic_win_states_allow_a_non_murder_story_and_preserve_authored_precedence(
 }
 
 #[test]
+fn format_3_4_end_states_express_full_partial_deadline_and_condition_outcomes() {
+    let report = report(format_3_4_end_state_story());
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert!(report.diagnostics.is_empty(), "{:#?}", report.diagnostics);
+    assert_eq!(report.format_version.as_deref(), Some("3.4.0"));
+}
+
+#[test]
+fn format_3_4_end_state_contract_metadata_makes_precedence_and_migration_explicit() {
+    let metadata = end_state_contract_metadata();
+    assert_eq!(metadata.story_format_version, "3.4.0");
+    assert_eq!(metadata.canonical_section, "end_states");
+    assert_eq!(metadata.precedence, "authored_order_first_satisfied");
+    assert_eq!(metadata.evaluation_timing, "after_every_resolved_turn");
+    assert_eq!(metadata.score_semantics, "snapshot_and_minimum_gate");
+    assert_eq!(metadata.legacy_outcome, "won");
+    assert_eq!(metadata.legacy_resolution, "full");
+}
+
+#[test]
+fn format_3_4_accepts_quiet_kennel_legacy_win_state_without_behavioral_reinterpretation() {
+    let legacy = fs::read_to_string("tests/fixtures/quiet-kennel-legacy-win-states.yaml")
+        .expect("Quiet Kennel legacy fixture");
+    let source = format_3_3_question_story()
+        .replacen("format_version: \"3.3.0\"", "format_version: \"3.4.0\"", 1)
+        .replace("win_state: win.solve_case", "win_state: win.echo_safe_and_case_reconstructed")
+        .replace(
+            "win_states:\n  - id: win.solve_case\n    name: Solved the case\n    text: You answer every question correctly.\n",
+            &legacy,
+        );
+    let report = report(source);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert_eq!(
+        report
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.code == "win_states.legacy_compatibility")
+            .count(),
+        1
+    );
+    let metadata = end_state_contract_metadata();
+    assert_eq!(
+        (metadata.legacy_outcome, metadata.legacy_resolution),
+        ("won", "full")
+    );
+}
+
+#[test]
+fn format_3_4_end_states_validate_time_tier_duplicates_and_references() {
+    let invalid = format_3_4_end_state_story()
+        .replace("at_or_after: \"23:00\"", "at_or_after: \"25:00\"")
+        .replace("resolution: partial", "resolution: failure")
+        .replace("id: end.condition_failure", "id: end.deadline_failure")
+        .replace(
+            "requires: [flag.knife_analysis_complete]",
+            "requires: [flag.unknown]",
+        );
+    let report = report(invalid);
+    for (code, pointer) in [
+        ("end_states.outcome_resolution_conflict", "/end_states/1"),
+        ("end_states.at_or_after", "/end_states/2/at_or_after"),
+        ("id.duplicate", "/end_states/3/id"),
+        ("reference.unknown", "/end_states/3/requires/0"),
+    ] {
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code && diagnostic.pointer.as_deref() == Some(pointer)
+            }),
+            "missing {code} at {pointer}: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
+fn format_3_4_solve_selected_end_state_must_be_a_win() {
+    let report = report(format_3_4_end_state_story().replacen(
+        "outcome: won\n    resolution: full",
+        "outcome: lost\n    resolution: failure",
+        1,
+    ));
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "end_states.solution_outcome_conflict"
+            && diagnostic.pointer.as_deref() == Some("/end_states/0/outcome")
+    }));
+}
+
+#[test]
+fn format_3_4_rejects_duplicate_and_deterministically_shadowed_precedence() {
+    let duplicate = format_3_4_end_state_story().replace(
+        "  - id: end.partial_truth\n    name: A defensible theory\n    outcome: won\n    resolution: partial\n    requires: [deduction.solution]\n    minimum_points: 20\n    text: You establish the central theory, but part of the case remains unresolved.\n  - id: end.deadline_failure\n    name: The trail goes cold\n    outcome: lost\n    resolution: failure\n    requires: [flag.knife_examined]\n    at_or_after: \"23:00\"\n    text: The deadline passes before you can preserve the evidence.\n",
+        "  - id: end.partial_truth\n    name: A defensible theory\n    outcome: won\n    resolution: partial\n    requires: [flag.knife_examined]\n    text: You preserve part of the truth.\n  - id: end.deadline_failure\n    name: The trail goes cold\n    outcome: lost\n    resolution: failure\n    requires: [flag.knife_examined]\n    text: The evidence is lost.\n",
+    );
+    let duplicate_report = report(duplicate);
+    assert!(duplicate_report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "end_states.duplicate_precedence"
+            && diagnostic.pointer.as_deref() == Some("/end_states/2")
+    }));
+
+    let shadowed = format_3_4_end_state_story().replace(
+        "    requires: [deduction.solution]\n    minimum_points: 20",
+        "    requires: [flag.knife_examined]",
+    );
+    let shadowed_report = report(shadowed);
+    assert!(shadowed_report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "end_states.unreachable_precedence"
+            && diagnostic.pointer.as_deref() == Some("/end_states/2")
+    }));
+}
+
+#[test]
+fn format_3_4_allows_specific_full_resolution_before_broader_partial_resolution() {
+    let canonical = fs::read_to_string("tests/fixtures/format-3.4-end-states.yaml")
+        .expect("Format 3.4 end-state fixture");
+    let correctly_ordered = r#"end_states:
+  - id: win.solve_case
+    name: The whole truth
+    outcome: won
+    resolution: full
+    text: You answer every question and explain the complete case.
+  - id: end.full_documented
+    name: The documented truth
+    outcome: won
+    resolution: full
+    requires: [flag.knife_examined, flag.knife_analysis_complete]
+    minimum_points: 20
+    text: You prove every material element.
+  - id: end.partial_truth
+    name: A defensible theory
+    outcome: won
+    resolution: partial
+    requires: [flag.knife_examined]
+    text: You establish only part of the truth.
+"#;
+    let source = format_3_4_end_state_story().replace(&canonical, correctly_ordered);
+    let report = report(source);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert!(!report.diagnostics.iter().any(|diagnostic| {
+        matches!(
+            diagnostic.code.as_str(),
+            "end_states.duplicate_precedence" | "end_states.unreachable_precedence"
+        )
+    }));
+}
+
+#[test]
+fn format_3_4_native_and_cli_reports_are_in_parity() {
+    let files = story_files(format_3_4_end_state_story());
+    let native = validate(&files);
+    assert!(native.valid, "{:#?}", native.diagnostics);
+
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let directory = std::env::temp_dir().join(format!(
+        "narrator-validator-end-states-{}-{unique}",
+        std::process::id()
+    ));
+    fs::create_dir(&directory).unwrap();
+    for file in &files {
+        fs::write(directory.join(&file.path), &file.source).unwrap();
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_narrator-validator"))
+        .arg("--format")
+        .arg("json")
+        .arg(&directory)
+        .output()
+        .expect("run Format 3.4 CLI validation");
+    fs::remove_dir_all(&directory).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cli: narrator_validator::ValidationReport =
+        serde_json::from_slice(&output.stdout).expect("CLI report JSON");
+    assert_eq!(cli, native);
+}
+
+#[test]
 fn win_states_validate_shape_requirement_kinds_and_thresholds() {
     let source = VALID_FORMAT_3_STORY.replace(
         "settings:\n",
@@ -1152,6 +1347,32 @@ fn win_states_must_use_the_canonical_root_filename() {
         diagnostic.code == "schema.noncanonical_filename"
             && diagnostic.path == "goals.yaml"
             && diagnostic.pointer.as_deref() == Some("/win_states")
+    }));
+}
+
+#[test]
+fn end_states_require_the_canonical_file_and_cannot_mix_with_legacy_precedence() {
+    let mut misplaced = story_files(format_3_4_end_state_story());
+    misplaced
+        .iter_mut()
+        .find(|file| file.path == "end_states.yaml")
+        .expect("end states")
+        .path = "goals.yaml".to_string();
+    let misplaced_report = validate(&misplaced);
+    assert!(misplaced_report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "schema.noncanonical_filename"
+            && diagnostic.path == "goals.yaml"
+            && diagnostic.pointer.as_deref() == Some("/end_states")
+    }));
+
+    let mixed = format_3_4_end_state_story().replace(
+        "settings:\n",
+        "win_states:\n  - id: win.legacy\n    name: Legacy\n    requires: [flag.knife_examined]\n    text: Legacy ending.\nsettings:\n",
+    );
+    let mixed_report = report(mixed);
+    assert!(mixed_report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "end_states.mixed_legacy_section"
+            && diagnostic.pointer.as_deref() == Some("/end_states")
     }));
 }
 

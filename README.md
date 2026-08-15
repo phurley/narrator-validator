@@ -20,6 +20,7 @@ and game engine agree on where content lives:
 - `settings.yaml`: `settings` and `routes`
 - `characters.yaml`, `entities.yaml`, `events.yaml`, `deductions.yaml`,
   `flags.yaml`, `commands.yaml`, and `triggers.yaml`: the matching section
+- `end_states.yaml`: ordered Format 3.4 `end_states` terminal outcomes
 - `deck.yaml`: the physical `cards` bindings for one printed deck edition
 - `clues.yaml`: legacy format-1 `clues`
 
@@ -123,7 +124,7 @@ This repository includes a composite action:
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: phurley/narrator-validator@v1.3.0
+- uses: phurley/narrator-validator@v1.4.0
 ```
 
 It builds the pinned validator revision and emits native GitHub annotations.
@@ -131,16 +132,17 @@ It builds the pinned validator revision and emits native GitHub annotations.
 ## Story format versions
 
 Every story declares a quoted semantic version at `case.format_version`.
-This validator authors format `3.3.0`. Format 3 minor and patch releases remain
+This validator authors format `3.4.0`. Format 3 minor and patch releases remain
 structurally compatible within the major format, while capabilities added by a
 minor release must be explicitly negotiated through `case.features`. The
 format-1 validation path remains for legacy repositories, while format-2
 repositories stop with focused migration
 guidance before the strict format-3 schema runs.
 
-Validator `1.3.0` authors the Format 3.3 Solve contract while continuing to
-validate older supported formats. Validator `1.1.0` remains the coordinated
-release for the format-3.1 contract. See
+Validator `1.4.0` authors ordered full/partial/failure end states while
+continuing to validate older supported formats. See
+[Story Format 3.4](docs/story-format-3.4.md). Validator `1.1.0` remains the
+coordinated release for the format-3.1 contract. See
 [MIGRATION.md](MIGRATION.md) for the complete format-2 migration and the
 [`v1.1.0` release](https://github.com/phurley/narrator-validator/releases/tag/v1.1.0)
 for the exact consumer commit matrix.
@@ -149,7 +151,8 @@ The normative placement, presence, candidate-selection, compatibility, and
 privacy decisions are recorded in
 [Story Format 3.1](docs/story-format-3.1.md),
 [Story Format 3.2](docs/story-format-3.2.md),
-[Story Format 3.3](docs/story-format-3.3.md), and
+[Story Format 3.3](docs/story-format-3.3.md),
+[Story Format 3.4](docs/story-format-3.4.md), and
 [ADR 0001](docs/adr/0001-story-format-3.1-character-presence-and-command-candidates.md).
 The [ADR index](docs/adr/README.md) is the discovery point for architecture
 decisions shared by validator consumers.
@@ -179,6 +182,16 @@ character, or entity cards. Unordered rows require exact set equality and
 one unconditional win state for terminal name/text while other generic endings
 remain available. See the [Format 3.3 contract](docs/story-format-3.3.md) for
 the schema, scanner bounds, migration, disclosure, and shared comparison APIs.
+
+## Format 3.4 ordered end states
+
+Format 3.4 generalizes win states into one authored-precedence sequence of
+named full wins, partial wins, and failures. Conditions combine persistent IDs,
+an optional score gate, and an optional game-clock threshold. The first
+satisfied state after a resolved turn is terminal, and its final score is the
+current score snapshot. See the [Format 3.4 contract](docs/story-format-3.4.md)
+for legal outcome/tier pairs, deterministic shadowing diagnostics, and the
+behavior-preserving `win_states` transition.
 
 ## Format 3 document and disclosure contract
 
@@ -701,27 +714,33 @@ deduction, flag, or trigger references. The runtime evaluates them against the
 post-transition player state and tracks claims per player and authored source.
 Point awards on routes, characters, events, or triggers are rejected.
 
-Generic terminal outcomes live in the canonical root file `win_states.yaml`:
+Format 3.4 terminal outcomes live in canonical `end_states.yaml`:
 
 ```yaml
-win_states:
-  - id: win.escape
+end_states:
+  - id: end.escape
     name: Escaped the house
+    outcome: won
+    resolution: partial
     requires: [flag.front_door_unlocked]
     minimum_points: 50
+    at_or_after: "21:30"
     text: You force the front door open and reach the road.
 ```
 
-Win-state sequence order is semantic: the runtime selects the first satisfied
-state when several match on the same turn. Each state needs a globally unique
-`win.*` ID, a player-facing name and completion text, and at least one
-persistent requirement or positive point threshold. `minimum_points` defaults
-to zero. Requirements and unmatched alternatives remain author-only.
+End-state sequence order is semantic: after each resolved turn the runtime
+selects the first satisfied state. Each state needs a stable ID, player-facing
+name and completion text, legal outcome/resolution pair, and at least one
+persistent requirement, positive point threshold, clock threshold, or authored
+Solve condition. `minimum_points` defaults to zero and only gates selection;
+the selected state's final score is the current score snapshot.
 
 A story may omit the murder-specific `solution` block when it defines at least
-one generic win state. Existing mysteries may retain `solution` as metadata and
-migrate by making their final deduction a win-state requirement. Stories with
-no generic win states retain the legacy `command.solve` terminal behavior.
+one generic end state. Legacy `win_states` remain readable as ordered
+`won`/`full` states; migrate by preserving their IDs, order, conditions, names,
+and text while adding the explicit outcome and resolution fields. See the
+[Format 3.4 contract](docs/story-format-3.4.md) for precedence diagnostics and
+the coordinated transition.
 
 ## Initial rules
 

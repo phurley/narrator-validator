@@ -1,0 +1,26 @@
+end_states:
+  - id: win.solve_case
+    name: The whole truth
+    outcome: won
+    resolution: full
+    text: You answer every question and explain the complete case.
+  - id: end.partial_truth
+    name: A defensible theory
+    outcome: won
+    resolution: partial
+    requires: [deduction.solution]
+    minimum_points: 20
+    text: You establish the central theory, but part of the case remains unresolved.
+  - id: end.deadline_failure
+    name: The trail goes cold
+    outcome: lost
+    resolution: failure
+    requires: [flag.knife_examined]
+    at_or_after: "23:00"
+    text: The deadline passes before you can preserve the evidence.
+  - id: end.condition_failure
+    name: The evidence is compromised
+    outcome: lost
+    resolution: failure
+    requires: [flag.knife_analysis_complete]
+    text: The compromised analysis prevents a defensible conclusion.

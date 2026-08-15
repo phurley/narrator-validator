@@ -1,0 +1,4 @@
+win_states:
+  - id: win.echo_safe_and_case_reconstructed
+    name: Echo safe and the Quiet Kennel solved
+    text: Echo is safe, and the complete truth has been reconstructed.

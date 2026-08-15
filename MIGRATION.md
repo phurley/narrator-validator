@@ -1,5 +1,24 @@
 # Migrating story format 2 to format 3
 
+## Moving from Format 3.3 to 3.4 authored end states
+
+Update the validator, runtime, and editor consumers together, then set
+`case.format_version: "3.4.0"`. Rename `win_states.yaml` and its root to
+`end_states.yaml` / `end_states`, preserving every ID, condition, point gate,
+name, text value, and sequence position. Add `outcome: won` and
+`resolution: full` to preserve the exact legacy behavior. Existing `win.*` IDs
+may remain stable during migration.
+
+New entries may use `end.*` IDs and express `won`/`full`, `won`/`partial`, or
+`lost`/`failure`. Add a quoted `at_or_after: "HH:MM"` threshold when clock time
+is part of the condition. All conditions are conjunctive and the first
+satisfied state wins authored precedence, so order specific full resolutions
+before broader partial outcomes. See
+[Story Format 3.4](docs/story-format-3.4.md) for the complete contract.
+
+The transition validator still accepts `win_states` as ordered `won`/`full`
+states and emits a migration warning. Do not define both roots.
+
 ## Moving from Format 3.2 to 3.3 authored Solve questions
 
 Update every validator/runtime/editor/scanner consumer before changing the
