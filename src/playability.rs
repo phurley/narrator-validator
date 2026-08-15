@@ -129,6 +129,8 @@ struct FactRule {
 #[derive(Clone)]
 struct DeductionRule {
     item: LocatedItem,
+    inputs: Vec<String>,
+    inputs_range: Option<SourceRange>,
     dependencies: Vec<String>,
 }
 
@@ -389,13 +391,24 @@ impl Model {
                 continue;
             };
             let minutes = u64_field(&item.map, "travel_minutes").unwrap_or(0) as u32;
+            let requirements = strings(field(&item.map, "requires"));
+            for (requirement_index, requirement) in requirements.iter().enumerate() {
+                if requirement.starts_with("entity.") {
+                    self.unsupported(
+                        file,
+                        &format!("{}/requires/{requirement_index}", item.pointer),
+                        "playability.unsupported_inventory_condition",
+                        "entity route gates depend on reachable selection or inventory ownership, which is outside the static subset",
+                    );
+                }
+            }
             self.routes.push(Route {
                 id: item.id,
                 from: from.to_string(),
                 to: to.to_string(),
                 minutes,
                 bidirectional: bool_field(&item.map, "bidirectional").unwrap_or(false),
-                requirements: strings(field(&item.map, "requires")),
+                requirements,
             });
         }
     }
@@ -534,11 +547,21 @@ impl Model {
             let Some(item) = located(file, "deductions", index, value, None) else {
                 continue;
             };
-            let mut dependencies = strings(field(&item.map, "inputs"));
-            dependencies.extend(strings(field(&item.map, "requires")));
+            let inputs = strings(field(&item.map, "inputs"));
+            let inputs_range = locate_pointer(file, &format!("{}/inputs", item.pointer));
+            let requirements = strings(field(&item.map, "requires"));
+            let mut dependencies = inputs.clone();
+            dependencies.extend(requirements.clone());
             self.read_points(file, &item, "deduction");
-            self.deductions
-                .insert(item.id.clone(), DeductionRule { item, dependencies });
+            self.deductions.insert(
+                item.id.clone(),
+                DeductionRule {
+                    item,
+                    inputs,
+                    inputs_range,
+                    dependencies,
+                },
+            );
         }
     }
 
@@ -844,6 +867,39 @@ impl Model {
     }
 
     fn normalize(&mut self) {
+        let mut input_sets = BTreeMap::<Vec<String>, Vec<String>>::new();
+        for deduction in self
+            .deductions
+            .values()
+            .filter(|deduction| !deduction.inputs.is_empty())
+        {
+            let mut inputs = deduction.inputs.clone();
+            inputs.sort();
+            inputs.dedup();
+            input_sets
+                .entry(inputs)
+                .or_default()
+                .push(deduction.item.id.clone());
+        }
+        for ids in input_sets.values().filter(|ids| ids.len() > 1) {
+            for id in ids {
+                let deduction = &self.deductions[id];
+                self.unsupported.push(Unsupported {
+                    code: "playability.unsupported_ambiguous_deduction".to_string(),
+                    message: format!(
+                        "deduction `{id}` shares its input set with {}; runtime deduction selection may be ambiguous",
+                        ids.iter()
+                            .filter(|candidate| *candidate != id)
+                            .cloned()
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    ),
+                    path: deduction.item.path.clone(),
+                    pointer: format!("{}/inputs", deduction.item.pointer),
+                    range: deduction.inputs_range,
+                });
+            }
+        }
         self.routes
             .sort_by(|a, b| (&a.id, &a.from, &a.to).cmp(&(&b.id, &b.from, &b.to)));
         self.unsupported
@@ -915,12 +971,7 @@ impl Model {
                 let before_unlocks = next.unlocks.clone();
                 if action.kind == "route" {
                     next.route_actions += 1;
-                    next.state.location = action
-                        .to
-                        .clone()
-                        .unwrap_or_else(|| next.state.location.clone());
                 }
-                next.state.elapsed = next.state.elapsed.saturating_add(action.minutes);
                 self.apply_action(&mut next.state, &action, &mut next.unlocks);
                 self.settle(&mut next.state, Some(&action), &mut next.unlocks);
                 self.apply_point_awards(&mut next.state, &action, &mut next.unlocks);
@@ -1209,11 +1260,38 @@ impl Model {
         action: &CandidateAction,
         unlocks: &mut BTreeSet<String>,
     ) {
+        // The runtime decides which ordinary action triggers match before it
+        // applies the mechanic or command effects. Preserve that snapshot so
+        // this action cannot satisfy its own flag/time/location predicate.
+        let matching_triggers = self
+            .triggers
+            .values()
+            .filter(|trigger| {
+                !self.unsupported_triggers.contains(&trigger.item.id)
+                    && (!trigger.once
+                        || (!state.completed.contains(&trigger.item.id)
+                            && !state
+                                .pending
+                                .iter()
+                                .any(|pending| pending.trigger == trigger.item.id)))
+                    && trigger
+                        .on
+                        .as_ref()
+                        .is_some_and(|pattern| pattern_matches(pattern, &action.pattern))
+                    && predicates_hold(&trigger.when, state, self.initial_minutes)
+            })
+            .map(|trigger| trigger.item.id.clone())
+            .collect::<Vec<_>>();
+
         if action.kind == "deduction" {
             if let Some(id) = action.id.strip_prefix("command.deduce ") {
                 state.deductions.insert(id.to_string());
                 unlocks.insert(id.to_string());
             }
+        }
+        if action.kind == "route" {
+            state.location = action.to.clone().unwrap_or_else(|| state.location.clone());
+            state.elapsed = state.elapsed.saturating_add(action.minutes);
         }
         if let Some(command) = self.commands.get(&action.pattern.command) {
             for effect in &command.effects {
@@ -1231,34 +1309,16 @@ impl Model {
                 unlocks.insert(fact.item.id.clone());
             }
         }
-        for trigger in self.triggers.values() {
-            if self.unsupported_triggers.contains(&trigger.item.id) {
-                continue;
-            }
-            if trigger.once
-                && (state.completed.contains(&trigger.item.id)
-                    || state
-                        .pending
-                        .iter()
-                        .any(|pending| pending.trigger == trigger.item.id))
-            {
-                continue;
-            }
-            if trigger
-                .on
-                .as_ref()
-                .is_some_and(|pattern| pattern_matches(pattern, &action.pattern))
-                && predicates_hold(&trigger.when, state, self.initial_minutes)
-            {
-                if trigger.after > 0 {
-                    state.pending.push(Pending {
-                        due: state.elapsed.saturating_add(trigger.after),
-                        trigger: trigger.item.id.clone(),
-                    });
-                    state.pending.sort();
-                } else {
-                    complete_trigger(state, trigger, unlocks);
-                }
+        for trigger_id in matching_triggers {
+            let trigger = &self.triggers[&trigger_id];
+            if trigger.after > 0 {
+                state.pending.push(Pending {
+                    due: state.elapsed.saturating_add(trigger.after),
+                    trigger: trigger.item.id.clone(),
+                });
+                state.pending.sort();
+            } else {
+                complete_trigger(state, trigger, unlocks);
             }
         }
     }

@@ -32,10 +32,13 @@ Authored route requirements are checked before traversal. Format 3.3+ question
 solutions contribute one exact `command.solve` action using the authored answer
 rows, so the selected solution end state participates in normal authored
 precedence. Fixed `advance_time` effects apply whether a command or trigger owns
-them.
+them. Ordinary action triggers snapshot their action match and persistent
+conditions before the action's mechanic and command effects, then settle their
+effects against the authoritative post-action state.
 
 Non-monotonic effects, nested entity inventory transitions, entity point
-awards, and condition forms outside this subset are reported as `inconclusive`.
+awards, entity/inventory route gates, duplicate deduction input sets, and
+condition forms outside this subset are reported as `inconclusive`.
 If any unsupported behavior is present, an otherwise supported candidate is
 also downgraded rather than emitted as a false proof. The complete notebook and
 engine state remain authoritative; this report is authoring analysis, not
