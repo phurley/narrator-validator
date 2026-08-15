@@ -1,0 +1,1573 @@
+//! Conservative static playability analysis for the supported monotonic story subset.
+//!
+//! This is deliberately separate from structural validation. A proof is emitted
+//! only for a concrete sequence of supported actions. Unsupported mechanics can
+//! never turn a path into `proved`; they make an otherwise unresolved path
+//! `inconclusive`.
+
+use std::cmp::Ordering;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+
+use serde::{Deserialize, Serialize};
+use serde_yaml::{Mapping, Value};
+
+use crate::{Position, SourceFile, SourceRange};
+
+const MODEL_VERSION: u32 = 1;
+const MAX_EXPLORED_STATES: usize = 25_000;
+const MAX_ACTIONS: u32 = 96;
+const MAX_ELAPSED_MINUTES: u32 = 2 * 24 * 60;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlayabilityStatus {
+    Proved,
+    NotProved,
+    Inconclusive,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayabilityReport {
+    pub model_version: u32,
+    pub explored_states: usize,
+    pub bounded: bool,
+    pub terminal_paths: Vec<TerminalPathAnalysis>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalPathAnalysis {
+    pub id: String,
+    pub outcome: String,
+    pub status: PlayabilityStatus,
+    pub path: String,
+    pub pointer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<SourceRange>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lower_bound: Option<PlayabilityLowerBound>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<PlayabilityBlocker>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayabilityLowerBound {
+    pub entry_setting: String,
+    pub action_count: u32,
+    pub route_action_count: u32,
+    pub elapsed_minutes: u32,
+    pub wait_minutes: u32,
+    pub required_waits: Vec<PlayabilityRequiredWait>,
+    pub ordered_steps: Vec<PlayabilityStep>,
+    pub pivotal_unlocks: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayabilityRequiredWait {
+    pub trigger: String,
+    pub delay_minutes: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayabilityStep {
+    pub kind: String,
+    pub action: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<String>,
+    pub elapsed_minutes: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unlocks: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlayabilityBlocker {
+    pub code: String,
+    pub message: String,
+    pub path: String,
+    pub pointer: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<SourceRange>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub chain: Vec<String>,
+}
+
+#[derive(Clone)]
+struct LocatedItem {
+    id: String,
+    path: String,
+    pointer: String,
+    range: Option<SourceRange>,
+    map: Mapping,
+    owner: Option<String>,
+}
+
+#[derive(Clone)]
+struct Route {
+    id: String,
+    from: String,
+    to: String,
+    minutes: u32,
+    bidirectional: bool,
+}
+
+#[derive(Clone, Default)]
+struct ActionPattern {
+    command: String,
+    bindings: BTreeMap<String, Vec<String>>,
+}
+
+#[derive(Clone)]
+struct FactRule {
+    item: LocatedItem,
+    on: Option<ActionPattern>,
+    when: Vec<Predicate>,
+    opening: bool,
+}
+
+#[derive(Clone)]
+struct DeductionRule {
+    item: LocatedItem,
+    dependencies: Vec<String>,
+}
+
+#[derive(Clone)]
+struct TriggerRule {
+    item: LocatedItem,
+    on: Option<ActionPattern>,
+    when: Vec<Predicate>,
+    after: u32,
+    effects: Vec<Effect>,
+    facts: Vec<String>,
+    once: bool,
+}
+
+#[derive(Clone)]
+struct CommandRule {
+    id: String,
+    effects: Vec<Effect>,
+    requires_binding: bool,
+}
+
+#[derive(Clone)]
+struct EndRule {
+    item: LocatedItem,
+    outcome: String,
+    requirements: Vec<String>,
+    minimum_points: u64,
+    at_or_after: Option<u32>,
+    solution_condition: bool,
+}
+
+#[derive(Clone)]
+struct PointAward {
+    source: String,
+    kind: &'static str,
+    value: u64,
+    max_claim_count: u64,
+    requirements: Vec<String>,
+}
+
+#[derive(Clone)]
+enum Predicate {
+    Has(String),
+    At(String),
+    TimeAfter(u32),
+    TimeEqual(u32),
+    TimeBefore(u32),
+    Never,
+}
+
+#[derive(Clone)]
+enum Effect {
+    SetFlag(String),
+    AdvanceTime(u32),
+    LearnFact(String),
+    EstablishDeduction(String),
+}
+
+#[derive(Clone)]
+struct Unsupported {
+    code: String,
+    message: String,
+    path: String,
+    pointer: String,
+    range: Option<SourceRange>,
+}
+
+#[derive(Clone, Default)]
+struct Model {
+    entries: Vec<String>,
+    initial_minutes: u32,
+    routes: Vec<Route>,
+    commands: BTreeMap<String, CommandRule>,
+    facts: BTreeMap<String, FactRule>,
+    deductions: BTreeMap<String, DeductionRule>,
+    triggers: BTreeMap<String, TriggerRule>,
+    ends: Vec<EndRule>,
+    initial_flags: BTreeSet<String>,
+    unsupported: Vec<Unsupported>,
+    solution_target: Option<String>,
+    point_awards: BTreeMap<String, PointAward>,
+    subject_locations: BTreeMap<String, String>,
+    subject_requirements: BTreeMap<String, Vec<String>>,
+    unsupported_commands: BTreeSet<String>,
+    unsupported_triggers: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct Pending {
+    due: u32,
+    trigger: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct State {
+    entry: String,
+    location: String,
+    elapsed: u32,
+    facts: BTreeSet<String>,
+    deductions: BTreeSet<String>,
+    flags: BTreeSet<String>,
+    completed: BTreeSet<String>,
+    pending: Vec<Pending>,
+    score: u64,
+    point_claims: BTreeMap<String, u64>,
+}
+
+#[derive(Clone)]
+struct Node {
+    state: State,
+    actions: u32,
+    route_actions: u32,
+    wait_minutes: u32,
+    steps: Vec<PlayabilityStep>,
+    unlocks: BTreeSet<String>,
+}
+
+#[derive(Clone)]
+struct QueueNode(Node);
+
+impl PartialEq for QueueNode {
+    fn eq(&self, other: &Self) -> bool {
+        queue_key(&self.0) == queue_key(&other.0)
+    }
+}
+impl Eq for QueueNode {}
+impl PartialOrd for QueueNode {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for QueueNode {
+    fn cmp(&self, other: &Self) -> Ordering {
+        queue_key(&other.0).cmp(&queue_key(&self.0))
+    }
+}
+
+fn queue_key(node: &Node) -> (u32, u32, &State) {
+    (node.actions, node.state.elapsed, &node.state)
+}
+
+#[derive(Clone)]
+struct CandidateAction {
+    kind: &'static str,
+    id: String,
+    pattern: ActionPattern,
+    from: Option<String>,
+    to: Option<String>,
+    minutes: u32,
+}
+
+pub(crate) fn analyze(
+    files: &[SourceFile],
+    format_version: Option<&str>,
+) -> Option<PlayabilityReport> {
+    if !format_version.is_some_and(|version| version.starts_with("3.")) {
+        return None;
+    }
+    let mut model = Model::from_files(files);
+    model.normalize();
+    Some(model.search())
+}
+
+impl Model {
+    fn from_files(files: &[SourceFile]) -> Self {
+        let mut model = Self::default();
+        for file in files {
+            let Ok(root) = serde_yaml::from_str::<Value>(&file.source) else {
+                continue;
+            };
+            let Some(root) = root.as_mapping() else {
+                continue;
+            };
+            if let Some(case) = map(root, "case") {
+                model.entries.extend(strings(field(case, "entry_settings")));
+                model.initial_minutes = string(case, "initial_time")
+                    .and_then(parse_clock)
+                    .unwrap_or(0);
+                if let Some(solution) = map(root, "solution") {
+                    model.solution_target = string(solution, "win_state").map(str::to_string);
+                }
+                if let Some(ruleset) = map(case, "ruleset") {
+                    if let (Some(id), Some(version)) =
+                        (string(ruleset, "id"), string(ruleset, "version"))
+                    {
+                        if let Ok(resolved) = crate::resolve_ruleset(&crate::RulesetReference {
+                            id: id.to_string(),
+                            version: version.to_string(),
+                        }) {
+                            if let Ok(Value::Mapping(catalog)) =
+                                serde_yaml::from_str::<Value>(resolved.commands_yaml)
+                            {
+                                model.read_commands(
+                                    &SourceFile {
+                                        path: "<ruleset>".to_string(),
+                                        source: resolved.commands_yaml.to_string(),
+                                    },
+                                    sequence(&catalog, "commands"),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            model.read_routes(file, sequence(root, "routes"));
+            model.read_flags(sequence(root, "flags"));
+            model.read_commands(file, sequence(root, "commands"));
+            model.read_triggers(file, sequence(root, "triggers"));
+            model.read_deductions(file, sequence(root, "deductions"));
+            for section in ["settings", "characters", "entities", "events"] {
+                model.read_owned_facts(file, section, sequence(root, section));
+            }
+            model.read_ends(file, "end_states", sequence(root, "end_states"), false);
+            model.read_ends(file, "win_states", sequence(root, "win_states"), true);
+        }
+        if model.entries.is_empty() {
+            if let Some(first) = model.routes.first() {
+                model.entries.push(first.from.clone());
+            }
+        }
+        model.entries.sort();
+        model.entries.dedup();
+        model
+    }
+
+    fn read_routes(&mut self, file: &SourceFile, values: &[Value]) {
+        for (index, value) in values.iter().enumerate() {
+            let Some(item) = located(file, "routes", index, value, None) else {
+                continue;
+            };
+            let (Some(from), Some(to)) = (string(&item.map, "from"), string(&item.map, "to"))
+            else {
+                continue;
+            };
+            let minutes = u64_field(&item.map, "travel_minutes").unwrap_or(0) as u32;
+            self.routes.push(Route {
+                id: item.id,
+                from: from.to_string(),
+                to: to.to_string(),
+                minutes,
+                bidirectional: bool_field(&item.map, "bidirectional").unwrap_or(false),
+            });
+        }
+    }
+
+    fn read_flags(&mut self, values: &[Value]) {
+        for value in values {
+            let Some(map) = value.as_mapping() else {
+                continue;
+            };
+            if bool_field(map, "initial_state") == Some(true) {
+                if let Some(id) = string(map, "id") {
+                    self.initial_flags.insert(id.to_string());
+                }
+            }
+        }
+    }
+
+    fn read_commands(&mut self, file: &SourceFile, values: &[Value]) {
+        for (index, value) in values.iter().enumerate() {
+            let Some(item) = located(file, "commands", index, value, None) else {
+                continue;
+            };
+            let unsupported_before = self.unsupported.len();
+            let effects = self.effects(file, &item.pointer, &item.map, item.id == "command.move");
+            if self.unsupported.len() > unsupported_before {
+                self.unsupported_commands.insert(item.id.clone());
+            }
+            self.read_points(file, &item, "command");
+            let requires_binding = field(&item.map, "parameters")
+                .and_then(Value::as_sequence)
+                .is_some_and(|parameters| {
+                    parameters.iter().any(|parameter| {
+                        parameter
+                            .as_mapping()
+                            .and_then(|parameter| u64_field(parameter, "min"))
+                            .unwrap_or(0)
+                            > 0
+                    })
+                });
+            self.commands.insert(
+                item.id.clone(),
+                CommandRule {
+                    id: item.id,
+                    effects,
+                    requires_binding,
+                },
+            );
+        }
+    }
+
+    fn read_owned_facts(&mut self, file: &SourceFile, section: &str, owners: &[Value]) {
+        for (owner_index, owner_value) in owners.iter().enumerate() {
+            let Some(owner) = owner_value.as_mapping() else {
+                continue;
+            };
+            let owner_id = string(owner, "id").map(str::to_string);
+            if let Some(owner_id) = owner_id.as_ref() {
+                if section == "characters" {
+                    if let Some(location) =
+                        map(owner, "initial").and_then(|initial| string(initial, "location"))
+                    {
+                        self.subject_locations
+                            .insert(owner_id.clone(), location.to_string());
+                    }
+                    if let Some(presence) = map(owner, "presence") {
+                        self.subject_requirements
+                            .insert(owner_id.clone(), strings(field(presence, "requires")));
+                    }
+                } else if section == "entities" {
+                    if let Some(container) =
+                        map(owner, "initial").and_then(|initial| string(initial, "container"))
+                    {
+                        if container.starts_with("setting.") {
+                            self.subject_locations
+                                .insert(owner_id.clone(), container.to_string());
+                        } else {
+                            self.unsupported(
+                                file,
+                                &format!("/{section}/{owner_index}/initial/container"),
+                                "playability.unsupported_nested_container",
+                                "nested entity reachability is outside the static action model",
+                            );
+                        }
+                    }
+                    if field(owner, "points").is_some() {
+                        self.unsupported(file, &format!("/{section}/{owner_index}/points"), "playability.unsupported_entity_points", "entity point awards require inventory transitions and are outside this static subset");
+                    }
+                    if let Some(visibility) = map(owner, "visibility") {
+                        let requirements = strings(field(visibility, "requires"));
+                        if requirements.iter().any(|id| id.starts_with("entity.")) {
+                            self.unsupported(
+                                file,
+                                &format!("/{section}/{owner_index}/visibility/requires"),
+                                "playability.unsupported_inventory_condition",
+                                "entity ownership visibility gates are outside the static subset",
+                            );
+                        }
+                        self.subject_requirements
+                            .insert(owner_id.clone(), requirements);
+                    }
+                } else if section == "settings" {
+                    if let Some(item) = located(file, section, owner_index, owner_value, None) {
+                        self.read_points(file, &item, "setting");
+                    }
+                }
+            }
+            let Some(facts) = field(owner, "facts").and_then(Value::as_sequence) else {
+                continue;
+            };
+            for (fact_index, value) in facts.iter().enumerate() {
+                let pointer = format!("/{section}/{owner_index}/facts/{fact_index}");
+                let Some(item) = located_at(file, value, pointer, owner_id.clone()) else {
+                    continue;
+                };
+                let on = field(&item.map, "on")
+                    .and_then(Value::as_mapping)
+                    .and_then(|map| self.pattern(file, &item.pointer, map, item.owner.as_deref()));
+                let when = self.predicates(file, &item.pointer, &item.map);
+                let opening =
+                    field(&item.map, "on").is_none() && field(&item.map, "when").is_none();
+                self.facts.insert(
+                    item.id.clone(),
+                    FactRule {
+                        item,
+                        on,
+                        when,
+                        opening,
+                    },
+                );
+            }
+        }
+    }
+
+    fn read_deductions(&mut self, file: &SourceFile, values: &[Value]) {
+        for (index, value) in values.iter().enumerate() {
+            let Some(item) = located(file, "deductions", index, value, None) else {
+                continue;
+            };
+            let mut dependencies = strings(field(&item.map, "inputs"));
+            dependencies.extend(strings(field(&item.map, "requires")));
+            self.read_points(file, &item, "deduction");
+            self.deductions
+                .insert(item.id.clone(), DeductionRule { item, dependencies });
+        }
+    }
+
+    fn read_triggers(&mut self, file: &SourceFile, values: &[Value]) {
+        for (index, value) in values.iter().enumerate() {
+            let Some(item) = located(file, "triggers", index, value, None) else {
+                continue;
+            };
+            let unsupported_before = self.unsupported.len();
+            let on = field(&item.map, "on")
+                .and_then(Value::as_mapping)
+                .and_then(|map| self.pattern(file, &item.pointer, map, None));
+            let when = self.predicates(file, &item.pointer, &item.map);
+            let after = string(&item.map, "after")
+                .and_then(parse_duration)
+                .unwrap_or(0);
+            if field(&item.map, "after").is_some() && after == 0 {
+                self.unsupported(
+                    file,
+                    &format!("{}/after", item.pointer),
+                    "playability.unsupported_delay",
+                    "unsupported delayed-work duration",
+                );
+            }
+            let effects = self.effects(file, &item.pointer, &item.map, false);
+            if self.unsupported.len() > unsupported_before {
+                self.unsupported_triggers.insert(item.id.clone());
+            }
+            let mut facts = Vec::new();
+            if let Some(values) = field(&item.map, "facts").and_then(Value::as_sequence) {
+                for (fact_index, value) in values.iter().enumerate() {
+                    let pointer = format!("{}/facts/{fact_index}", item.pointer);
+                    if let Some(fact) = located_at(file, value, pointer, Some(item.id.clone())) {
+                        facts.push(fact.id.clone());
+                        self.facts.insert(
+                            fact.id.clone(),
+                            FactRule {
+                                item: fact,
+                                on: None,
+                                when: Vec::new(),
+                                opening: false,
+                            },
+                        );
+                    }
+                }
+            }
+            self.triggers.insert(
+                item.id.clone(),
+                TriggerRule {
+                    once: bool_field(&item.map, "once").unwrap_or(true),
+                    item,
+                    on,
+                    when,
+                    after,
+                    effects,
+                    facts,
+                },
+            );
+        }
+    }
+
+    fn read_ends(&mut self, file: &SourceFile, section: &str, values: &[Value], legacy: bool) {
+        for (index, value) in values.iter().enumerate() {
+            let Some(item) = located(file, section, index, value, None) else {
+                continue;
+            };
+            let outcome = if legacy {
+                "won"
+            } else {
+                string(&item.map, "outcome").unwrap_or("unknown")
+            }
+            .to_string();
+            let requirements = strings(field(&item.map, "requires"));
+            let minimum_points = u64_field(&item.map, "minimum_points").unwrap_or(0);
+            let at_or_after = string(&item.map, "at_or_after").and_then(parse_clock);
+            let solution_condition = self.solution_target.as_deref() == Some(&item.id);
+            self.ends.push(EndRule {
+                item,
+                outcome,
+                requirements,
+                minimum_points,
+                at_or_after,
+                solution_condition,
+            });
+        }
+    }
+
+    fn read_points(&mut self, file: &SourceFile, item: &LocatedItem, kind: &'static str) {
+        let Some(points) = field(&item.map, "points").and_then(Value::as_mapping) else {
+            return;
+        };
+        let Some(value) = u64_field(points, "value") else {
+            return;
+        };
+        let max_claim_count = u64_field(points, "max_claim_count").unwrap_or(1);
+        if max_claim_count == 0 {
+            self.unsupported(
+                file,
+                &format!("{}/points/max_claim_count", item.pointer),
+                "playability.unsupported_points",
+                "zero-claim point award cannot contribute to a proof",
+            );
+            return;
+        }
+        self.point_awards.insert(
+            item.id.clone(),
+            PointAward {
+                source: item.id.clone(),
+                kind,
+                value,
+                max_claim_count,
+                requirements: strings(field(points, "requires")),
+            },
+        );
+    }
+
+    fn pattern(
+        &mut self,
+        file: &SourceFile,
+        pointer: &str,
+        map: &Mapping,
+        owner: Option<&str>,
+    ) -> Option<ActionPattern> {
+        if field(map, "actor").is_some() {
+            self.unsupported(
+                file,
+                &format!("{pointer}/actor"),
+                "playability.unsupported_authored_actor",
+                "authored non-player actors are outside the static action model",
+            );
+            return None;
+        }
+        let command = string(map, "command")?.to_string();
+        let mut bindings = BTreeMap::new();
+        if let Some(parameters) = field(map, "parameters").and_then(Value::as_mapping) {
+            for (name, values) in parameters {
+                let Some(name) = name.as_str() else { continue };
+                let mut ids = strings(Some(values));
+                for id in &mut ids {
+                    if id == "owner" {
+                        if let Some(owner) = owner {
+                            *id = owner.to_string();
+                        } else {
+                            self.unsupported(
+                                file,
+                                pointer,
+                                "playability.unsupported_owner",
+                                "`owner` cannot be resolved outside an owned fact",
+                            );
+                            return None;
+                        }
+                    }
+                }
+                ids.sort();
+                bindings.insert(name.to_string(), ids);
+            }
+        }
+        Some(ActionPattern { command, bindings })
+    }
+
+    fn predicates(&mut self, file: &SourceFile, pointer: &str, item: &Mapping) -> Vec<Predicate> {
+        let Some(when) = field(item, "when").and_then(Value::as_mapping) else {
+            return Vec::new();
+        };
+        let Some(all) = field(when, "all").and_then(Value::as_sequence) else {
+            self.unsupported(
+                file,
+                &format!("{pointer}/when"),
+                "playability.unsupported_condition",
+                "only deterministic `when.all` conditions are supported",
+            );
+            return vec![Predicate::Never];
+        };
+        let mut result = Vec::new();
+        for (index, value) in all.iter().enumerate() {
+            let Some(map) = value.as_mapping() else {
+                continue;
+            };
+            if let Some(id) = string(map, "knows")
+                .or_else(|| string(map, "flag"))
+                .or_else(|| string(map, "completed"))
+            {
+                result.push(Predicate::Has(id.to_string()));
+            } else if string(map, "owns").is_some() {
+                self.unsupported(
+                    file,
+                    &format!("{pointer}/when/all/{index}/owns"),
+                    "playability.unsupported_inventory_condition",
+                    "inventory ownership predicates are outside the static subset",
+                );
+                result.push(Predicate::Never);
+            } else if let Some(id) = string(map, "at") {
+                result.push(Predicate::At(id.to_string()));
+            } else if let Some(time) = field(map, "time").and_then(Value::as_mapping) {
+                let relation = string(time, "relation");
+                let minutes = string(time, "value").and_then(parse_clock);
+                match (relation, minutes) {
+                    (Some("after"), Some(minutes)) => result.push(Predicate::TimeAfter(minutes)),
+                    (Some("at"), Some(minutes)) => result.push(Predicate::TimeEqual(minutes)),
+                    (Some("before"), Some(minutes)) => result.push(Predicate::TimeBefore(minutes)),
+                    _ => {
+                        self.unsupported(
+                            file,
+                            &format!("{pointer}/when/all/{index}"),
+                            "playability.unsupported_time_condition",
+                            "unsupported time predicate",
+                        );
+                        result.push(Predicate::Never);
+                    }
+                }
+            } else {
+                self.unsupported(
+                    file,
+                    &format!("{pointer}/when/all/{index}"),
+                    "playability.unsupported_condition",
+                    "unsupported dynamic condition",
+                );
+                result.push(Predicate::Never);
+            }
+        }
+        result
+    }
+
+    fn effects(
+        &mut self,
+        file: &SourceFile,
+        pointer: &str,
+        item: &Mapping,
+        allow_route_effects: bool,
+    ) -> Vec<Effect> {
+        let mut result = Vec::new();
+        let Some(values) = field(item, "effects").and_then(Value::as_sequence) else {
+            return result;
+        };
+        for (index, value) in values.iter().enumerate() {
+            let Some(map) = value.as_mapping() else {
+                continue;
+            };
+            match string(map, "operation") {
+                Some("set_flag") if bool_field(map, "value") == Some(true) => {
+                    if let Some(id) = string(map, "flag") {
+                        result.push(Effect::SetFlag(id.to_string()));
+                    }
+                }
+                Some("advance_time") => {
+                    if let Some(minutes) = u64_field(map, "minutes") {
+                        result.push(Effect::AdvanceTime(minutes as u32));
+                    } else if field(map, "route").is_none() || !allow_route_effects {
+                        self.unsupported(
+                            file,
+                            &format!("{pointer}/effects/{index}"),
+                            "playability.unsupported_effect",
+                            "advance_time must use fixed minutes or a matched route",
+                        );
+                    }
+                }
+                Some("learn_fact") => {
+                    if let Some(id) = string(map, "fact_id") {
+                        result.push(Effect::LearnFact(id.to_string()));
+                    }
+                }
+                Some("establish_deduction") => {
+                    if let Some(id) = string(map, "deduction_id") {
+                        result.push(Effect::EstablishDeduction(id.to_string()));
+                    }
+                }
+                Some("move")
+                    if allow_route_effects
+                        && string(map, "setting")
+                            .is_some_and(|setting| setting.starts_with("param")) => {}
+                Some("move")
+                    if string(map, "setting")
+                        .is_some_and(|setting| setting.starts_with("param")) =>
+                {
+                    self.unsupported(
+                        file,
+                        &format!("{pointer}/effects/{index}"),
+                        "playability.unsupported_effect",
+                        "parameterized movement is only modeled for the built-in route command",
+                    );
+                }
+                Some("describe") => {}
+                Some(operation) => self.unsupported(
+                    file,
+                    &format!("{pointer}/effects/{index}"),
+                    "playability.unsupported_effect",
+                    &format!("effect `{operation}` is outside static analysis"),
+                ),
+                None => {}
+            }
+        }
+        result
+    }
+
+    fn unsupported(&mut self, file: &SourceFile, pointer: &str, code: &str, message: &str) {
+        self.unsupported.push(Unsupported {
+            code: code.to_string(),
+            message: message.to_string(),
+            path: file.path.clone(),
+            pointer: pointer.to_string(),
+            range: locate_pointer(file, pointer),
+        });
+    }
+
+    fn normalize(&mut self) {
+        self.routes
+            .sort_by(|a, b| (&a.id, &a.from, &a.to).cmp(&(&b.id, &b.from, &b.to)));
+        self.unsupported
+            .sort_by(|a, b| (&a.path, &a.pointer, &a.code).cmp(&(&b.path, &b.pointer, &b.code)));
+    }
+
+    fn search(&self) -> PlayabilityReport {
+        let mut queue = BinaryHeap::new();
+        let mut best = BTreeMap::<State, (u32, u32)>::new();
+        for entry in &self.entries {
+            let mut state = State {
+                entry: entry.clone(),
+                location: entry.clone(),
+                elapsed: 0,
+                facts: self
+                    .facts
+                    .values()
+                    .filter(|fact| fact.opening)
+                    .map(|fact| fact.item.id.clone())
+                    .collect(),
+                deductions: BTreeSet::new(),
+                flags: self.initial_flags.clone(),
+                completed: BTreeSet::new(),
+                pending: Vec::new(),
+                score: 0,
+                point_claims: BTreeMap::new(),
+            };
+            let mut unlocks = state.facts.clone();
+            self.settle(&mut state, None, &mut unlocks);
+            let node = Node {
+                state,
+                actions: 0,
+                route_actions: 0,
+                wait_minutes: 0,
+                steps: Vec::new(),
+                unlocks,
+            };
+            best.insert(node.state.clone(), (0, 0));
+            queue.push(QueueNode(node));
+        }
+        let mut proofs = BTreeMap::<String, Node>::new();
+        let mut explored = 0usize;
+        let mut bounded = false;
+        while let Some(QueueNode(node)) = queue.pop() {
+            if explored >= MAX_EXPLORED_STATES {
+                bounded = true;
+                break;
+            }
+            explored += 1;
+            if node.actions > 0 {
+                if let Some(end) = self
+                    .ends
+                    .iter()
+                    .find(|end| self.end_satisfied(end, &node.state))
+                {
+                    proofs.entry(end.item.id.clone()).or_insert(node);
+                    continue;
+                }
+            }
+            if node.actions >= MAX_ACTIONS || node.state.elapsed >= MAX_ELAPSED_MINUTES {
+                bounded = true;
+                continue;
+            }
+            for action in self.actions(&node.state) {
+                let mut next = node.clone();
+                next.actions += 1;
+                let before_elapsed = next.state.elapsed;
+                let before_unlocks = next.unlocks.clone();
+                if action.kind == "route" {
+                    next.route_actions += 1;
+                    next.state.location = action
+                        .to
+                        .clone()
+                        .unwrap_or_else(|| next.state.location.clone());
+                }
+                next.state.elapsed = next.state.elapsed.saturating_add(action.minutes);
+                self.apply_action(&mut next.state, &action, &mut next.unlocks);
+                self.settle(&mut next.state, Some(&action), &mut next.unlocks);
+                self.apply_point_awards(&mut next.state, &action, &mut next.unlocks);
+                let gained = next
+                    .unlocks
+                    .difference(&before_unlocks)
+                    .cloned()
+                    .collect::<Vec<_>>();
+                let elapsed = next.state.elapsed - before_elapsed;
+                if action.kind != "route" {
+                    next.wait_minutes += elapsed;
+                }
+                next.steps.push(PlayabilityStep {
+                    kind: action.kind.to_string(),
+                    action: action.id,
+                    from: action.from,
+                    to: action.to,
+                    elapsed_minutes: elapsed,
+                    unlocks: gained,
+                });
+                let cost = (next.actions, next.state.elapsed);
+                if best.get(&next.state).is_some_and(|known| *known <= cost) {
+                    continue;
+                }
+                best.insert(next.state.clone(), cost);
+                queue.push(QueueNode(next));
+            }
+        }
+        let terminal_paths = self.ends.iter().map(|end| {
+            if let Some(node) = proofs.get(&end.item.id) {
+                TerminalPathAnalysis { id: end.item.id.clone(), outcome: end.outcome.clone(), status: PlayabilityStatus::Proved, path: end.item.path.clone(), pointer: end.item.pointer.clone(), range: end.item.range, lower_bound: Some(PlayabilityLowerBound { entry_setting: node.state.entry.clone(), action_count: node.actions, route_action_count: node.route_actions, elapsed_minutes: node.state.elapsed, wait_minutes: node.wait_minutes, required_waits: self.triggers.values().filter(|trigger| trigger.after > 0 && node.state.completed.contains(&trigger.item.id)).map(|trigger| PlayabilityRequiredWait { trigger: trigger.item.id.clone(), delay_minutes: trigger.after }).collect(), ordered_steps: node.steps.clone(), pivotal_unlocks: node.unlocks.iter().cloned().collect() }), blocker: None }
+            } else {
+                let hard_missing = end
+                    .requirements
+                    .iter()
+                    .any(|requirement| !self.has_possible_producer(requirement));
+                let unsupported = self.unsupported.first();
+                let inconclusive = !hard_missing
+                    && (bounded || unsupported.is_some() || end.solution_condition);
+                let blocker = if hard_missing {
+                    self.blocker(end, &best)
+                } else if let Some(reason) = unsupported {
+                    PlayabilityBlocker { code: reason.code.clone(), message: reason.message.clone(), path: reason.path.clone(), pointer: reason.pointer.clone(), range: reason.range, chain: vec![end.item.id.clone()] }
+                } else if end.solution_condition {
+                    PlayabilityBlocker { code: "playability.unsupported_solution_selection".to_string(), message: "the authored Solve answer-selection contract is outside static proof; this path was not assumed reachable".to_string(), path: end.item.path.clone(), pointer: end.item.pointer.clone(), range: end.item.range, chain: vec![end.item.id.clone()] }
+                } else if bounded {
+                    PlayabilityBlocker { code: "playability.search_bound".to_string(), message: format!("analysis reached its deterministic bound of {MAX_EXPLORED_STATES} states, {MAX_ACTIONS} actions, or {MAX_ELAPSED_MINUTES} elapsed minutes"), path: end.item.path.clone(), pointer: end.item.pointer.clone(), range: end.item.range, chain: vec![end.item.id.clone()] }
+                } else {
+                    self.blocker(end, &best)
+                };
+                TerminalPathAnalysis { id: end.item.id.clone(), outcome: end.outcome.clone(), status: if inconclusive { PlayabilityStatus::Inconclusive } else { PlayabilityStatus::NotProved }, path: end.item.path.clone(), pointer: end.item.pointer.clone(), range: end.item.range, lower_bound: None, blocker: Some(blocker) }
+            }
+        }).collect();
+        PlayabilityReport {
+            model_version: MODEL_VERSION,
+            explored_states: explored,
+            bounded,
+            terminal_paths,
+        }
+    }
+
+    fn has_possible_producer(&self, requirement: &str) -> bool {
+        if has_id_in_initial_or_catalog(self, requirement) {
+            return true;
+        }
+        self.commands
+            .values()
+            .flat_map(|command| &command.effects)
+            .chain(self.triggers.values().flat_map(|trigger| &trigger.effects))
+            .any(|effect| match effect {
+                Effect::SetFlag(id) | Effect::LearnFact(id) | Effect::EstablishDeduction(id) => {
+                    id == requirement
+                }
+                Effect::AdvanceTime(_) => false,
+            })
+    }
+
+    fn actions(&self, state: &State) -> Vec<CandidateAction> {
+        let mut actions = Vec::new();
+        for route in &self.routes {
+            if route.from == state.location {
+                actions.push(CandidateAction {
+                    kind: "route",
+                    id: route.id.clone(),
+                    pattern: ActionPattern {
+                        command: "command.move".to_string(),
+                        bindings: BTreeMap::from([(
+                            "destination".to_string(),
+                            vec![route.to.clone()],
+                        )]),
+                    },
+                    from: Some(route.from.clone()),
+                    to: Some(route.to.clone()),
+                    minutes: route.minutes,
+                });
+            }
+            if route.bidirectional && route.to == state.location {
+                actions.push(CandidateAction {
+                    kind: "route",
+                    id: route.id.clone(),
+                    pattern: ActionPattern {
+                        command: "command.move".to_string(),
+                        bindings: BTreeMap::from([(
+                            "destination".to_string(),
+                            vec![route.from.clone()],
+                        )]),
+                    },
+                    from: Some(route.to.clone()),
+                    to: Some(route.from.clone()),
+                    minutes: route.minutes,
+                });
+            }
+        }
+        let mut patterns = BTreeMap::<String, ActionPattern>::new();
+        for pattern in self
+            .facts
+            .values()
+            .filter_map(|fact| fact.on.as_ref())
+            .chain(
+                self.triggers
+                    .values()
+                    .filter_map(|trigger| trigger.on.as_ref()),
+            )
+        {
+            patterns.insert(pattern_key(pattern), pattern.clone());
+        }
+        let uncovered_commands = self
+            .commands
+            .values()
+            .filter(|command| {
+                !command.requires_binding
+                    && !self.unsupported_commands.contains(&command.id)
+                    && !patterns
+                        .values()
+                        .any(|pattern| pattern.command == command.id)
+            })
+            .map(|command| command.id.clone())
+            .collect::<Vec<_>>();
+        for command_id in uncovered_commands {
+            patterns.insert(
+                command_id.clone(),
+                ActionPattern {
+                    command: command_id,
+                    bindings: BTreeMap::new(),
+                },
+            );
+        }
+        for pattern in patterns.into_values() {
+            if self.action_available(&pattern, state) {
+                let minutes = self
+                    .commands
+                    .get(&pattern.command)
+                    .map(|command| {
+                        command
+                            .effects
+                            .iter()
+                            .filter_map(|effect| match effect {
+                                Effect::AdvanceTime(value) => Some(*value),
+                                _ => None,
+                            })
+                            .sum()
+                    })
+                    .unwrap_or(0);
+                actions.push(CandidateAction {
+                    kind: if minutes > 0 { "wait" } else { "command" },
+                    id: pattern_key(&pattern),
+                    pattern,
+                    from: None,
+                    to: None,
+                    minutes,
+                });
+            }
+        }
+        for deduction in self.deductions.values() {
+            if !state.deductions.contains(&deduction.item.id)
+                && deduction.dependencies.iter().all(|id| has(state, id))
+            {
+                actions.push(CandidateAction {
+                    kind: "deduction",
+                    id: format!("command.deduce {}", deduction.item.id),
+                    pattern: ActionPattern {
+                        command: "command.deduce".to_string(),
+                        bindings: BTreeMap::new(),
+                    },
+                    from: None,
+                    to: None,
+                    minutes: 0,
+                });
+            }
+        }
+        actions.sort_by(|a, b| (&a.kind, &a.id, &a.to).cmp(&(&b.kind, &b.id, &b.to)));
+        actions
+    }
+
+    fn action_available(&self, pattern: &ActionPattern, state: &State) -> bool {
+        if !self.commands.contains_key(&pattern.command)
+            || self.unsupported_commands.contains(&pattern.command)
+        {
+            return false;
+        }
+        pattern.bindings.values().flatten().all(|id| {
+            if id.starts_with("setting.") {
+                id == &state.location
+            } else if id.starts_with("fact.")
+                || id.starts_with("deduction.")
+                || id.starts_with("flag.")
+                || id.starts_with("trigger.")
+            {
+                has(state, id)
+            } else if id.starts_with("entity.") || id.starts_with("character.") {
+                self.subject_locations.get(id) == Some(&state.location)
+                    && self
+                        .subject_requirements
+                        .get(id)
+                        .map_or(true, |requirements| {
+                            requirements.iter().all(|id| has(state, id))
+                        })
+            } else {
+                true
+            }
+        })
+    }
+
+    fn apply_point_awards(
+        &self,
+        state: &mut State,
+        action: &CandidateAction,
+        unlocks: &mut BTreeSet<String>,
+    ) {
+        let mut sources = vec![action.pattern.command.clone()];
+        if action.kind == "route" {
+            if let Some(to) = &action.to {
+                sources.push(to.clone());
+            }
+        }
+        if action.kind == "deduction" {
+            if let Some(id) = action.id.strip_prefix("command.deduce ") {
+                sources.push(id.to_string());
+            }
+        }
+        sources.sort();
+        sources.dedup();
+        for source in sources {
+            let Some(award) = self.point_awards.get(&source) else {
+                continue;
+            };
+            let claims = state.point_claims.get(&award.source).copied().unwrap_or(0);
+            if claims >= award.max_claim_count
+                || !award.requirements.iter().all(|id| has(state, id))
+            {
+                continue;
+            }
+            state.point_claims.insert(award.source.clone(), claims + 1);
+            state.score = state.score.saturating_add(award.value);
+            unlocks.insert(format!("score:{}:{}", award.kind, award.source));
+        }
+    }
+
+    fn apply_action(
+        &self,
+        state: &mut State,
+        action: &CandidateAction,
+        unlocks: &mut BTreeSet<String>,
+    ) {
+        if action.kind == "deduction" {
+            if let Some(id) = action.id.strip_prefix("command.deduce ") {
+                state.deductions.insert(id.to_string());
+                unlocks.insert(id.to_string());
+            }
+        }
+        if let Some(command) = self.commands.get(&action.pattern.command) {
+            for effect in &command.effects {
+                apply_effect(state, effect, unlocks);
+            }
+        }
+        for fact in self.facts.values() {
+            if fact
+                .on
+                .as_ref()
+                .is_some_and(|pattern| pattern_matches(pattern, &action.pattern))
+                && predicates_hold(&fact.when, state, self.initial_minutes)
+            {
+                state.facts.insert(fact.item.id.clone());
+                unlocks.insert(fact.item.id.clone());
+            }
+        }
+        for trigger in self.triggers.values() {
+            if self.unsupported_triggers.contains(&trigger.item.id) {
+                continue;
+            }
+            if trigger.once
+                && (state.completed.contains(&trigger.item.id)
+                    || state
+                        .pending
+                        .iter()
+                        .any(|pending| pending.trigger == trigger.item.id))
+            {
+                continue;
+            }
+            if trigger
+                .on
+                .as_ref()
+                .is_some_and(|pattern| pattern_matches(pattern, &action.pattern))
+                && predicates_hold(&trigger.when, state, self.initial_minutes)
+            {
+                if trigger.after > 0 {
+                    state.pending.push(Pending {
+                        due: state.elapsed.saturating_add(trigger.after),
+                        trigger: trigger.item.id.clone(),
+                    });
+                    state.pending.sort();
+                } else {
+                    complete_trigger(state, trigger, unlocks);
+                }
+            }
+        }
+    }
+
+    fn settle(
+        &self,
+        state: &mut State,
+        _action: Option<&CandidateAction>,
+        unlocks: &mut BTreeSet<String>,
+    ) {
+        loop {
+            let before = (
+                state.facts.len(),
+                state.deductions.len(),
+                state.flags.len(),
+                state.completed.len(),
+                state.pending.len(),
+            );
+            let due = state
+                .pending
+                .iter()
+                .filter(|pending| pending.due <= state.elapsed)
+                .cloned()
+                .collect::<Vec<_>>();
+            state.pending.retain(|pending| pending.due > state.elapsed);
+            for pending in due {
+                if let Some(trigger) = self.triggers.get(&pending.trigger) {
+                    complete_trigger(state, trigger, unlocks);
+                }
+            }
+            for fact in self.facts.values() {
+                if fact.on.is_none()
+                    && !fact.opening
+                    && predicates_hold(&fact.when, state, self.initial_minutes)
+                    && fact
+                        .item
+                        .owner
+                        .as_ref()
+                        .map_or(true, |owner| !owner.starts_with("trigger."))
+                {
+                    state.facts.insert(fact.item.id.clone());
+                    unlocks.insert(fact.item.id.clone());
+                }
+            }
+            for trigger in self.triggers.values() {
+                if self.unsupported_triggers.contains(&trigger.item.id) {
+                    continue;
+                }
+                if trigger.on.is_none()
+                    && !state.completed.contains(&trigger.item.id)
+                    && !state
+                        .pending
+                        .iter()
+                        .any(|pending| pending.trigger == trigger.item.id)
+                    && predicates_hold(&trigger.when, state, self.initial_minutes)
+                {
+                    if trigger.after > 0 {
+                        state.pending.push(Pending {
+                            due: state.elapsed.saturating_add(trigger.after),
+                            trigger: trigger.item.id.clone(),
+                        });
+                        state.pending.sort();
+                    } else {
+                        complete_trigger(state, trigger, unlocks);
+                    }
+                }
+            }
+            let after = (
+                state.facts.len(),
+                state.deductions.len(),
+                state.flags.len(),
+                state.completed.len(),
+                state.pending.len(),
+            );
+            if before == after {
+                break;
+            }
+        }
+    }
+
+    fn end_satisfied(&self, end: &EndRule, state: &State) -> bool {
+        !end.solution_condition
+            && end.requirements.iter().all(|id| has(state, id))
+            && state.score >= end.minimum_points
+            && end.at_or_after.map_or(true, |threshold| {
+                self.initial_minutes.saturating_add(state.elapsed) >= threshold
+            })
+    }
+
+    fn blocker(&self, end: &EndRule, states: &BTreeMap<State, (u32, u32)>) -> PlayabilityBlocker {
+        let mut missing = end
+            .requirements
+            .iter()
+            .filter(|id| !states.keys().any(|state| has(state, id)))
+            .cloned()
+            .collect::<Vec<_>>();
+        missing.sort();
+        let (code, message, chain, pointer) = if let Some(id) = missing.first() {
+            let requirement_index = end
+                .requirements
+                .iter()
+                .position(|requirement| requirement == id)
+                .unwrap_or(0);
+            let mut chain = vec![end.item.id.clone()];
+            chain.extend(self.missing_chain(id, states, &mut BTreeSet::new()));
+            (
+                "playability.missing_requirement",
+                format!(
+                    "no supported action can establish required `{id}`; blocked chain: {}",
+                    chain.join(" -> ")
+                ),
+                chain,
+                format!("{}/requires/{requirement_index}", end.item.pointer),
+            )
+        } else if end.minimum_points > states.keys().map(|state| state.score).max().unwrap_or(0) {
+            (
+                "playability.insufficient_score",
+                format!(
+                    "supported actions reach at most {} points, below required {}",
+                    states.keys().map(|state| state.score).max().unwrap_or(0),
+                    end.minimum_points
+                ),
+                vec![end.item.id.clone(), "minimum_points".to_string()],
+                format!("{}/minimum_points", end.item.pointer),
+            )
+        } else if end.at_or_after.is_some() {
+            (
+                "playability.route_time_blocked",
+                "no supported route or wait action advances the clock to this terminal threshold"
+                    .to_string(),
+                vec![end.item.id.clone(), "at_or_after".to_string()],
+                format!("{}/at_or_after", end.item.pointer),
+            )
+        } else {
+            (
+                "playability.precedence_blocked",
+                "the path is never the first satisfied authored terminal state".to_string(),
+                vec![end.item.id.clone()],
+                end.item.pointer.clone(),
+            )
+        };
+        PlayabilityBlocker {
+            code: code.to_string(),
+            message,
+            path: end.item.path.clone(),
+            pointer,
+            range: None,
+            chain,
+        }
+    }
+
+    fn missing_chain(
+        &self,
+        id: &str,
+        states: &BTreeMap<State, (u32, u32)>,
+        visiting: &mut BTreeSet<String>,
+    ) -> Vec<String> {
+        if !visiting.insert(id.to_string()) {
+            return vec![id.to_string()];
+        }
+        let next = if let Some(deduction) = self.deductions.get(id) {
+            deduction
+                .dependencies
+                .iter()
+                .find(|dependency| !states.keys().any(|state| has(state, dependency)))
+                .cloned()
+        } else if let Some(fact) = self.facts.get(id) {
+            fact.when
+                .iter()
+                .find_map(|predicate| match predicate {
+                    Predicate::Has(dependency)
+                        if !states.keys().any(|state| has(state, dependency)) =>
+                    {
+                        Some(dependency.clone())
+                    }
+                    _ => None,
+                })
+                .or_else(|| fact.on.as_ref().map(|on| on.command.clone()))
+        } else if let Some(trigger) = self.triggers.get(id) {
+            trigger.on.as_ref().map(|on| on.command.clone())
+        } else {
+            None
+        };
+        let mut chain = vec![id.to_string()];
+        if let Some(next) = next {
+            chain.extend(self.missing_chain(&next, states, visiting));
+        }
+        chain
+    }
+}
+
+fn complete_trigger(state: &mut State, trigger: &TriggerRule, unlocks: &mut BTreeSet<String>) {
+    state.completed.insert(trigger.item.id.clone());
+    unlocks.insert(trigger.item.id.clone());
+    for fact in &trigger.facts {
+        state.facts.insert(fact.clone());
+        unlocks.insert(fact.clone());
+    }
+    for effect in &trigger.effects {
+        apply_effect(state, effect, unlocks);
+    }
+}
+
+fn apply_effect(state: &mut State, effect: &Effect, unlocks: &mut BTreeSet<String>) {
+    match effect {
+        Effect::SetFlag(id) => {
+            state.flags.insert(id.clone());
+            unlocks.insert(id.clone());
+        }
+        Effect::AdvanceTime(_) => {}
+        Effect::LearnFact(id) => {
+            state.facts.insert(id.clone());
+            unlocks.insert(id.clone());
+        }
+        Effect::EstablishDeduction(id) => {
+            state.deductions.insert(id.clone());
+            unlocks.insert(id.clone());
+        }
+    }
+}
+
+fn predicates_hold(predicates: &[Predicate], state: &State, initial: u32) -> bool {
+    predicates.iter().all(|predicate| match predicate {
+        Predicate::Has(id) => has(state, id),
+        Predicate::At(id) => &state.location == id,
+        Predicate::TimeAfter(value) => initial.saturating_add(state.elapsed) > *value,
+        Predicate::TimeEqual(value) => initial.saturating_add(state.elapsed) == *value,
+        Predicate::TimeBefore(value) => initial.saturating_add(state.elapsed) < *value,
+        Predicate::Never => false,
+    })
+}
+
+fn has(state: &State, id: &str) -> bool {
+    state.facts.contains(id)
+        || state.deductions.contains(id)
+        || state.flags.contains(id)
+        || state.completed.contains(id)
+        || id == state.location
+}
+
+fn has_id_in_initial_or_catalog(model: &Model, id: &str) -> bool {
+    model.initial_flags.contains(id)
+        || model.facts.contains_key(id)
+        || model.deductions.contains_key(id)
+        || model.triggers.contains_key(id)
+        || model.entries.iter().any(|entry| entry == id)
+        || model
+            .routes
+            .iter()
+            .any(|route| route.from == id || route.to == id)
+        || id.starts_with("entity.")
+}
+
+fn pattern_matches(expected: &ActionPattern, actual: &ActionPattern) -> bool {
+    expected.command == actual.command
+        && expected
+            .bindings
+            .iter()
+            .all(|(name, ids)| actual.bindings.get(name) == Some(ids))
+}
+
+fn pattern_key(pattern: &ActionPattern) -> String {
+    let suffix = pattern
+        .bindings
+        .iter()
+        .flat_map(|(name, ids)| ids.iter().map(move |id| format!(" {name}={id}")))
+        .collect::<String>();
+    format!("{}{suffix}", pattern.command)
+}
+
+fn located(
+    file: &SourceFile,
+    section: &str,
+    index: usize,
+    value: &Value,
+    owner: Option<String>,
+) -> Option<LocatedItem> {
+    located_at(file, value, format!("/{section}/{index}"), owner)
+}
+fn located_at(
+    file: &SourceFile,
+    value: &Value,
+    pointer: String,
+    owner: Option<String>,
+) -> Option<LocatedItem> {
+    let map = value.as_mapping()?.clone();
+    let id = string(&map, "id")?.to_string();
+    Some(LocatedItem {
+        id: id.clone(),
+        path: file.path.clone(),
+        pointer: pointer.clone(),
+        range: locate_id(&file.source, &id),
+        map,
+        owner,
+    })
+}
+fn field<'a>(map: &'a Mapping, name: &str) -> Option<&'a Value> {
+    map.get(Value::String(name.to_string()))
+}
+fn map<'a>(map: &'a Mapping, name: &str) -> Option<&'a Mapping> {
+    field(map, name).and_then(Value::as_mapping)
+}
+fn sequence<'a>(map: &'a Mapping, name: &str) -> &'a [Value] {
+    field(map, name)
+        .and_then(Value::as_sequence)
+        .map(Vec::as_slice)
+        .unwrap_or(&[])
+}
+fn string<'a>(map: &'a Mapping, name: &str) -> Option<&'a str> {
+    field(map, name).and_then(Value::as_str)
+}
+fn bool_field(map: &Mapping, name: &str) -> Option<bool> {
+    field(map, name).and_then(Value::as_bool)
+}
+fn u64_field(map: &Mapping, name: &str) -> Option<u64> {
+    field(map, name).and_then(Value::as_u64)
+}
+fn strings(value: Option<&Value>) -> Vec<String> {
+    match value {
+        Some(Value::String(value)) => vec![value.clone()],
+        Some(Value::Sequence(values)) => values
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+fn parse_clock(value: &str) -> Option<u32> {
+    let (hour, minute) = value.split_once(':')?;
+    Some(hour.parse::<u32>().ok()? * 60 + minute.parse::<u32>().ok()?)
+}
+fn parse_duration(value: &str) -> Option<u32> {
+    let (number, unit) = value.split_at(value.len().checked_sub(1)?);
+    let amount = number.parse::<u32>().ok()?;
+    match unit {
+        "m" => Some(amount),
+        "h" => amount.checked_mul(60),
+        _ => None,
+    }
+}
+fn locate_id(source: &str, id: &str) -> Option<SourceRange> {
+    locate_scalar(source, id)
+}
+fn locate_pointer(file: &SourceFile, pointer: &str) -> Option<SourceRange> {
+    let field = pointer.rsplit('/').next()?;
+    (!field.chars().all(|character| character.is_ascii_digit()))
+        .then(|| locate_scalar(&file.source, field))
+        .flatten()
+}
+fn locate_scalar(source: &str, scalar: &str) -> Option<SourceRange> {
+    source.lines().enumerate().find_map(|(line, text)| {
+        text.find(scalar).map(|column| SourceRange {
+            start: Position {
+                line: line + 1,
+                column: column + 1,
+            },
+            end: Position {
+                line: line + 1,
+                column: column + scalar.len() + 1,
+            },
+        })
+    })
+}

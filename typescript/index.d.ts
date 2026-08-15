@@ -46,6 +46,61 @@ export interface ValidationReport {
   diagnostics: Diagnostic[]
   features?: string[]
   reference_text?: ResolvedReferenceText[]
+  playability?: PlayabilityReport
+}
+
+export type PlayabilityStatus = 'proved' | 'not_proved' | 'inconclusive'
+
+export interface PlayabilityReport {
+  model_version: number
+  explored_states: number
+  bounded: boolean
+  terminal_paths: TerminalPathAnalysis[]
+}
+
+export interface TerminalPathAnalysis {
+  id: string
+  outcome: string
+  status: PlayabilityStatus
+  path: string
+  pointer: string
+  range?: SourceRange
+  lower_bound?: PlayabilityLowerBound
+  blocker?: PlayabilityBlocker
+}
+
+export interface PlayabilityLowerBound {
+  entry_setting: string
+  action_count: number
+  route_action_count: number
+  elapsed_minutes: number
+  wait_minutes: number
+  required_waits: PlayabilityRequiredWait[]
+  ordered_steps: PlayabilityStep[]
+  pivotal_unlocks: string[]
+}
+
+export interface PlayabilityRequiredWait {
+  trigger: string
+  delay_minutes: number
+}
+
+export interface PlayabilityStep {
+  kind: string
+  action: string
+  from?: string
+  to?: string
+  elapsed_minutes: number
+  unlocks?: string[]
+}
+
+export interface PlayabilityBlocker {
+  code: string
+  message: string
+  path: string
+  pointer: string
+  range?: SourceRange
+  chain?: string[]
 }
 
 export type DisclosureClass =

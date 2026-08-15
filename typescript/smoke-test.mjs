@@ -128,6 +128,35 @@ assert.equal(
   false,
 )
 
+const playabilityFixtureRoot = new URL(
+  '../tests/fixtures/playability-analysis/',
+  import.meta.url,
+)
+const playabilityFiles = await Promise.all(
+  (await readdir(playabilityFixtureRoot)).map(async (path) => ({
+    path,
+    source: await readFile(new URL(path, playabilityFixtureRoot), 'utf8'),
+  })),
+)
+const playabilityReport = await validateRepository(playabilityFiles)
+assert.equal(playabilityReport.valid, true)
+assert.deepEqual(
+  playabilityReport.playability.terminal_paths.map(({ id, status }) => ({
+    id,
+    status,
+  })),
+  [
+    { id: 'end.delayed', status: 'proved' },
+    { id: 'end.proved', status: 'proved' },
+    { id: 'end.missing_action', status: 'not_proved' },
+  ],
+)
+assert.equal(
+  playabilityReport.playability.terminal_paths[0].lower_bound.required_waits[0]
+    .delay_minutes,
+  20,
+)
+
 const metadata = await referenceTextMetadata()
 assert.deepEqual(metadata.supported_features, ['reference_text_v1'])
 assert.ok(

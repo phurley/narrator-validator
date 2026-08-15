@@ -260,6 +260,215 @@ fn report(source: impl Into<String>) -> narrator_validator::ValidationReport {
     validate(&story_files(source.into()))
 }
 
+#[test]
+fn playability_report_proves_reachable_path_and_explains_action_and_time_blocks() {
+    let root = std::path::Path::new("tests/fixtures/playability-analysis");
+    let mut files = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            narrator_validator::SourceFile {
+                path: path.file_name().unwrap().to_string_lossy().into_owned(),
+                source: std::fs::read_to_string(path).unwrap(),
+            }
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    let report = narrator_validator::validate(&files);
+    let analysis = report.playability.expect("format 3 playability report");
+    let paths = analysis
+        .terminal_paths
+        .iter()
+        .map(|path| (path.id.as_str(), path))
+        .collect::<std::collections::BTreeMap<_, _>>();
+
+    let proved = paths["end.proved"];
+    assert_eq!(proved.status, narrator_validator::PlayabilityStatus::Proved);
+    let bound = proved.lower_bound.as_ref().unwrap();
+    assert_eq!(bound.action_count, 3);
+    assert_eq!(bound.route_action_count, 1);
+    assert_eq!(bound.elapsed_minutes, 10);
+    assert_eq!(bound.ordered_steps[0].kind, "route");
+    assert!(bound
+        .pivotal_unlocks
+        .contains(&"fact.sample_matches".to_string()));
+    assert!(bound
+        .pivotal_unlocks
+        .contains(&"deduction.solution".to_string()));
+    assert!(bound
+        .pivotal_unlocks
+        .contains(&"score:deduction:deduction.solution".to_string()));
+
+    let delayed = paths["end.delayed"];
+    assert_eq!(
+        delayed.status,
+        narrator_validator::PlayabilityStatus::Proved
+    );
+    let delayed_bound = delayed.lower_bound.as_ref().unwrap();
+    assert_eq!(delayed_bound.action_count, 4);
+    assert_eq!(delayed_bound.elapsed_minutes, 35);
+    assert_eq!(
+        delayed_bound.required_waits[0].trigger,
+        "trigger.delayed_analysis"
+    );
+    assert_eq!(delayed_bound.required_waits[0].delay_minutes, 20);
+
+    let missing = paths["end.missing_action"];
+    assert_eq!(
+        missing.status,
+        narrator_validator::PlayabilityStatus::NotProved
+    );
+    assert_eq!(
+        missing.blocker.as_ref().unwrap().code,
+        "playability.missing_requirement"
+    );
+    assert_eq!(
+        missing.blocker.as_ref().unwrap().pointer,
+        "/end_states/2/requires/0"
+    );
+
+    let again = narrator_validator::validate(&files).playability.unwrap();
+    assert_eq!(
+        analysis, again,
+        "analysis must be byte-stable over identical input"
+    );
+}
+
+#[test]
+fn playability_json_cli_matches_native_report() {
+    let root = std::path::Path::new("tests/fixtures/playability-analysis");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_narrator-validator"))
+        .args(["--format", "json", root.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let cli: narrator_validator::ValidationReport = serde_json::from_slice(&output.stdout).unwrap();
+    assert!(cli.playability.is_some());
+    assert_eq!(cli.playability.as_ref().unwrap().terminal_paths.len(), 3);
+}
+
+#[test]
+fn playability_reports_route_time_block_when_network_cannot_advance_enough() {
+    let root = std::path::Path::new("tests/fixtures/playability-analysis");
+    let mut files = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            narrator_validator::SourceFile {
+                path: path.file_name().unwrap().to_string_lossy().into_owned(),
+                source: std::fs::read_to_string(path).unwrap(),
+            }
+        })
+        .collect::<Vec<_>>();
+    let settings = files
+        .iter_mut()
+        .find(|file| file.path == "settings.yaml")
+        .unwrap();
+    settings.source = settings.source.replace(
+        "  - id: route.lab_entry\n    from: setting.lab\n    to: setting.entry\n    bidirectional: false\n    travel_minutes: 15\n",
+        "",
+    );
+    files
+        .iter_mut()
+        .find(|file| file.path == "commands.yaml")
+        .unwrap()
+        .source = "commands: []\n".to_string();
+    files
+        .iter_mut()
+        .find(|file| file.path == "triggers.yaml")
+        .unwrap()
+        .source = "triggers: []\n".to_string();
+    files
+        .iter_mut()
+        .find(|file| file.path == "end_states.yaml")
+        .unwrap()
+        .source = r#"end_states:
+  - id: end.route_time_blocked
+    name: Route time blocked
+    outcome: lost
+    resolution: failure
+    requires: [flag.clock_gate]
+    at_or_after: "23:00"
+    text: The route network cannot advance enough time.
+"#
+    .to_string();
+    let path = narrator_validator::validate(&files)
+        .playability
+        .unwrap()
+        .terminal_paths
+        .remove(0);
+    assert_eq!(
+        path.status,
+        narrator_validator::PlayabilityStatus::NotProved
+    );
+    assert_eq!(path.blocker.unwrap().code, "playability.route_time_blocked");
+}
+
+#[test]
+fn removing_a_path_action_cannot_leave_delayed_terminal_proved() {
+    let root = std::path::Path::new("tests/fixtures/playability-analysis");
+    let mut files = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            narrator_validator::SourceFile {
+                path: path.file_name().unwrap().to_string_lossy().into_owned(),
+                source: std::fs::read_to_string(path).unwrap(),
+            }
+        })
+        .collect::<Vec<_>>();
+    files
+        .iter_mut()
+        .find(|file| file.path == "commands.yaml")
+        .unwrap()
+        .source = "commands: []\n".to_string();
+    let report = narrator_validator::validate(&files);
+    let delayed = report
+        .playability
+        .unwrap()
+        .terminal_paths
+        .into_iter()
+        .find(|path| path.id == "end.delayed")
+        .unwrap();
+    assert_ne!(
+        delayed.status,
+        narrator_validator::PlayabilityStatus::Proved
+    );
+}
+
+#[test]
+fn unsupported_dynamic_effect_makes_unresolved_paths_conspicuously_inconclusive() {
+    let root = std::path::Path::new("tests/fixtures/playability-analysis");
+    let mut files = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            narrator_validator::SourceFile {
+                path: path.file_name().unwrap().to_string_lossy().into_owned(),
+                source: std::fs::read_to_string(path).unwrap(),
+            }
+        })
+        .collect::<Vec<_>>();
+    files.iter_mut().find(|file| file.path == "commands.yaml").unwrap().source.push_str(
+        "  - id: command.dynamic\n    name: Dynamic reset\n    effects:\n      - operation: set_flag\n        flag: flag.missing_action\n        value: true\n      - operation: set_flag\n        flag: flag.clock_gate\n        value: false\n",
+    );
+    let report = narrator_validator::validate(&files);
+    let missing = report
+        .playability
+        .unwrap()
+        .terminal_paths
+        .into_iter()
+        .find(|path| path.id == "end.missing_action")
+        .unwrap();
+    assert_eq!(
+        missing.status,
+        narrator_validator::PlayabilityStatus::Inconclusive
+    );
+    let blocker = missing.blocker.unwrap();
+    assert_eq!(blocker.code, "playability.unsupported_effect");
+    assert_eq!(blocker.path, "commands.yaml");
+    assert_eq!(blocker.pointer, "/commands/1/effects/1");
+}
+
 fn codes(source: impl Into<String>) -> Vec<String> {
     report(source)
         .diagnostics

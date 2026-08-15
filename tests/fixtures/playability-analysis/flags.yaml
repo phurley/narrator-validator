@@ -1,0 +1,9 @@
+flags:
+  - id: flag.clock_gate
+    name: Clock gate
+    description: A harmless initial condition for the time-only path.
+    initial_state: true
+  - id: flag.missing_action
+    name: Missing action
+    description: No authored action sets this otherwise valid persistent flag.
+    initial_state: false

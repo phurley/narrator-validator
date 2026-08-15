@@ -66,4 +66,7 @@ pub struct ValidationReport {
     /// Successfully resolved reference-aware fields and their ordered origins.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reference_text: Vec<crate::ResolvedReferenceText>,
+    /// Deterministic action-level reachability analysis for authored terminal paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub playability: Option<crate::PlayabilityReport>,
 }

@@ -698,6 +698,11 @@ both `requires` and deduction-valued `inputs`.
 
 ## Points and terminal states
 
+The validator also reports conservative action-level reachability separately
+from structural validity. See [Static playability analysis](docs/playability-analysis.md)
+for the deterministic supported subset, bounds, terminal statuses, lower-bound
+route/action/time evidence, and conspicuous handling of unsupported mechanics.
+
 Settings, entities, deductions, and commands may define an authoritative point
 award:
 
