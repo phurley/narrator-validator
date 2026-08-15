@@ -28,10 +28,18 @@ The search minimizes action count, then elapsed minutes, then stable state and
 action identity. It explores at most 25,000 states, 96 actions per path, and
 2,880 elapsed minutes.
 
+Authored route requirements are checked before traversal. Format 3.3+ question
+solutions contribute one exact `command.solve` action using the authored answer
+rows, so the selected solution end state participates in normal authored
+precedence. Fixed `advance_time` effects apply whether a command or trigger owns
+them.
+
 Non-monotonic effects, nested entity inventory transitions, entity point
-awards, arbitrary Solve answer selection, and condition forms outside this
-subset are reported as `inconclusive`. The complete notebook and engine state
-remain authoritative; this report is authoring analysis, not gameplay state.
+awards, and condition forms outside this subset are reported as `inconclusive`.
+If any unsupported behavior is present, an otherwise supported candidate is
+also downgraded rather than emitted as a false proof. The complete notebook and
+engine state remain authoritative; this report is authoring analysis, not
+gameplay state.
 
 Text CLI output prints one compact line per terminal path. `--format json`
 returns the full typed report used by browser consumers.

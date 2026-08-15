@@ -127,6 +127,16 @@ assert.equal(
   ),
   false,
 )
+const solveTerminal = solveReport.playability.terminal_paths.find(
+  ({ id }) => id === 'win.solve_case',
+)
+assert.equal(solveTerminal.status, 'proved')
+assert.equal(solveTerminal.lower_bound.action_count, 1)
+assert.equal(
+  solveTerminal.lower_bound.ordered_steps[0].action,
+  'command.solve [character.culprit] [setting.study entity.knife]',
+)
+assert.ok(solveTerminal.lower_bound.pivotal_unlocks.includes('solution.correct'))
 
 const playabilityFixtureRoot = new URL(
   '../tests/fixtures/playability-analysis/',

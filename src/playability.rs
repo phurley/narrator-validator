@@ -109,6 +109,7 @@ struct Route {
     to: String,
     minutes: u32,
     bidirectional: bool,
+    requirements: Vec<String>,
 }
 
 #[derive(Clone, Default)]
@@ -213,6 +214,7 @@ struct Model {
     subject_requirements: BTreeMap<String, Vec<String>>,
     unsupported_commands: BTreeSet<String>,
     unsupported_triggers: BTreeSet<String>,
+    solve_action: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -233,6 +235,7 @@ struct State {
     pending: Vec<Pending>,
     score: u64,
     point_claims: BTreeMap<String, u64>,
+    solution_solved: bool,
 }
 
 #[derive(Clone)]
@@ -308,6 +311,29 @@ impl Model {
                     .unwrap_or(0);
                 if let Some(solution) = map(root, "solution") {
                     model.solution_target = string(solution, "win_state").map(str::to_string);
+                    model.solve_action = field(solution, "questions")
+                        .and_then(Value::as_sequence)
+                        .filter(|questions| !questions.is_empty())
+                        .and_then(|questions| {
+                            questions
+                                .iter()
+                                .map(|question| {
+                                    question
+                                        .as_mapping()
+                                        .map(|question| strings(field(question, "answer")))
+                                        .filter(|answer| !answer.is_empty())
+                                })
+                                .collect::<Option<Vec<_>>>()
+                        })
+                        .map(|answers| {
+                            let mut action = "command.solve".to_string();
+                            for answer in answers {
+                                action.push_str(" [");
+                                action.push_str(&answer.join(" "));
+                                action.push(']');
+                            }
+                            action
+                        });
                 }
                 if let Some(ruleset) = map(case, "ruleset") {
                     if let (Some(id), Some(version)) =
@@ -369,6 +395,7 @@ impl Model {
                 to: to.to_string(),
                 minutes,
                 bidirectional: bool_field(&item.map, "bidirectional").unwrap_or(false),
+                requirements: strings(field(&item.map, "requires")),
             });
         }
     }
@@ -843,6 +870,7 @@ impl Model {
                 pending: Vec::new(),
                 score: 0,
                 point_claims: BTreeMap::new(),
+                solution_solved: false,
             };
             let mut unlocks = state.facts.clone();
             self.settle(&mut state, None, &mut unlocks);
@@ -922,7 +950,9 @@ impl Model {
             }
         }
         let terminal_paths = self.ends.iter().map(|end| {
-            if let Some(node) = proofs.get(&end.item.id) {
+            if let Some(reason) = self.unsupported.first().filter(|_| proofs.contains_key(&end.item.id)) {
+                TerminalPathAnalysis { id: end.item.id.clone(), outcome: end.outcome.clone(), status: PlayabilityStatus::Inconclusive, path: end.item.path.clone(), pointer: end.item.pointer.clone(), range: end.item.range, lower_bound: None, blocker: Some(PlayabilityBlocker { code: reason.code.clone(), message: format!("a supported path was found, but `{}` may change its result; the path is not reported as proved", reason.message), path: reason.path.clone(), pointer: reason.pointer.clone(), range: reason.range, chain: vec![end.item.id.clone()] }) }
+            } else if let Some(node) = proofs.get(&end.item.id) {
                 TerminalPathAnalysis { id: end.item.id.clone(), outcome: end.outcome.clone(), status: PlayabilityStatus::Proved, path: end.item.path.clone(), pointer: end.item.pointer.clone(), range: end.item.range, lower_bound: Some(PlayabilityLowerBound { entry_setting: node.state.entry.clone(), action_count: node.actions, route_action_count: node.route_actions, elapsed_minutes: node.state.elapsed, wait_minutes: node.wait_minutes, required_waits: self.triggers.values().filter(|trigger| trigger.after > 0 && node.state.completed.contains(&trigger.item.id)).map(|trigger| PlayabilityRequiredWait { trigger: trigger.item.id.clone(), delay_minutes: trigger.after }).collect(), ordered_steps: node.steps.clone(), pivotal_unlocks: node.unlocks.iter().cloned().collect() }), blocker: None }
             } else {
                 let hard_missing = end
@@ -937,7 +967,7 @@ impl Model {
                 } else if let Some(reason) = unsupported {
                     PlayabilityBlocker { code: reason.code.clone(), message: reason.message.clone(), path: reason.path.clone(), pointer: reason.pointer.clone(), range: reason.range, chain: vec![end.item.id.clone()] }
                 } else if end.solution_condition {
-                    PlayabilityBlocker { code: "playability.unsupported_solution_selection".to_string(), message: "the authored Solve answer-selection contract is outside static proof; this path was not assumed reachable".to_string(), path: end.item.path.clone(), pointer: end.item.pointer.clone(), range: end.item.range, chain: vec![end.item.id.clone()] }
+                    PlayabilityBlocker { code: "playability.unsupported_solution_selection".to_string(), message: "the authored Solve contract could not be represented as one exact supported action".to_string(), path: end.item.path.clone(), pointer: end.item.pointer.clone(), range: end.item.range, chain: vec![end.item.id.clone()] }
                 } else if bounded {
                     PlayabilityBlocker { code: "playability.search_bound".to_string(), message: format!("analysis reached its deterministic bound of {MAX_EXPLORED_STATES} states, {MAX_ACTIONS} actions, or {MAX_ELAPSED_MINUTES} elapsed minutes"), path: end.item.path.clone(), pointer: end.item.pointer.clone(), range: end.item.range, chain: vec![end.item.id.clone()] }
                 } else {
@@ -973,7 +1003,7 @@ impl Model {
     fn actions(&self, state: &State) -> Vec<CandidateAction> {
         let mut actions = Vec::new();
         for route in &self.routes {
-            if route.from == state.location {
+            if route.from == state.location && route.requirements.iter().all(|id| has(state, id)) {
                 actions.push(CandidateAction {
                     kind: "route",
                     id: route.id.clone(),
@@ -989,7 +1019,10 @@ impl Model {
                     minutes: route.minutes,
                 });
             }
-            if route.bidirectional && route.to == state.location {
+            if route.bidirectional
+                && route.to == state.location
+                && route.requirements.iter().all(|id| has(state, id))
+            {
                 actions.push(CandidateAction {
                     kind: "route",
                     id: route.id.clone(),
@@ -1023,11 +1056,12 @@ impl Model {
             .commands
             .values()
             .filter(|command| {
-                !command.requires_binding
-                    && !self.unsupported_commands.contains(&command.id)
-                    && !patterns
+                !(command.requires_binding
+                    || self.unsupported_commands.contains(&command.id)
+                    || (command.id == "command.solve" && self.solve_action.is_some())
+                    || patterns
                         .values()
-                        .any(|pattern| pattern.command == command.id)
+                        .any(|pattern| pattern.command == command.id))
             })
             .map(|command| command.id.clone())
             .collect::<Vec<_>>();
@@ -1042,27 +1076,41 @@ impl Model {
         }
         for pattern in patterns.into_values() {
             if self.action_available(&pattern, state) {
-                let minutes = self
+                let advances_time = self
                     .commands
                     .get(&pattern.command)
                     .map(|command| {
                         command
                             .effects
                             .iter()
-                            .filter_map(|effect| match effect {
-                                Effect::AdvanceTime(value) => Some(*value),
-                                _ => None,
-                            })
-                            .sum()
+                            .any(|effect| matches!(effect, Effect::AdvanceTime(_)))
                     })
-                    .unwrap_or(0);
+                    .unwrap_or(false);
                 actions.push(CandidateAction {
-                    kind: if minutes > 0 { "wait" } else { "command" },
+                    kind: if advances_time { "wait" } else { "command" },
                     id: pattern_key(&pattern),
                     pattern,
                     from: None,
                     to: None,
-                    minutes,
+                    minutes: 0,
+                });
+            }
+        }
+        if !state.solution_solved
+            && self.commands.contains_key("command.solve")
+            && !self.unsupported_commands.contains("command.solve")
+        {
+            if let Some(action) = &self.solve_action {
+                actions.push(CandidateAction {
+                    kind: "solve",
+                    id: action.clone(),
+                    pattern: ActionPattern {
+                        command: "command.solve".to_string(),
+                        bindings: BTreeMap::new(),
+                    },
+                    from: None,
+                    to: None,
+                    minutes: 0,
                 });
             }
         }
@@ -1132,6 +1180,10 @@ impl Model {
             if let Some(id) = action.id.strip_prefix("command.deduce ") {
                 sources.push(id.to_string());
             }
+        }
+        if action.kind == "solve" {
+            state.solution_solved = true;
+            unlocks.insert("solution.correct".to_string());
         }
         sources.sort();
         sources.dedup();
@@ -1288,7 +1340,7 @@ impl Model {
     }
 
     fn end_satisfied(&self, end: &EndRule, state: &State) -> bool {
-        !end.solution_condition
+        (!end.solution_condition || state.solution_solved)
             && end.requirements.iter().all(|id| has(state, id))
             && state.score >= end.minimum_points
             && end.at_or_after.map_or(true, |threshold| {
@@ -1416,7 +1468,9 @@ fn apply_effect(state: &mut State, effect: &Effect, unlocks: &mut BTreeSet<Strin
             state.flags.insert(id.clone());
             unlocks.insert(id.clone());
         }
-        Effect::AdvanceTime(_) => {}
+        Effect::AdvanceTime(minutes) => {
+            state.elapsed = state.elapsed.saturating_add(*minutes);
+        }
         Effect::LearnFact(id) => {
             state.facts.insert(id.clone());
             unlocks.insert(id.clone());

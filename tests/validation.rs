@@ -337,13 +337,25 @@ fn playability_report_proves_reachable_path_and_explains_action_and_time_blocks(
 #[test]
 fn playability_json_cli_matches_native_report() {
     let root = std::path::Path::new("tests/fixtures/playability-analysis");
+    let mut files = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            narrator_validator::SourceFile {
+                path: path.file_name().unwrap().to_string_lossy().into_owned(),
+                source: std::fs::read_to_string(path).unwrap(),
+            }
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    let native = narrator_validator::validate(&files);
+
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_narrator-validator"))
         .args(["--format", "json", root.to_str().unwrap()])
         .output()
         .unwrap();
     let cli: narrator_validator::ValidationReport = serde_json::from_slice(&output.stdout).unwrap();
-    assert!(cli.playability.is_some());
-    assert_eq!(cli.playability.as_ref().unwrap().terminal_paths.len(), 3);
+    assert_eq!(cli.playability, native.playability);
 }
 
 #[test]
@@ -469,6 +481,210 @@ fn unsupported_dynamic_effect_makes_unresolved_paths_conspicuously_inconclusive(
     assert_eq!(blocker.pointer, "/commands/1/effects/1");
 }
 
+#[test]
+fn playability_never_traverses_an_unmet_authored_route_requirement() {
+    let root = std::path::Path::new("tests/fixtures/playability-analysis");
+    let mut files = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            narrator_validator::SourceFile {
+                path: path.file_name().unwrap().to_string_lossy().into_owned(),
+                source: std::fs::read_to_string(path).unwrap(),
+            }
+        })
+        .collect::<Vec<_>>();
+    files
+        .iter_mut()
+        .find(|file| file.path == "settings.yaml")
+        .unwrap()
+        .source = files
+        .iter()
+        .find(|file| file.path == "settings.yaml")
+        .unwrap()
+        .source
+        .replace(
+            "    travel_minutes: 10\n",
+            "    travel_minutes: 10\n    requires: [entity.sample]\n",
+        );
+
+    let report = narrator_validator::validate(&files);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    for id in ["end.delayed", "end.proved"] {
+        let terminal = report
+            .playability
+            .as_ref()
+            .unwrap()
+            .terminal_paths
+            .iter()
+            .find(|path| path.id == id)
+            .unwrap();
+        assert_ne!(
+            terminal.status,
+            narrator_validator::PlayabilityStatus::Proved
+        );
+    }
+}
+
+#[test]
+fn unsupported_matching_trigger_downgrades_an_apparent_proof_to_inconclusive() {
+    let root = std::path::Path::new("tests/fixtures/playability-analysis");
+    let mut files = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            narrator_validator::SourceFile {
+                path: path.file_name().unwrap().to_string_lossy().into_owned(),
+                source: std::fs::read_to_string(path).unwrap(),
+            }
+        })
+        .collect::<Vec<_>>();
+    files
+        .iter_mut()
+        .find(|file| file.path == "end_states.yaml")
+        .unwrap()
+        .source = files
+        .iter()
+        .find(|file| file.path == "end_states.yaml")
+        .unwrap()
+        .source
+        .replace(
+            "    requires: [deduction.solution]\n",
+            "    requires: [deduction.solution, flag.clock_gate]\n",
+        );
+    files
+        .iter_mut()
+        .find(|file| file.path == "triggers.yaml")
+        .unwrap()
+        .source
+        .push_str(
+            "  - id: trigger.invalidate_proof\n    name: Invalidate proof\n    on:\n      command: command.examine\n      parameters: { target: entity.sample }\n    effects:\n      - operation: set_flag\n        flag: flag.clock_gate\n        value: false\n",
+        );
+
+    let report = narrator_validator::validate(&files);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    let terminal = report
+        .playability
+        .unwrap()
+        .terminal_paths
+        .into_iter()
+        .find(|path| path.id == "end.proved")
+        .unwrap();
+    assert_eq!(
+        terminal.status,
+        narrator_validator::PlayabilityStatus::Inconclusive
+    );
+    assert_eq!(
+        terminal.blocker.unwrap().code,
+        "playability.unsupported_effect"
+    );
+}
+
+#[test]
+fn trigger_advance_time_participates_in_cost_deadlines_and_precedence() {
+    let root = std::path::Path::new("tests/fixtures/playability-analysis");
+    let mut files = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            narrator_validator::SourceFile {
+                path: path.file_name().unwrap().to_string_lossy().into_owned(),
+                source: std::fs::read_to_string(path).unwrap(),
+            }
+        })
+        .collect::<Vec<_>>();
+    let settings = files
+        .iter_mut()
+        .find(|file| file.path == "settings.yaml")
+        .unwrap();
+    settings.source = settings.source.replace(
+        "  - id: route.lab_entry\n    from: setting.lab\n    to: setting.entry\n    bidirectional: false\n    travel_minutes: 15\n",
+        "",
+    );
+    files
+        .iter_mut()
+        .find(|file| file.path == "triggers.yaml")
+        .unwrap()
+        .source
+        .push_str(
+            "  - id: trigger.advance_clock\n    name: Advance clock\n    on:\n      command: command.examine\n      parameters: { target: entity.sample }\n    effects:\n      - operation: advance_time\n        minutes: 20\n",
+        );
+    let ends = files
+        .iter_mut()
+        .find(|file| file.path == "end_states.yaml")
+        .unwrap();
+    ends.source = ends.source.replacen(
+        "end_states:\n",
+        "end_states:\n  - id: end.deadline\n    name: Deadline\n    outcome: lost\n    resolution: failure\n    at_or_after: \"20:15\"\n    text: The clock expired.\n",
+        1,
+    );
+
+    let report = narrator_validator::validate(&files);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    let analysis = report.playability.unwrap();
+    let deadline = analysis
+        .terminal_paths
+        .iter()
+        .find(|path| path.id == "end.deadline")
+        .unwrap();
+    assert_eq!(
+        deadline.status,
+        narrator_validator::PlayabilityStatus::Proved
+    );
+    let bound = deadline.lower_bound.as_ref().unwrap();
+    assert_eq!(bound.action_count, 2);
+    assert_eq!(bound.elapsed_minutes, 30);
+    assert_eq!(bound.wait_minutes, 20);
+    assert_ne!(
+        analysis
+            .terminal_paths
+            .iter()
+            .find(|path| path.id == "end.proved")
+            .unwrap()
+            .status,
+        narrator_validator::PlayabilityStatus::Proved
+    );
+}
+
+#[test]
+fn authored_solution_questions_produce_one_exact_supported_solve_action() {
+    let root = std::path::Path::new("tests/fixtures/format-3.3-solve-card-sets");
+    let mut files = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            narrator_validator::SourceFile {
+                path: path.file_name().unwrap().to_string_lossy().into_owned(),
+                source: std::fs::read_to_string(path).unwrap(),
+            }
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+
+    let report = narrator_validator::validate(&files);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    let terminal = report
+        .playability
+        .unwrap()
+        .terminal_paths
+        .into_iter()
+        .find(|path| path.id == "win.solve_case")
+        .unwrap();
+    assert_eq!(
+        terminal.status,
+        narrator_validator::PlayabilityStatus::Proved
+    );
+    let bound = terminal.lower_bound.unwrap();
+    assert_eq!(bound.action_count, 1);
+    assert_eq!(
+        bound.ordered_steps[0].action,
+        "command.solve [character.culprit] [setting.study entity.knife]"
+    );
+    assert!(bound
+        .pivotal_unlocks
+        .contains(&"solution.correct".to_string()));
+}
+
 fn codes(source: impl Into<String>) -> Vec<String> {
     report(source)
         .diagnostics
@@ -588,7 +804,7 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_3_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_3_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "1.4.0");
+    assert_eq!(report.validator_version, "1.5.0");
     assert_eq!(report.format_version.as_deref(), Some("3.0.0"));
     assert!(report.diagnostics.is_empty());
 }
