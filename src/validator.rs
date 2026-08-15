@@ -11,8 +11,8 @@ use crate::{
     MAX_SOLUTION_ANSWER_CARDS, MAX_SOLUTION_QUESTIONS, MIN_SOLUTION_ANSWER_CARDS,
     MIN_SOLUTION_QUESTIONS, REFERENCE_TEXT_FEATURE, STANDARD_MYSTERY_RULESET_ID,
     STANDARD_MYSTERY_RULESET_VERSION_2, STANDARD_MYSTERY_RULESET_VERSION_3,
-    STANDARD_MYSTERY_RULESET_VERSION_4, STORY_FORMAT_VERSION, SUPPORTED_FEATURES,
-    VALIDATOR_VERSION,
+    STANDARD_MYSTERY_RULESET_VERSION_4, STANDARD_MYSTERY_RULESET_VERSION_5, STORY_FORMAT_VERSION,
+    SUPPORTED_FEATURES, VALIDATOR_VERSION,
 };
 
 const MAX_REPOSITORY_FILES: usize = 512;
@@ -403,8 +403,17 @@ impl<'a> Validator<'a> {
             ruleset.id == STANDARD_MYSTERY_RULESET_ID
                 && matches!(
                     ruleset.version.as_str(),
-                    STANDARD_MYSTERY_RULESET_VERSION_3 | STANDARD_MYSTERY_RULESET_VERSION_4
+                    STANDARD_MYSTERY_RULESET_VERSION_3
+                        | STANDARD_MYSTERY_RULESET_VERSION_4
+                        | STANDARD_MYSTERY_RULESET_VERSION_5
                 )
+        })
+    }
+
+    fn uses_solution_target_requirements(&self) -> bool {
+        self.ruleset.as_ref().is_some_and(|ruleset| {
+            ruleset.id == STANDARD_MYSTERY_RULESET_ID
+                && ruleset.version == STANDARD_MYSTERY_RULESET_VERSION_5
         })
     }
 
@@ -1615,13 +1624,16 @@ impl<'a> Validator<'a> {
             return;
         }
         if reference.id == STANDARD_MYSTERY_RULESET_ID
-            && reference.version == STANDARD_MYSTERY_RULESET_VERSION_4
+            && matches!(
+                reference.version.as_str(),
+                STANDARD_MYSTERY_RULESET_VERSION_4 | STANDARD_MYSTERY_RULESET_VERSION_5
+            )
             && !self.is_format_3_4_or_later()
         {
             self.push(
                 Severity::Error,
                 "ruleset.format_incompatible",
-                "ruleset.standard_mystery@4.0.0 declares automatic/manual notebook mechanics and the authored-question Solve contract; set `case.format_version` to \"3.4.0\" or select an earlier ruleset version"
+                "ruleset.standard_mystery@4.0.0 and @5.0.0 declare automatic/manual notebook mechanics and the authored-question Solve contract; set `case.format_version` to \"3.4.0\" or select an earlier ruleset version"
                     .to_string(),
                 &case.path,
                 Some(format!("{pointer}/version")),
@@ -2356,7 +2368,7 @@ impl<'a> Validator<'a> {
             self.push(
                 Severity::Error,
                 "solution.missing_question_contract",
-                "ruleset.standard_mystery@3.0.0 and @4.0.0 require a `solution` block with `win_state` and `questions`"
+                "ruleset.standard_mystery@3.0.0, @4.0.0, and @5.0.0 require a `solution` block with `win_state` and `questions`"
                     .to_string(),
                 "case.yaml",
                 Some("/solution".to_string()),
@@ -2407,7 +2419,7 @@ impl<'a> Validator<'a> {
                 self.push(
                     Severity::Error,
                     "solution.format_incompatible",
-                    "authored solution questions require Format 3.3 or later and ruleset.standard_mystery@3.0.0 or @4.0.0"
+                    "authored solution questions require Format 3.3 or later and ruleset.standard_mystery@3.0.0, @4.0.0, or @5.0.0"
                         .to_string(),
                     &path,
                     Some("/solution".to_string()),
@@ -2450,7 +2462,7 @@ impl<'a> Validator<'a> {
             self.push(
                 Severity::Error,
                 "solution.ruleset_incompatible",
-                "authored questions require `case.ruleset` ruleset.standard_mystery@3.0.0 or @4.0.0"
+                "authored questions require `case.ruleset` ruleset.standard_mystery@3.0.0, @4.0.0, or @5.0.0"
                     .to_string(),
                 path,
                 Some("/solution".to_string()),
@@ -3009,8 +3021,43 @@ impl<'a> Validator<'a> {
                 .get(Value::String("minimum_points".to_string()))
                 .and_then(Value::as_u64)
                 .is_some_and(|minimum| minimum > 0);
+            let declares_points = end_state
+                .mapping
+                .contains_key(Value::String("minimum_points".to_string()));
             let has_time = string_field(&end_state.mapping, "at_or_after").is_some_and(valid_time);
             let is_solution_target = solution_target.as_deref() == Some(&end_state.id);
+            if is_solution_target && self.uses_solution_target_requirements() {
+                if let Some(Value::Sequence(requirements)) =
+                    end_state.mapping.get(Value::String("requires".to_string()))
+                {
+                    for (index, requirement) in requirements.iter().enumerate() {
+                        let Some(requirement_id) = requirement.as_str() else {
+                            continue;
+                        };
+                        let has_unsupported_kind = self
+                            .definitions
+                            .get(requirement_id)
+                            .is_some_and(|definition| {
+                                !matches!(
+                                    definition.kind,
+                                    Kind::Flag | Kind::Fact | Kind::Deduction
+                                )
+                            });
+                        if has_unsupported_kind {
+                            self.push(
+                                Severity::Error,
+                                "end_states.solution_requirement_kind",
+                                "a ruleset-5 solution target requirement must identify a persistent flag, fact, or deduction"
+                                    .to_string(),
+                                &end_state.path,
+                                Some(format!("{}/requires/{index}", end_state.pointer)),
+                                None,
+                                Some(end_state.id.clone()),
+                            );
+                        }
+                    }
+                }
+            }
             if is_solution_target && outcome == Some("lost") {
                 self.push(
                     Severity::Error,
@@ -3023,7 +3070,10 @@ impl<'a> Validator<'a> {
                     Some(end_state.id.clone()),
                 );
             }
-            if is_solution_target && (has_requirements || has_points || has_time) {
+            if is_solution_target
+                && !self.uses_solution_target_requirements()
+                && (has_requirements || has_points || has_time)
+            {
                 self.push(
                     Severity::Error,
                     "end_states.solution_condition_conflict",
@@ -3045,6 +3095,32 @@ impl<'a> Validator<'a> {
                     None,
                     Some(end_state.id.clone()),
                 );
+            }
+            if is_solution_target && self.uses_solution_target_requirements() {
+                if declares_points {
+                    self.push(
+                        Severity::Error,
+                        "end_states.solution_condition_conflict",
+                        "a ruleset-5 solution target may declare persistent `requires`, but must not declare `minimum_points`; correct answers and the target requirements are its complete condition"
+                            .to_string(),
+                        &end_state.path,
+                        Some(format!("{}/minimum_points", end_state.pointer)),
+                        None,
+                        Some(end_state.id.clone()),
+                    );
+                }
+                if has_time {
+                    self.push(
+                        Severity::Error,
+                        "end_states.solution_condition_conflict",
+                        "a ruleset-5 solution target may declare persistent `requires`, but must not declare `at_or_after`; correct answers and the target requirements are its complete condition"
+                            .to_string(),
+                        &end_state.path,
+                        Some(format!("{}/at_or_after", end_state.pointer)),
+                        None,
+                        Some(end_state.id.clone()),
+                    );
+                }
             }
 
             for key in end_state.mapping.keys().filter_map(Value::as_str) {

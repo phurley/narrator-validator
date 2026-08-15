@@ -9,8 +9,9 @@ pub const STANDARD_MYSTERY_RULESET_VERSION_1: &str = "1.0.0";
 pub const STANDARD_MYSTERY_RULESET_VERSION_2: &str = "2.0.0";
 pub const STANDARD_MYSTERY_RULESET_VERSION_3: &str = "3.0.0";
 pub const STANDARD_MYSTERY_RULESET_VERSION_4: &str = "4.0.0";
+pub const STANDARD_MYSTERY_RULESET_VERSION_5: &str = "5.0.0";
 /// Latest standard mystery ruleset authored by this validator release.
-pub const STANDARD_MYSTERY_RULESET_VERSION: &str = STANDARD_MYSTERY_RULESET_VERSION_4;
+pub const STANDARD_MYSTERY_RULESET_VERSION: &str = STANDARD_MYSTERY_RULESET_VERSION_5;
 
 /// A story's exact ruleset selection. Released versions are append-only: an
 /// existing `(id, version)` pair must never be changed in place.
@@ -40,10 +41,10 @@ pub struct RulesetCommandCapability {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RulesetError {
-    #[error("unknown ruleset `{id}`; supported rulesets: ruleset.standard_mystery@1.0.0, @2.0.0, @3.0.0, and @4.0.0")]
+    #[error("unknown ruleset `{id}`; supported rulesets: ruleset.standard_mystery@1.0.0, @2.0.0, @3.0.0, @4.0.0, and @5.0.0")]
     Unknown { id: String },
     #[error(
-        "ruleset `{id}` does not support version `{version}`; use version 1.0.0, 2.0.0, 3.0.0, or 4.0.0"
+        "ruleset `{id}` does not support version `{version}`; use version 1.0.0, 2.0.0, 3.0.0, 4.0.0, or 5.0.0"
     )]
     IncompatibleVersion { id: String, version: String },
 }
@@ -70,6 +71,10 @@ pub fn resolve_ruleset(reference: &RulesetReference) -> Result<ResolvedRuleset, 
         STANDARD_MYSTERY_RULESET_VERSION_4 => (
             standard_mystery_commands_4_0_yaml(),
             NOTEBOOK_COMMAND_CAPABILITIES,
+        ),
+        STANDARD_MYSTERY_RULESET_VERSION_5 => (
+            standard_mystery_commands_5_0_yaml(),
+            RECONCILIATION_COMMAND_CAPABILITIES,
         ),
         _ => {
             return Err(RulesetError::IncompatibleVersion {
@@ -108,6 +113,29 @@ const NOTEBOOK_COMMAND_CAPABILITIES: &[RulesetCommandCapability] = &[
         command_id: "command.deduce",
         mechanic: "establish_deduction",
         enabled_when: "manual_deductions",
+    },
+    RulesetCommandCapability {
+        command_id: "command.solve",
+        mechanic: "submit_solution",
+        enabled_when: "always",
+    },
+];
+
+const RECONCILIATION_COMMAND_CAPABILITIES: &[RulesetCommandCapability] = &[
+    RulesetCommandCapability {
+        command_id: "command.claim",
+        mechanic: "claim_fact",
+        enabled_when: "manual_facts",
+    },
+    RulesetCommandCapability {
+        command_id: "command.deduce",
+        mechanic: "establish_deduction",
+        enabled_when: "manual_deductions",
+    },
+    RulesetCommandCapability {
+        command_id: "command.reconcile",
+        mechanic: "reconcile_notebooks",
+        enabled_when: "multiple_players_with_unshared_facts",
     },
     RulesetCommandCapability {
         command_id: "command.solve",
@@ -437,6 +465,29 @@ fn standard_mystery_commands_4_0_yaml() -> &'static str {
         .as_str()
 }
 
+fn standard_mystery_commands_5_0_yaml() -> &'static str {
+    const SOLVE: &str = r#"  - id: command.solve
+    name: Solve
+    description: Answer the story's authored solution questions with physical cards.
+"#;
+    const RECONCILE_AND_SOLVE: &str = r#"  - id: command.reconcile
+    name: Reconcile
+    description: Compare claimed notebook facts with every joined player.
+
+  - id: command.solve
+    name: Solve
+    description: Answer the story's authored solution questions with physical cards.
+"#;
+    static CATALOG: OnceLock<String> = OnceLock::new();
+    CATALOG
+        .get_or_init(|| {
+            let resolved = standard_mystery_commands_4_0_yaml().replace(SOLVE, RECONCILE_AND_SOLVE);
+            assert_ne!(resolved, standard_mystery_commands_4_0_yaml());
+            resolved
+        })
+        .as_str()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -633,6 +684,63 @@ mod tests {
                     command_id: "command.deduce",
                     mechanic: "establish_deduction",
                     enabled_when: "manual_deductions",
+                },
+                RulesetCommandCapability {
+                    command_id: "command.solve",
+                    mechanic: "submit_solution",
+                    enabled_when: "always",
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn standard_catalog_5_0_adds_only_parameterless_reconcile_and_its_capability() {
+        let version_4 = resolve_ruleset(&RulesetReference {
+            id: STANDARD_MYSTERY_RULESET_ID.to_string(),
+            version: STANDARD_MYSTERY_RULESET_VERSION_4.to_string(),
+        })
+        .expect("standard ruleset 4.0");
+        let resolved = resolve_ruleset(&RulesetReference {
+            id: STANDARD_MYSTERY_RULESET_ID.to_string(),
+            version: STANDARD_MYSTERY_RULESET_VERSION_5.to_string(),
+        })
+        .expect("standard ruleset 5.0");
+        let document: serde_yaml::Value =
+            serde_yaml::from_str(resolved.commands_yaml).expect("catalog YAML");
+        let commands = document["commands"].as_sequence().expect("commands");
+        let reconcile = commands
+            .iter()
+            .filter(|command| command["id"].as_str() == Some("command.reconcile"))
+            .collect::<Vec<_>>();
+        assert_eq!(reconcile.len(), 1);
+        assert!(reconcile[0].get("parameters").is_none());
+        assert!(reconcile[0].get("effects").is_none());
+
+        let version_5_without_reconcile = resolved
+            .commands_yaml
+            .replace(
+                "  - id: command.reconcile\n    name: Reconcile\n    description: Compare claimed notebook facts with every joined player.\n\n",
+                "",
+            );
+        assert_eq!(version_5_without_reconcile, version_4.commands_yaml);
+        assert_eq!(
+            resolved.command_capabilities,
+            [
+                RulesetCommandCapability {
+                    command_id: "command.claim",
+                    mechanic: "claim_fact",
+                    enabled_when: "manual_facts",
+                },
+                RulesetCommandCapability {
+                    command_id: "command.deduce",
+                    mechanic: "establish_deduction",
+                    enabled_when: "manual_deductions",
+                },
+                RulesetCommandCapability {
+                    command_id: "command.reconcile",
+                    mechanic: "reconcile_notebooks",
+                    enabled_when: "multiple_players_with_unshared_facts",
                 },
                 RulesetCommandCapability {
                     command_id: "command.solve",

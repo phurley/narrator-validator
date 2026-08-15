@@ -6,7 +6,7 @@ use serde::Serialize;
 
 use crate::{
     DisclosureClass, STANDARD_MYSTERY_RULESET_ID, STANDARD_MYSTERY_RULESET_VERSION_3,
-    STANDARD_MYSTERY_RULESET_VERSION_4,
+    STANDARD_MYSTERY_RULESET_VERSION_4, STANDARD_MYSTERY_RULESET_VERSION_5,
 };
 
 pub const MIN_SOLUTION_QUESTIONS: usize = 1;
@@ -20,7 +20,7 @@ pub struct SolutionContractMetadata {
     pub story_format_version: &'static str,
     pub ruleset_id: &'static str,
     pub ruleset_version: &'static str,
-    pub compatible_ruleset_versions: [&'static str; 2],
+    pub compatible_ruleset_versions: [&'static str; 3],
     pub min_questions: usize,
     pub max_questions: usize,
     pub min_answer_cards: usize,
@@ -38,6 +38,7 @@ pub fn solution_contract_metadata() -> SolutionContractMetadata {
         compatible_ruleset_versions: [
             STANDARD_MYSTERY_RULESET_VERSION_3,
             STANDARD_MYSTERY_RULESET_VERSION_4,
+            STANDARD_MYSTERY_RULESET_VERSION_5,
         ],
         min_questions: MIN_SOLUTION_QUESTIONS,
         max_questions: MAX_SOLUTION_QUESTIONS,

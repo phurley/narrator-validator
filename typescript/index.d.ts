@@ -216,12 +216,20 @@ export interface RulesetCommand {
 
 export interface StandardMysteryRuleset {
   id: 'ruleset.standard_mystery'
-  version: '1.0.0' | '2.0.0' | '3.0.0' | '4.0.0'
+  version: '1.0.0' | '2.0.0' | '3.0.0' | '4.0.0' | '5.0.0'
   commands: RulesetCommand[]
   command_capabilities: Array<{
     command_id: string
-    mechanic: 'claim_fact' | 'establish_deduction' | 'submit_solution'
-    enabled_when: 'manual_facts' | 'manual_deductions' | 'always'
+    mechanic:
+      | 'claim_fact'
+      | 'establish_deduction'
+      | 'reconcile_notebooks'
+      | 'submit_solution'
+    enabled_when:
+      | 'manual_facts'
+      | 'manual_deductions'
+      | 'multiple_players_with_unshared_facts'
+      | 'always'
   }>
 }
 
@@ -229,7 +237,7 @@ export interface SolutionContractMetadata {
   story_format_version: '3.3.0'
   ruleset_id: 'ruleset.standard_mystery'
   ruleset_version: '3.0.0'
-  compatible_ruleset_versions: ['3.0.0', '4.0.0']
+  compatible_ruleset_versions: ['3.0.0', '4.0.0', '5.0.0']
   min_questions: 1
   max_questions: 4
   min_answer_cards: 1

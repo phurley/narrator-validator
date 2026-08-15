@@ -52,3 +52,6 @@ from a guess about prose meaning.
 Use `ruleset.standard_mystery@4.0.0` with story format 3.4 when all four policy
 paths must be playable. Its exported semantic command capabilities tell the
 runtime when Claim and Deduce should be visible while keeping Solve distinct.
+Ruleset `5.0.0` adds deliberate multiplayer Reconcile. It transfers claimed
+facts only; deductions remain player-scoped and are established by the same
+automatic closure or manual Deduce policy after reconciliation.

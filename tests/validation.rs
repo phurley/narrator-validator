@@ -1188,7 +1188,7 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_3_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_3_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "1.6.0");
+    assert_eq!(report.validator_version, "1.7.0");
     assert_eq!(report.format_version.as_deref(), Some("3.0.0"));
     assert!(report.diagnostics.is_empty());
 }
@@ -1253,6 +1253,22 @@ fn standard_ruleset_4_0_is_the_format_3_4_manual_notebook_catalog() {
     }));
 }
 
+#[test]
+fn standard_ruleset_5_0_is_format_3_4_and_adds_reconciliation() {
+    let source =
+        format_3_4_end_state_story().replacen("version: \"3.0.0\"", "version: \"5.0.0\"", 1);
+    let valid_report = report(source);
+    assert!(valid_report.valid, "{:#?}", valid_report.diagnostics);
+    assert_eq!(valid_report.playability.unwrap().notebook_policies.len(), 4);
+
+    let incompatible =
+        report(format_3_3_question_story().replacen("version: \"3.0.0\"", "version: \"5.0.0\"", 1));
+    assert!(incompatible.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "ruleset.format_incompatible"
+            && diagnostic.pointer.as_deref() == Some("/case/ruleset/version")
+    }));
+}
+
 fn format_3_3_question_story() -> String {
     VALID_FORMAT_3_STORY
         .replace(
@@ -1278,6 +1294,16 @@ fn format_3_4_end_state_story() -> String {
         .replace(
             "win_states:\n  - id: win.solve_case\n    name: Solved the case\n    text: You answer every question correctly.\n",
             &end_states,
+        )
+}
+
+fn format_3_4_ruleset_5_solution_prerequisite_story() -> String {
+    format_3_4_end_state_story()
+        .replacen("version: \"3.0.0\"", "version: \"5.0.0\"", 1)
+        .replacen(
+            "    text: You answer every question and explain the complete case.",
+            "    requires: [flag.knife_examined]\n    text: You answer every question and explain the complete case.",
+            1,
         )
 }
 
@@ -1641,7 +1667,9 @@ fn rejects_unknown_and_incompatible_rulesets_with_version_guidance() {
         .iter()
         .find(|diagnostic| diagnostic.code == "ruleset.unsupported")
         .expect("incompatible ruleset diagnostic");
-    assert!(diagnostic.message.contains("1.0.0, 2.0.0, 3.0.0, or 4.0.0"));
+    assert!(diagnostic
+        .message
+        .contains("1.0.0, 2.0.0, 3.0.0, 4.0.0, or 5.0.0"));
 }
 
 #[test]
@@ -1948,6 +1976,68 @@ fn format_3_4_end_states_express_full_partial_deadline_and_condition_outcomes() 
 }
 
 #[test]
+fn ruleset_5_allows_only_persistent_requirements_on_the_solution_target() {
+    for requirement in [
+        "flag.knife_examined",
+        "fact.knife_is_present",
+        "deduction.solution",
+    ] {
+        let valid = report(format_3_4_ruleset_5_solution_prerequisite_story().replacen(
+            "    requires: [flag.knife_examined]\n    text: You answer every question",
+            &format!("    requires: [{requirement}]\n    text: You answer every question"),
+            1,
+        ));
+        assert!(valid.valid, "{requirement}: {:#?}", valid.diagnostics);
+    }
+
+    for requirement in ["setting.study", "entity.knife", "trigger.investigate_knife"] {
+        let invalid = report(format_3_4_ruleset_5_solution_prerequisite_story().replacen(
+            "    requires: [flag.knife_examined]\n    text: You answer every question",
+            &format!("    requires: [{requirement}]\n    text: You answer every question"),
+            1,
+        ));
+        assert!(
+            invalid.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "end_states.solution_requirement_kind"
+                    && diagnostic.pointer.as_deref() == Some("/end_states/0/requires/0")
+            }),
+            "missing precise unsupported-kind diagnostic for {requirement}: {:#?}",
+            invalid.diagnostics
+        );
+    }
+
+    let ruleset_4 = report(format_3_4_ruleset_5_solution_prerequisite_story().replacen(
+        "version: \"5.0.0\"",
+        "version: \"4.0.0\"",
+        1,
+    ));
+    assert!(ruleset_4.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "end_states.solution_condition_conflict"
+            && diagnostic.pointer.as_deref() == Some("/end_states/0")
+    }));
+
+    for (field, pointer) in [
+        ("    minimum_points: 0\n", "/end_states/0/minimum_points"),
+        ("    minimum_points: 1\n", "/end_states/0/minimum_points"),
+        ("    at_or_after: \"21:00\"\n", "/end_states/0/at_or_after"),
+    ] {
+        let invalid = report(format_3_4_ruleset_5_solution_prerequisite_story().replacen(
+            "    requires: [flag.knife_examined]\n",
+            &format!("    requires: [flag.knife_examined]\n{field}"),
+            1,
+        ));
+        assert!(
+            invalid.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "end_states.solution_condition_conflict"
+                    && diagnostic.pointer.as_deref() == Some(pointer)
+            }),
+            "missing precise {pointer}: {:#?}",
+            invalid.diagnostics
+        );
+    }
+}
+
+#[test]
 fn format_3_4_end_state_contract_metadata_makes_precedence_and_migration_explicit() {
     let metadata = end_state_contract_metadata();
     assert_eq!(metadata.story_format_version, "3.4.0");
@@ -2086,8 +2176,8 @@ fn format_3_4_allows_specific_full_resolution_before_broader_partial_resolution(
 }
 
 #[test]
-fn format_3_4_native_and_cli_reports_are_in_parity() {
-    let files = story_files(format_3_4_end_state_story());
+fn ruleset_5_solution_prerequisite_native_and_cli_reports_are_in_parity() {
+    let files = story_files(format_3_4_ruleset_5_solution_prerequisite_story());
     let native = validate(&files);
     assert!(native.valid, "{:#?}", native.diagnostics);
 
