@@ -19,11 +19,22 @@ Each ordered terminal path has one status:
   bound could affect the result. Unsupported behavior is never assumed to
   succeed.
 
-Model version 1 starts at every `case.entry_settings` location with opening
-facts and initial flags. It models routes and `travel_minutes`, exact `on`
+Model version 2 starts at every `case.entry_settings` location with opening
+facts and initial flags. The top-level compatibility summary uses the default
+`auto_facts: true`, `auto_deductions: true` policy. `notebook_policies` contains
+all four policy combinations; manual facts become explicit Claim steps and
+manual deductions become explicit Deduce steps when the selected ruleset
+provides those mechanics. It models routes and `travel_minutes`, exact `on`
 command bindings, monotonic `when.all` predicates, fixed time advances,
 positive flag assignment, fact and deduction establishment, delayed trigger
 facts, setting/command/deduction point awards, and ordered end-state conditions.
+
+`deduction_graph` reports deterministic `maximum_depth`,
+`largest_cascade_size`, its root, and the ordered deduction IDs in that
+cascade. Each policy also reports `solution_answerability`. It is `proved` only
+when an established deduction's explicit structural `solves` mapping covers a
+complete physical `solution.questions` answer row; ambiguous prose remains
+`inconclusive` or `not_proved` rather than being guessed.
 The search minimizes action count, then elapsed minutes, then stable state and
 action identity. It explores at most 25,000 states, 96 actions per path, and
 2,880 elapsed minutes.

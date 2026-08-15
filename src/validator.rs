@@ -10,8 +10,9 @@ use crate::{
     RulesetReference, Severity, SourceFile, SourceRange, ValidationReport, CONSUMER_FIELDS,
     MAX_SOLUTION_ANSWER_CARDS, MAX_SOLUTION_QUESTIONS, MIN_SOLUTION_ANSWER_CARDS,
     MIN_SOLUTION_QUESTIONS, REFERENCE_TEXT_FEATURE, STANDARD_MYSTERY_RULESET_ID,
-    STANDARD_MYSTERY_RULESET_VERSION_2, STANDARD_MYSTERY_RULESET_VERSION_3, STORY_FORMAT_VERSION,
-    SUPPORTED_FEATURES, VALIDATOR_VERSION,
+    STANDARD_MYSTERY_RULESET_VERSION_2, STANDARD_MYSTERY_RULESET_VERSION_3,
+    STANDARD_MYSTERY_RULESET_VERSION_4, STORY_FORMAT_VERSION, SUPPORTED_FEATURES,
+    VALIDATOR_VERSION,
 };
 
 const MAX_REPOSITORY_FILES: usize = 512;
@@ -400,7 +401,10 @@ impl<'a> Validator<'a> {
     fn uses_question_solution_ruleset(&self) -> bool {
         self.ruleset.as_ref().is_some_and(|ruleset| {
             ruleset.id == STANDARD_MYSTERY_RULESET_ID
-                && ruleset.version == STANDARD_MYSTERY_RULESET_VERSION_3
+                && matches!(
+                    ruleset.version.as_str(),
+                    STANDARD_MYSTERY_RULESET_VERSION_3 | STANDARD_MYSTERY_RULESET_VERSION_4
+                )
         })
     }
 
@@ -519,6 +523,9 @@ impl<'a> Validator<'a> {
             }
         }
         self.validate_deduction_values(&deductions, fact_claims_enabled);
+        if fact_claims_enabled {
+            self.validate_automatic_deduction_safety(&deductions, &end_states, &win_states);
+        }
         self.validate_command_values(&commands);
         self.validate_point_awards(&[
             settings.as_slice(),
@@ -1607,6 +1614,22 @@ impl<'a> Validator<'a> {
             );
             return;
         }
+        if reference.id == STANDARD_MYSTERY_RULESET_ID
+            && reference.version == STANDARD_MYSTERY_RULESET_VERSION_4
+            && !self.is_format_3_4_or_later()
+        {
+            self.push(
+                Severity::Error,
+                "ruleset.format_incompatible",
+                "ruleset.standard_mystery@4.0.0 declares automatic/manual notebook mechanics and the authored-question Solve contract; set `case.format_version` to \"3.4.0\" or select an earlier ruleset version"
+                    .to_string(),
+                &case.path,
+                Some(format!("{pointer}/version")),
+                None,
+                Some(case.id.clone()),
+            );
+            return;
+        }
         match resolve_ruleset(&reference) {
             Ok(_) => self.ruleset = Some(reference),
             Err(error) => self.push(
@@ -2333,7 +2356,7 @@ impl<'a> Validator<'a> {
             self.push(
                 Severity::Error,
                 "solution.missing_question_contract",
-                "ruleset.standard_mystery@3.0.0 requires a Format 3.3 `solution` block with `win_state` and `questions`"
+                "ruleset.standard_mystery@3.0.0 and @4.0.0 require a `solution` block with `win_state` and `questions`"
                     .to_string(),
                 "case.yaml",
                 Some("/solution".to_string()),
@@ -2384,7 +2407,7 @@ impl<'a> Validator<'a> {
                 self.push(
                     Severity::Error,
                     "solution.format_incompatible",
-                    "authored solution questions require Format 3.3 and ruleset.standard_mystery@3.0.0"
+                    "authored solution questions require Format 3.3 or later and ruleset.standard_mystery@3.0.0 or @4.0.0"
                         .to_string(),
                     &path,
                     Some("/solution".to_string()),
@@ -2427,7 +2450,7 @@ impl<'a> Validator<'a> {
             self.push(
                 Severity::Error,
                 "solution.ruleset_incompatible",
-                "Format 3.3 authored questions require `case.ruleset` ruleset.standard_mystery@3.0.0"
+                "authored questions require `case.ruleset` ruleset.standard_mystery@3.0.0 or @4.0.0"
                     .to_string(),
                 path,
                 Some("/solution".to_string()),
@@ -4717,6 +4740,243 @@ impl<'a> Validator<'a> {
         }
     }
 
+    fn validate_automatic_deduction_safety(
+        &mut self,
+        deductions: &[Item],
+        end_states: &[Item],
+        win_states: &[Item],
+    ) {
+        let solution_rows = self.solution_answer_rows();
+        let deduction_ids = deductions
+            .iter()
+            .map(|deduction| deduction.id.as_str())
+            .collect::<BTreeSet<_>>();
+        let depended_on = deductions
+            .iter()
+            .flat_map(|deduction| string_list_field(&deduction.mapping, "inputs"))
+            .filter(|input| deduction_ids.contains(input.as_str()))
+            .collect::<BTreeSet<_>>();
+        let mut solution_equivalent = BTreeSet::new();
+
+        for deduction in deductions {
+            if bool_field(&deduction.mapping, "truth") == Some(false) {
+                let pointer = format!("{}/truth", deduction.pointer);
+                self.push(
+                    Severity::Error,
+                    "deduction.automatic_false",
+                    "every authored deduction may be established automatically; retire false deductions or model a future non-authoritative hypothesis instead"
+                        .to_string(),
+                    &deduction.path,
+                    Some(pointer.clone()),
+                    locate_yaml_pointer_value(&deduction.source, &pointer),
+                    Some(deduction.id.clone()),
+                );
+            }
+
+            let conclusion = string_field(&deduction.mapping, "conclusion").unwrap_or_default();
+            let normalized = normalize_notebook_prose(conclusion);
+            if contains_speculative_language(&normalized) {
+                let pointer = format!("{}/conclusion", deduction.pointer);
+                self.push(
+                    Severity::Warning,
+                    "deduction.automatic_speculative",
+                    "this conclusion is phrased as speculation but may be established automatically as authoritative notebook knowledge"
+                        .to_string(),
+                    &deduction.path,
+                    Some(pointer.clone()),
+                    locate_yaml_pointer_value(&deduction.source, &pointer),
+                    Some(deduction.id.clone()),
+                );
+            }
+            if bool_field(&deduction.mapping, "truth") != Some(false)
+                && !string_list_field(&deduction.mapping, "contradicted_by").is_empty()
+            {
+                let pointer = format!("{}/contradicted_by", deduction.pointer);
+                self.push(
+                    Severity::Warning,
+                    "deduction.automatic_contradictable",
+                    "this authoritative deduction declares contradictory knowledge; review whether automatic establishment can expose a conclusion the story later retracts"
+                        .to_string(),
+                    &deduction.path,
+                    Some(pointer.clone()),
+                    locate_yaml_pointer_value(&deduction.source, &pointer),
+                    Some(deduction.id.clone()),
+                );
+            }
+
+            if depended_on.contains(deduction.id.as_str())
+                && normalized.split_whitespace().count() <= 3
+            {
+                let pointer = format!("{}/conclusion", deduction.pointer);
+                self.push(
+                    Severity::Warning,
+                    "deduction.mechanical_relay",
+                    "this deduction is used as a relay node but contributes very little player-facing information; combine or rewrite the chain"
+                        .to_string(),
+                    &deduction.path,
+                    Some(pointer.clone()),
+                    locate_yaml_pointer_value(&deduction.source, &pointer),
+                    Some(deduction.id.clone()),
+                );
+            }
+
+            let explicit = deduction
+                .mapping
+                .get(Value::String("solves".to_string()))
+                .and_then(Value::as_mapping)
+                .map(|solves| {
+                    ["culprit", "weapon", "location"]
+                        .iter()
+                        .filter_map(|field| string_field(solves, field))
+                        .map(str::to_string)
+                        .collect::<BTreeSet<_>>()
+                })
+                .unwrap_or_default();
+            let requirements = string_list_field(&deduction.mapping, "requires")
+                .into_iter()
+                .collect::<BTreeSet<_>>();
+            let mentioned = solution_rows
+                .iter()
+                .flatten()
+                .filter(|answer| {
+                    conclusion.contains(answer.as_str())
+                        || self.definition_name(answer).is_some_and(|name| {
+                            normalized.contains(&normalize_notebook_prose(name))
+                        })
+                })
+                .cloned()
+                .collect::<BTreeSet<_>>();
+            let fully_copies_row = solution_rows.iter().any(|row| {
+                !row.is_empty()
+                    && row.iter().all(|answer| {
+                        explicit.contains(answer)
+                            || requirements.contains(answer)
+                            || mentioned.contains(answer)
+                    })
+                    && (row.len() > 1
+                        || explicit.contains(&row[0])
+                        || requirements.contains(&row[0])
+                        || self.definition_name(&row[0]).is_some_and(|name| {
+                            normalize_notebook_prose(name) == normalized
+                                || normalize_notebook_prose(&row[0]) == normalized
+                        }))
+            });
+            let physical_answers = solution_rows.iter().flatten().collect::<BTreeSet<_>>();
+            let explicit_overlap = explicit
+                .iter()
+                .chain(requirements.iter())
+                .any(|answer| physical_answers.contains(answer));
+            if fully_copies_row {
+                solution_equivalent.insert(deduction.id.clone());
+                let pointer = format!("{}/conclusion", deduction.pointer);
+                self.push(
+                    Severity::Warning,
+                    "deduction.solution_equivalent",
+                    "this automatic notebook conclusion duplicates a complete authored Solve answer; keep the deduction as an intermediate insight and leave final commitment to `solution.questions`"
+                        .to_string(),
+                    &deduction.path,
+                    Some(pointer.clone()),
+                    locate_yaml_pointer_value(&deduction.source, &pointer),
+                    Some(deduction.id.clone()),
+                );
+            } else if explicit_overlap {
+                let pointer = format!(
+                    "{}/{}",
+                    deduction.pointer,
+                    if explicit.is_empty() {
+                        "requires"
+                    } else {
+                        "solves"
+                    }
+                );
+                self.push(
+                    Severity::Warning,
+                    "deduction.solution_answer_overlap",
+                    "deduction `solves` repeats a physical authored Solve answer; review whether automatic establishment would pre-answer the question"
+                        .to_string(),
+                    &deduction.path,
+                    Some(pointer.clone()),
+                    locate_yaml_pointer_value(&deduction.source, &pointer),
+                    Some(deduction.id.clone()),
+                );
+            }
+        }
+
+        if self.is_format_3_3_or_later() {
+            for terminal in end_states.iter().chain(win_states) {
+                for (index, requirement) in string_list_field(&terminal.mapping, "requires")
+                    .iter()
+                    .enumerate()
+                {
+                    if solution_equivalent.contains(requirement) {
+                        let pointer = format!("{}/requires/{index}", terminal.pointer);
+                        self.push(
+                            Severity::Warning,
+                            "end_state.solution_equivalent_deduction",
+                            "this terminal path depends on a solution-equivalent deduction instead of the authoritative Solve result"
+                                .to_string(),
+                            &terminal.path,
+                            Some(pointer.clone()),
+                            locate_yaml_pointer_value(&terminal.source, &pointer),
+                            Some(terminal.id.clone()),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn solution_answer_rows(&self) -> Vec<Vec<String>> {
+        self.parsed
+            .iter()
+            .find_map(|file| {
+                let solution = file
+                    .value
+                    .as_mapping()?
+                    .get(Value::String("solution".to_string()))?
+                    .as_mapping()?;
+                if let Some(questions) = solution
+                    .get(Value::String("questions".to_string()))
+                    .and_then(Value::as_sequence)
+                {
+                    return Some(
+                        questions
+                            .iter()
+                            .filter_map(Value::as_mapping)
+                            .map(|question| string_list_field(question, "answer"))
+                            .filter(|answer| !answer.is_empty())
+                            .collect(),
+                    );
+                }
+                Some(vec![["culprit", "weapon", "location"]
+                    .iter()
+                    .filter_map(|field| string_field(solution, field))
+                    .map(str::to_string)
+                    .collect()])
+            })
+            .unwrap_or_default()
+    }
+
+    fn definition_name(&self, id: &str) -> Option<&str> {
+        self.parsed.iter().find_map(|file| {
+            let root = file.value.as_mapping()?;
+            for section in ["settings", "characters", "entities"] {
+                for value in root
+                    .get(Value::String(section.to_string()))
+                    .and_then(Value::as_sequence)
+                    .into_iter()
+                    .flatten()
+                {
+                    let item = value.as_mapping()?;
+                    if string_field(item, "id") == Some(id) {
+                        return string_field(item, "name");
+                    }
+                }
+            }
+            None
+        })
+    }
+
     fn validate_command_values(&mut self, commands: &[Item]) {
         for command in commands {
             if !string_field(&command.mapping, "name").is_some_and(|name| !name.trim().is_empty()) {
@@ -5469,7 +5729,7 @@ impl<'a> Validator<'a> {
                     }
                     "command.solve" => {
                         if self.uses_question_solution_ruleset() {
-                            "ruleset.standard_mystery@3.0.0 `command.solve` must not declare parameters; answers come from `solution.questions`"
+                            "question-based standard rulesets require parameterless `command.solve`; answers come from `solution.questions`"
                                 .to_string()
                         } else {
                             "`command.solve` must declare character then deduction parameters"
@@ -8241,6 +8501,23 @@ fn yaml_scalar_span(source: &str, pointer: &str) -> Option<YamlNodeSpan> {
     Some(node)
 }
 
+/// Resolve a diagnostic JSON pointer to the authored YAML node instead of
+/// searching the whole file for a repeated scalar value. This deliberately
+/// returns the complete field value (including a flow collection or block
+/// scalar) so editor navigation remains exact even when decoded YAML text does
+/// not occur byte-for-byte in the source.
+fn locate_yaml_pointer_value(source: &str, pointer: &str) -> Option<SourceRange> {
+    let span = yaml_scalar_span(source, pointer)?;
+    let value = source.get(span.value_start..span.end)?;
+    let leading = value.len() - value.trim_start().len();
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Some(source_range(source, span.start, span.end));
+    }
+    let start = span.value_start + leading;
+    Some(source_range(source, start, start + trimmed.len()))
+}
+
 fn source_range(source: &str, start: usize, end: usize) -> SourceRange {
     let position = |offset: usize| {
         let prefix = &source[..offset];
@@ -8917,6 +9194,36 @@ fn bool_field(mapping: &Mapping, field: &str) -> Option<bool> {
     mapping
         .get(Value::String(field.to_string()))
         .and_then(Value::as_bool)
+}
+
+fn normalize_notebook_prose(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_alphanumeric() || character.is_whitespace() {
+                character.to_ascii_lowercase()
+            } else {
+                ' '
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn contains_speculative_language(normalized: &str) -> bool {
+    let padded = format!(" {normalized} ");
+    [
+        " maybe ",
+        " perhaps ",
+        " possibly ",
+        " might ",
+        " could have ",
+        " appears to ",
+    ]
+    .iter()
+    .any(|marker| padded.contains(marker))
 }
 
 fn integer_field(mapping: &Mapping, field: &str) -> Option<i64> {

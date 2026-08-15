@@ -2,7 +2,8 @@
 
 Story Format 3.3 replaces the legacy fixed suspect/deduction Solve signature
 with one to four authored questions answered using physical story cards. It is
-paired with the immutable `ruleset.standard_mystery@3.0.0` catalog.
+paired with the immutable `ruleset.standard_mystery@3.0.0` catalog; Format 3.4
+may use the compatible `@4.0.0` notebook-policy catalog.
 
 ```yaml
 case:
@@ -54,7 +55,9 @@ available for non-Solve endings.
 
 Ruleset 3.0 keeps every 2.0 command unchanged except `command.solve`. Solve is
 now parameterless because its answer rows come from the private authored
-solution contract. Rulesets 1.0 and 2.0 remain byte-for-byte immutable.
+solution contract. Ruleset 4.0 preserves that Solve contract and adds the
+manual Claim command plus semantic notebook capability metadata. Rulesets 1.0
+through 3.0 remain byte-for-byte immutable.
 
 Format 3.3 rejects legacy culprit/weapon/location/deduction solution fields,
 mixed contracts, copied legacy Solve parameters, and a condition duplicated on

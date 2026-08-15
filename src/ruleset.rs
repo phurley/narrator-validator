@@ -8,8 +8,9 @@ pub const STANDARD_MYSTERY_RULESET_ID: &str = "ruleset.standard_mystery";
 pub const STANDARD_MYSTERY_RULESET_VERSION_1: &str = "1.0.0";
 pub const STANDARD_MYSTERY_RULESET_VERSION_2: &str = "2.0.0";
 pub const STANDARD_MYSTERY_RULESET_VERSION_3: &str = "3.0.0";
+pub const STANDARD_MYSTERY_RULESET_VERSION_4: &str = "4.0.0";
 /// Latest standard mystery ruleset authored by this validator release.
-pub const STANDARD_MYSTERY_RULESET_VERSION: &str = STANDARD_MYSTERY_RULESET_VERSION_3;
+pub const STANDARD_MYSTERY_RULESET_VERSION: &str = STANDARD_MYSTERY_RULESET_VERSION_4;
 
 /// A story's exact ruleset selection. Released versions are append-only: an
 /// existing `(id, version)` pair must never be changed in place.
@@ -24,14 +25,25 @@ pub struct RulesetReference {
 pub struct ResolvedRuleset {
     pub reference: RulesetReference,
     pub commands_yaml: &'static str,
+    /// Stable semantic identities for mechanics whose availability is selected
+    /// by game-instance policy. Consumers can filter by these capabilities
+    /// without copying the ruleset's command definitions.
+    pub command_capabilities: &'static [RulesetCommandCapability],
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct RulesetCommandCapability {
+    pub command_id: &'static str,
+    pub mechanic: &'static str,
+    pub enabled_when: &'static str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RulesetError {
-    #[error("unknown ruleset `{id}`; supported rulesets: ruleset.standard_mystery@1.0.0, @2.0.0, and @3.0.0")]
+    #[error("unknown ruleset `{id}`; supported rulesets: ruleset.standard_mystery@1.0.0, @2.0.0, @3.0.0, and @4.0.0")]
     Unknown { id: String },
     #[error(
-        "ruleset `{id}` does not support version `{version}`; use version 1.0.0, 2.0.0, or 3.0.0"
+        "ruleset `{id}` does not support version `{version}`; use version 1.0.0, 2.0.0, 3.0.0, or 4.0.0"
     )]
     IncompatibleVersion { id: String, version: String },
 }
@@ -42,10 +54,23 @@ pub fn resolve_ruleset(reference: &RulesetReference) -> Result<ResolvedRuleset, 
             id: reference.id.clone(),
         });
     }
-    let commands_yaml = match reference.version.as_str() {
-        STANDARD_MYSTERY_RULESET_VERSION_1 => STANDARD_MYSTERY_COMMANDS_1_0_YAML,
-        STANDARD_MYSTERY_RULESET_VERSION_2 => STANDARD_MYSTERY_COMMANDS_2_0_YAML,
-        STANDARD_MYSTERY_RULESET_VERSION_3 => standard_mystery_commands_3_0_yaml(),
+    let (commands_yaml, command_capabilities) = match reference.version.as_str() {
+        STANDARD_MYSTERY_RULESET_VERSION_1 => (
+            STANDARD_MYSTERY_COMMANDS_1_0_YAML,
+            LEGACY_NOTEBOOK_COMMAND_CAPABILITIES,
+        ),
+        STANDARD_MYSTERY_RULESET_VERSION_2 => (
+            STANDARD_MYSTERY_COMMANDS_2_0_YAML,
+            LEGACY_NOTEBOOK_COMMAND_CAPABILITIES,
+        ),
+        STANDARD_MYSTERY_RULESET_VERSION_3 => (
+            standard_mystery_commands_3_0_yaml(),
+            LEGACY_NOTEBOOK_COMMAND_CAPABILITIES,
+        ),
+        STANDARD_MYSTERY_RULESET_VERSION_4 => (
+            standard_mystery_commands_4_0_yaml(),
+            NOTEBOOK_COMMAND_CAPABILITIES,
+        ),
         _ => {
             return Err(RulesetError::IncompatibleVersion {
                 id: reference.id.clone(),
@@ -56,8 +81,40 @@ pub fn resolve_ruleset(reference: &RulesetReference) -> Result<ResolvedRuleset, 
     Ok(ResolvedRuleset {
         reference: reference.clone(),
         commands_yaml,
+        command_capabilities,
     })
 }
+
+const LEGACY_NOTEBOOK_COMMAND_CAPABILITIES: &[RulesetCommandCapability] = &[
+    RulesetCommandCapability {
+        command_id: "command.deduce",
+        mechanic: "establish_deduction",
+        enabled_when: "manual_deductions",
+    },
+    RulesetCommandCapability {
+        command_id: "command.solve",
+        mechanic: "submit_solution",
+        enabled_when: "always",
+    },
+];
+
+const NOTEBOOK_COMMAND_CAPABILITIES: &[RulesetCommandCapability] = &[
+    RulesetCommandCapability {
+        command_id: "command.claim",
+        mechanic: "claim_fact",
+        enabled_when: "manual_facts",
+    },
+    RulesetCommandCapability {
+        command_id: "command.deduce",
+        mechanic: "establish_deduction",
+        enabled_when: "manual_deductions",
+    },
+    RulesetCommandCapability {
+        command_id: "command.solve",
+        mechanic: "submit_solution",
+        enabled_when: "always",
+    },
+];
 
 // This is the immutable 1.0.0 catalog. Add a new version instead of editing
 // command semantics after release.
@@ -357,6 +414,29 @@ fn standard_mystery_commands_3_0_yaml() -> &'static str {
         .as_str()
 }
 
+fn standard_mystery_commands_4_0_yaml() -> &'static str {
+    const DEDUCE: &str = r#"  - id: command.deduce
+    name: Deduce
+    description: Interpret one to three notebook facts or prior deductions as a new theory.
+"#;
+    const NOTEBOOK_COMMANDS: &str = r#"  - id: command.claim
+    name: Claim
+    description: Deliberately add one available fact to the player's notebook.
+
+  - id: command.deduce
+    name: Deduce
+    description: Deliberately establish an authoritative notebook deduction from one to three known facts or prior deductions.
+"#;
+    static CATALOG: OnceLock<String> = OnceLock::new();
+    CATALOG
+        .get_or_init(|| {
+            let resolved = standard_mystery_commands_3_0_yaml().replace(DEDUCE, NOTEBOOK_COMMANDS);
+            assert_ne!(resolved, standard_mystery_commands_3_0_yaml());
+            resolved
+        })
+        .as_str()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -521,5 +601,45 @@ mod tests {
             .next()
             .expect("v3 prefix");
         assert_eq!(v3_without_solve, v2_without_solve);
+    }
+
+    #[test]
+    fn standard_catalog_4_0_adds_manual_notebook_commands_and_semantic_capabilities() {
+        let resolved = resolve_ruleset(&RulesetReference {
+            id: STANDARD_MYSTERY_RULESET_ID.to_string(),
+            version: STANDARD_MYSTERY_RULESET_VERSION_4.to_string(),
+        })
+        .expect("standard ruleset 4.0");
+        let document: serde_yaml::Value =
+            serde_yaml::from_str(resolved.commands_yaml).expect("catalog YAML");
+        let ids = document["commands"]
+            .as_sequence()
+            .expect("commands")
+            .iter()
+            .map(|command| command["id"].as_str().expect("command id"))
+            .collect::<Vec<_>>();
+        assert!(ids.contains(&"command.claim"));
+        assert!(ids.contains(&"command.deduce"));
+        assert_eq!(ids.iter().filter(|id| **id == "command.solve").count(), 1);
+        assert_eq!(
+            resolved.command_capabilities,
+            [
+                RulesetCommandCapability {
+                    command_id: "command.claim",
+                    mechanic: "claim_fact",
+                    enabled_when: "manual_facts",
+                },
+                RulesetCommandCapability {
+                    command_id: "command.deduce",
+                    mechanic: "establish_deduction",
+                    enabled_when: "manual_deductions",
+                },
+                RulesetCommandCapability {
+                    command_id: "command.solve",
+                    mechanic: "submit_solution",
+                    enabled_when: "always",
+                },
+            ]
+        );
     }
 }

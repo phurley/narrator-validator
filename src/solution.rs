@@ -4,7 +4,10 @@ use std::collections::BTreeSet;
 
 use serde::Serialize;
 
-use crate::{DisclosureClass, STANDARD_MYSTERY_RULESET_ID, STANDARD_MYSTERY_RULESET_VERSION_3};
+use crate::{
+    DisclosureClass, STANDARD_MYSTERY_RULESET_ID, STANDARD_MYSTERY_RULESET_VERSION_3,
+    STANDARD_MYSTERY_RULESET_VERSION_4,
+};
 
 pub const MIN_SOLUTION_QUESTIONS: usize = 1;
 pub const MAX_SOLUTION_QUESTIONS: usize = 4;
@@ -17,6 +20,7 @@ pub struct SolutionContractMetadata {
     pub story_format_version: &'static str,
     pub ruleset_id: &'static str,
     pub ruleset_version: &'static str,
+    pub compatible_ruleset_versions: [&'static str; 2],
     pub min_questions: usize,
     pub max_questions: usize,
     pub min_answer_cards: usize,
@@ -31,6 +35,10 @@ pub fn solution_contract_metadata() -> SolutionContractMetadata {
         story_format_version: SOLUTION_STORY_FORMAT_VERSION,
         ruleset_id: STANDARD_MYSTERY_RULESET_ID,
         ruleset_version: STANDARD_MYSTERY_RULESET_VERSION_3,
+        compatible_ruleset_versions: [
+            STANDARD_MYSTERY_RULESET_VERSION_3,
+            STANDARD_MYSTERY_RULESET_VERSION_4,
+        ],
         min_questions: MIN_SOLUTION_QUESTIONS,
         max_questions: MAX_SOLUTION_QUESTIONS,
         min_answer_cards: MIN_SOLUTION_ANSWER_CARDS,

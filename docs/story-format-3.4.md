@@ -73,6 +73,16 @@ to either a canonical end state or a legacy win state. Answering every authored
 question is that state's sole condition, so the selected state must not also
 declare `requires`, a positive `minimum_points`, or `at_or_after`.
 
+## Automatic and manual notebooks
+
+Format 3.4 stories may select `ruleset.standard_mystery@4.0.0` to retain Claim
+and Deduce for manual game-instance policies while continuing to use
+question-based Solve. Story files do not select a notebook policy. Every
+deduction must be safe for deterministic automatic fixed-point establishment;
+false/speculative conclusions and solution-equivalent terminal deductions are
+reported by Case Health. See
+[Automatic deductions and notebook safety](automatic-deductions.md).
+
 ## Legacy transition
 
 `win_states` remains readable during the transition. Its IDs, authored order,

@@ -1,5 +1,44 @@
 # Migrating story format 2 to format 3
 
+## Migrating deductions for automatic notebook policies
+
+Update validator, backend, authoring WASM, and story CI together. Current
+Format 3.4 stories that support all four notebook policies should select
+`ruleset.standard_mystery@4.0.0`. Remove copied Claim, Deduce, and Solve
+definitions; the ruleset supplies them and exports their policy capabilities.
+
+Audit every deduction as if it will appear without confirmation the instant
+its inputs become known:
+
+1. Remove or rewrite `truth: false`, contradicted, speculative, and provisional
+   conclusions. They need a future hypothesis mechanic, not authoritative
+   deduction state.
+2. Replace final accusations and physical answer copies with intermediate
+   insights. Keep final card commitment in `solution.questions`, grading in
+   Solve, and outcome text/precedence in end states.
+3. Collapse mechanical relay chains and split overwhelming fan-out. Review
+   `playability.deduction_graph.maximum_depth` and `largest_cascade_size` in the
+   JSON report.
+4. Run both automatic and fully manual entries in
+   `playability.notebook_policies`. An older ruleset without Claim makes the
+   manual-fact path explicitly inconclusive.
+
+Maintained story guidance:
+
+- **Simple Mystery:** replace any single final “culprit + weapon + location”
+  deduction with separate evidence-backed intermediate notes, then express the
+  final answer only through authored solution questions.
+- **Island Retreat:** audit branching alibi, method, and access chains for
+  automatic fan-out; keep each note useful on its own and remove any terminal
+  deduction that merely repeats the complete solution row.
+- **Quiet Kennel:** preserve its useful non-murder intermediate deductions,
+  but decide explicitly whether the final kennel conclusion is an ordinary
+  generic ending or a graded Solve result. Do not model the same terminal truth
+  in both a deduction and the solution contract.
+
+See [Automatic deductions and notebook safety](docs/automatic-deductions.md)
+for the normative notebook semantics and Case Health expectations.
+
 ## Moving from Format 3.3 to 3.4 authored end states
 
 Update the validator, runtime, and editor consumers together, then set

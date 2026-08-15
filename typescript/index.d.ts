@@ -56,6 +56,30 @@ export interface PlayabilityReport {
   explored_states: number
   bounded: boolean
   terminal_paths: TerminalPathAnalysis[]
+  notebook_policies: NotebookPolicyAnalysis[]
+  deduction_graph: DeductionGraphAnalysis
+}
+
+export interface NotebookPolicyAnalysis {
+  auto_facts: boolean
+  auto_deductions: boolean
+  explored_states: number
+  bounded: boolean
+  terminal_paths: TerminalPathAnalysis[]
+  solution_answerability: SolutionAnswerability
+}
+
+export interface SolutionAnswerability {
+  status: PlayabilityStatus
+  action_count?: number
+  solution_equivalent_deductions?: string[]
+}
+
+export interface DeductionGraphAnalysis {
+  maximum_depth: number
+  largest_cascade_size: number
+  largest_cascade_root?: string
+  largest_cascade?: string[]
 }
 
 export interface TerminalPathAnalysis {
@@ -192,14 +216,20 @@ export interface RulesetCommand {
 
 export interface StandardMysteryRuleset {
   id: 'ruleset.standard_mystery'
-  version: '1.0.0' | '2.0.0' | '3.0.0'
+  version: '1.0.0' | '2.0.0' | '3.0.0' | '4.0.0'
   commands: RulesetCommand[]
+  command_capabilities: Array<{
+    command_id: string
+    mechanic: 'claim_fact' | 'establish_deduction' | 'submit_solution'
+    enabled_when: 'manual_facts' | 'manual_deductions' | 'always'
+  }>
 }
 
 export interface SolutionContractMetadata {
   story_format_version: '3.3.0'
   ruleset_id: 'ruleset.standard_mystery'
   ruleset_version: '3.0.0'
+  compatible_ruleset_versions: ['3.0.0', '4.0.0']
   min_questions: 1
   max_questions: 4
   min_answer_cards: 1
