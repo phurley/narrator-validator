@@ -3026,6 +3026,38 @@ impl<'a> Validator<'a> {
                 .contains_key(Value::String("minimum_points".to_string()));
             let has_time = string_field(&end_state.mapping, "at_or_after").is_some_and(valid_time);
             let is_solution_target = solution_target.as_deref() == Some(&end_state.id);
+            if is_solution_target && self.uses_solution_target_requirements() {
+                if let Some(Value::Sequence(requirements)) =
+                    end_state.mapping.get(Value::String("requires".to_string()))
+                {
+                    for (index, requirement) in requirements.iter().enumerate() {
+                        let Some(requirement_id) = requirement.as_str() else {
+                            continue;
+                        };
+                        let has_unsupported_kind = self
+                            .definitions
+                            .get(requirement_id)
+                            .is_some_and(|definition| {
+                                !matches!(
+                                    definition.kind,
+                                    Kind::Flag | Kind::Fact | Kind::Deduction
+                                )
+                            });
+                        if has_unsupported_kind {
+                            self.push(
+                                Severity::Error,
+                                "end_states.solution_requirement_kind",
+                                "a ruleset-5 solution target requirement must identify a persistent flag, fact, or deduction"
+                                    .to_string(),
+                                &end_state.path,
+                                Some(format!("{}/requires/{index}", end_state.pointer)),
+                                None,
+                                Some(end_state.id.clone()),
+                            );
+                        }
+                    }
+                }
+            }
             if is_solution_target && outcome == Some("lost") {
                 self.push(
                     Severity::Error,

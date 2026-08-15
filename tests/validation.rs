@@ -1990,6 +1990,22 @@ fn ruleset_5_allows_only_persistent_requirements_on_the_solution_target() {
         assert!(valid.valid, "{requirement}: {:#?}", valid.diagnostics);
     }
 
+    for requirement in ["setting.study", "entity.knife", "trigger.investigate_knife"] {
+        let invalid = report(format_3_4_ruleset_5_solution_prerequisite_story().replacen(
+            "    requires: [flag.knife_examined]\n    text: You answer every question",
+            &format!("    requires: [{requirement}]\n    text: You answer every question"),
+            1,
+        ));
+        assert!(
+            invalid.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == "end_states.solution_requirement_kind"
+                    && diagnostic.pointer.as_deref() == Some("/end_states/0/requires/0")
+            }),
+            "missing precise unsupported-kind diagnostic for {requirement}: {:#?}",
+            invalid.diagnostics
+        );
+    }
+
     let ruleset_4 = report(format_3_4_ruleset_5_solution_prerequisite_story().replacen(
         "version: \"5.0.0\"",
         "version: \"4.0.0\"",

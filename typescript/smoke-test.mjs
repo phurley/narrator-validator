@@ -185,6 +185,13 @@ const ruleset5Files = solveFixtureFiles.map((file) => {
         .replace('version: "3.0.0"', 'version: "5.0.0"'),
     }
   }
+  if (file.path === 'flags.yaml') {
+    return {
+      ...file,
+      source:
+        'flags:\n  - id: flag.solution_ready\n    name: Solution ready\n    description: The prerequisites for the complete solution are met.\n    initial_state: false\n',
+    }
+  }
   if (file.path === 'win_states.yaml') {
     return {
       path: 'end_states.yaml',
@@ -192,7 +199,7 @@ const ruleset5Files = solveFixtureFiles.map((file) => {
         .replace('win_states:', 'end_states:')
         .replace(
           '    text: You explain the complete solution.',
-          '    outcome: won\n    resolution: full\n    requires: [setting.study]\n    text: You explain the complete solution.',
+          '    outcome: won\n    resolution: full\n    requires: [flag.solution_ready]\n    text: You explain the complete solution.',
         ),
     }
   }
@@ -209,8 +216,8 @@ const invalidRuleset5Report = await validateRepositoryWithFeatures(
       ? {
           ...file,
           source: file.source.replace(
-            '    requires: [setting.study]\n',
-            '    requires: [setting.study]\n    minimum_points: 0\n',
+            '    requires: [flag.solution_ready]\n',
+            '    requires: [flag.solution_ready]\n    minimum_points: 0\n',
           ),
         }
       : file,
