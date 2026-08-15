@@ -35,6 +35,7 @@ const REQUIRED_SECTIONS: &[&str] = &[
 ];
 const SINGLE_SECTIONS: &[&str] = &[
     "solution",
+    "end_states",
     "win_states",
     "clues",
     "commands",
@@ -44,6 +45,7 @@ const SINGLE_SECTIONS: &[&str] = &[
 const CANONICAL_SECTION_FILES: &[(&str, &str)] = &[
     ("case", "case.yaml"),
     ("solution", "case.yaml"),
+    ("end_states", "end_states.yaml"),
     ("win_states", "win_states.yaml"),
     ("settings", "settings.yaml"),
     ("routes", "settings.yaml"),
@@ -80,6 +82,7 @@ enum Kind {
     Command,
     Trigger,
     Testimony,
+    EndState,
     WinState,
 }
 
@@ -183,6 +186,7 @@ impl Kind {
             Self::Command => "command",
             Self::Trigger => "trigger",
             Self::Testimony => "testimony",
+            Self::EndState => "end",
             Self::WinState => "win",
         }
     }
@@ -208,6 +212,53 @@ struct Item {
     source: String,
     pointer: String,
     mapping: Mapping,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EndStateCondition {
+    requirements: BTreeSet<String>,
+    minimum_points: u64,
+    at_or_after_minutes: Option<u16>,
+}
+
+impl EndStateCondition {
+    fn from_item(item: &Item) -> Option<Self> {
+        let requirements_value = item.mapping.get(Value::String("requires".to_string()));
+        if requirements_value.is_some_and(|value| !is_string_sequence(value)) {
+            return None;
+        }
+        let minimum_points = match item
+            .mapping
+            .get(Value::String("minimum_points".to_string()))
+        {
+            Some(value) => value.as_u64()?,
+            None => 0,
+        };
+        let at_or_after_minutes = match string_field(&item.mapping, "at_or_after") {
+            Some(time) if valid_time(time) => Some(time_to_minutes(time)),
+            Some(_) => return None,
+            None => None,
+        };
+        Some(Self {
+            requirements: string_list_field(&item.mapping, "requires")
+                .into_iter()
+                .collect(),
+            minimum_points,
+            at_or_after_minutes,
+        })
+    }
+
+    /// Whether this earlier condition is necessarily satisfied whenever the
+    /// later condition is satisfied. Conditions are monotonic conjunctions.
+    fn is_implied_by(&self, later: &Self) -> bool {
+        self.requirements.is_subset(&later.requirements)
+            && self.minimum_points <= later.minimum_points
+            && match (self.at_or_after_minutes, later.at_or_after_minutes) {
+                (None, _) => true,
+                (Some(_), None) => false,
+                (Some(earlier), Some(later)) => earlier <= later,
+            }
+    }
 }
 
 struct GraphInputs<'a> {
@@ -337,6 +388,12 @@ impl<'a> Validator<'a> {
             .is_some_and(|version| version.major == 3 && version.minor >= 3)
     }
 
+    fn is_format_3_4_or_later(&self) -> bool {
+        self.format_version
+            .as_ref()
+            .is_some_and(|version| version.major == 3 && version.minor >= 4)
+    }
+
     fn uses_question_solution_ruleset(&self) -> bool {
         self.ruleset.as_ref().is_some_and(|ruleset| {
             ruleset.id == STANDARD_MYSTERY_RULESET_ID
@@ -371,6 +428,12 @@ impl<'a> Validator<'a> {
         let commands = self.merge_ruleset_commands(local_commands);
         let triggers = self.items("triggers", Kind::Trigger, true);
         let win_states = self.items("win_states", Kind::WinState, true);
+        let end_states = self.items_with_prefixes(
+            "end_states",
+            Kind::EndState,
+            true,
+            &[Kind::EndState.prefix(), Kind::WinState.prefix()],
+        );
         let fact_claims_enabled = self.is_format_3();
         let facts = if fact_claims_enabled {
             self.nested_facts(&[
@@ -416,12 +479,14 @@ impl<'a> Validator<'a> {
                 &triggers,
                 &testimonies,
                 &win_states,
+                &end_states,
             );
         }
 
-        self.validate_terminal_configuration(&win_states);
+        self.validate_terminal_configuration(&end_states, &win_states);
         self.validate_solution();
         self.validate_win_states(&win_states);
+        self.validate_end_states(&end_states);
         self.validate_references();
         self.validate_duplicate_lists();
         self.validate_deck();
@@ -816,6 +881,16 @@ impl<'a> Validator<'a> {
     }
 
     fn items(&mut self, section: &str, kind: Kind, sequence: bool) -> Vec<Item> {
+        self.items_with_prefixes(section, kind, sequence, &[kind.prefix()])
+    }
+
+    fn items_with_prefixes(
+        &mut self,
+        section: &str,
+        kind: Kind,
+        sequence: bool,
+        allowed_prefixes: &[&str],
+    ) -> Vec<Item> {
         let mut result = Vec::new();
         let parsed_len = self.parsed.len();
         for file_index in 0..parsed_len {
@@ -907,14 +982,18 @@ impl<'a> Validator<'a> {
                         range,
                         Some(id.clone()),
                     );
-                } else if id_prefix(&id) != Some(kind.prefix()) {
+                } else if !id_prefix(&id).is_some_and(|prefix| allowed_prefixes.contains(&prefix)) {
                     self.push(
                         Severity::Error,
                         "id.wrong_prefix",
                         format!(
-                            "{} ID `{id}` must start with `{}.`",
+                            "{} ID `{id}` must start with {}",
                             kind.name(),
-                            kind.prefix()
+                            allowed_prefixes
+                                .iter()
+                                .map(|prefix| format!("`{prefix}.`"))
+                                .collect::<Vec<_>>()
+                                .join(" or ")
                         ),
                         &path,
                         Some(id_pointer.clone()),
@@ -2356,11 +2435,12 @@ impl<'a> Validator<'a> {
 
         let win_state = string_field(solution, "win_state");
         match win_state.and_then(|id| self.definitions.get(id).map(|definition| (id, definition))) {
-            Some((_, definition)) if definition.kind == Kind::WinState => {}
+            Some((_, definition)) if matches!(definition.kind, Kind::WinState | Kind::EndState) => {
+            }
             Some((id, _)) => self.push(
                 Severity::Error,
                 "solution.win_state_type",
-                format!("solution `win_state` `{id}` must identify a win state"),
+                format!("solution `win_state` `{id}` must identify an end state"),
                 path,
                 Some("/solution/win_state".to_string()),
                 locate_scalar(source, id),
@@ -2369,7 +2449,7 @@ impl<'a> Validator<'a> {
             None => self.push(
                 Severity::Error,
                 "solution.win_state_unknown",
-                "solution `win_state` must identify a defined win state".to_string(),
+                "solution `win_state` must identify a defined end state".to_string(),
                 path,
                 Some("/solution/win_state".to_string()),
                 win_state.and_then(|id| locate_scalar(source, id)),
@@ -2588,7 +2668,44 @@ impl<'a> Validator<'a> {
             .collect()
     }
 
-    fn validate_terminal_configuration(&mut self, win_states: &[Item]) {
+    fn validate_terminal_configuration(&mut self, end_states: &[Item], win_states: &[Item]) {
+        let has_end_section = self.sections.contains_key("end_states");
+        let has_win_section = self.sections.contains_key("win_states");
+        if has_end_section && has_win_section {
+            self.push(
+                Severity::Error,
+                "end_states.mixed_legacy_section",
+                "define exactly one ordered terminal section; migrate `win_states` into `end_states` without keeping both roots"
+                    .to_string(),
+                "",
+                Some("/end_states".to_string()),
+                None,
+                None,
+            );
+        }
+        if has_end_section && !self.is_format_3_4_or_later() {
+            self.push(
+                Severity::Error,
+                "end_states.format_incompatible",
+                "canonical `end_states` require story format 3.4 or later".to_string(),
+                end_states.first().map_or("", |state| state.path.as_str()),
+                Some("/end_states".to_string()),
+                None,
+                None,
+            );
+        }
+        if has_win_section && self.is_format_3_4_or_later() {
+            self.push(
+                Severity::Warning,
+                "win_states.legacy_compatibility",
+                "legacy `win_states` retain authored order and behave as `won`/`full`; migrate them to canonical `end_states` when editing the terminal contract"
+                    .to_string(),
+                win_states.first().map_or("", |state| state.path.as_str()),
+                Some("/win_states".to_string()),
+                None,
+                None,
+            );
+        }
         let has_solution = self.parsed.iter().any(|file| {
             file.value
                 .as_mapping()
@@ -2605,13 +2722,26 @@ impl<'a> Validator<'a> {
                                 .is_some_and(|questions| !questions.is_empty()))
                 })
         });
-        if win_states.is_empty() && !has_solution {
+        if end_states.is_empty() && win_states.is_empty() && !has_solution {
+            let canonical_end_states = self.is_format_3_4_or_later();
             self.push(
                 Severity::Error,
-                "win_states.missing_terminal_configuration",
-                "define at least one generic win state or a valid `solution` block".to_string(),
+                if canonical_end_states {
+                    "end_states.missing_terminal_configuration"
+                } else {
+                    "win_states.missing_terminal_configuration"
+                },
+                if canonical_end_states {
+                    "define at least one generic end state or a valid `solution` block".to_string()
+                } else {
+                    "define at least one generic win state or a valid `solution` block".to_string()
+                },
                 "",
-                Some("/win_states".to_string()),
+                Some(if canonical_end_states {
+                    "/end_states".to_string()
+                } else {
+                    "/win_states".to_string()
+                }),
                 None,
                 None,
             );
@@ -2730,6 +2860,255 @@ impl<'a> Validator<'a> {
                         None,
                         Some(win_state.id.clone()),
                     );
+                }
+            }
+        }
+    }
+
+    fn validate_end_states(&mut self, end_states: &[Item]) {
+        if end_states.is_empty() {
+            return;
+        }
+        let solution_target = self.solution_terminal_state_id();
+        for end_state in end_states {
+            for field in ["name", "text"] {
+                if string_field(&end_state.mapping, field)
+                    .map_or(true, |value| value.trim().is_empty())
+                {
+                    self.push(
+                        Severity::Error,
+                        if field == "name" {
+                            "end_states.name"
+                        } else {
+                            "end_states.text"
+                        },
+                        format!("end state `{field}` must be a non-empty string"),
+                        &end_state.path,
+                        Some(format!("{}/{}", end_state.pointer, escape_pointer(field))),
+                        None,
+                        Some(end_state.id.clone()),
+                    );
+                }
+            }
+
+            let outcome = string_field(&end_state.mapping, "outcome");
+            if !matches!(outcome, Some("won" | "lost")) {
+                self.push(
+                    Severity::Error,
+                    "end_states.outcome",
+                    "end state `outcome` must be `won` or `lost`".to_string(),
+                    &end_state.path,
+                    Some(format!("{}/outcome", end_state.pointer)),
+                    None,
+                    Some(end_state.id.clone()),
+                );
+            }
+            let resolution = string_field(&end_state.mapping, "resolution");
+            if !matches!(resolution, Some("full" | "partial" | "failure")) {
+                self.push(
+                    Severity::Error,
+                    "end_states.resolution",
+                    "end state `resolution` must be `full`, `partial`, or `failure`".to_string(),
+                    &end_state.path,
+                    Some(format!("{}/resolution", end_state.pointer)),
+                    None,
+                    Some(end_state.id.clone()),
+                );
+            } else if matches!(
+                (outcome, resolution),
+                (Some("won"), Some("failure")) | (Some("lost"), Some("full" | "partial"))
+            ) {
+                self.push(
+                    Severity::Error,
+                    "end_states.outcome_resolution_conflict",
+                    "`won` permits `full` or `partial`; `lost` requires `failure`".to_string(),
+                    &end_state.path,
+                    Some(end_state.pointer.clone()),
+                    None,
+                    Some(end_state.id.clone()),
+                );
+            }
+
+            match end_state.mapping.get(Value::String("requires".to_string())) {
+                Some(requires) if is_string_sequence(requires) => {}
+                Some(_) => self.push(
+                    Severity::Error,
+                    "end_states.requires_type",
+                    "end state `requires` must be a sequence of persistent requirement IDs"
+                        .to_string(),
+                    &end_state.path,
+                    Some(format!("{}/requires", end_state.pointer)),
+                    None,
+                    Some(end_state.id.clone()),
+                ),
+                None => {}
+            }
+            match end_state
+                .mapping
+                .get(Value::String("minimum_points".to_string()))
+            {
+                Some(Value::Number(number)) if number.as_u64().is_some() => {}
+                Some(_) => self.push(
+                    Severity::Error,
+                    "end_states.minimum_points",
+                    "end state `minimum_points` must be a non-negative whole number".to_string(),
+                    &end_state.path,
+                    Some(format!("{}/minimum_points", end_state.pointer)),
+                    None,
+                    Some(end_state.id.clone()),
+                ),
+                None => {}
+            }
+            match end_state
+                .mapping
+                .get(Value::String("at_or_after".to_string()))
+            {
+                Some(Value::String(time)) if valid_time(time) => {}
+                Some(_) => self.push(
+                    Severity::Error,
+                    "end_states.at_or_after",
+                    "end state `at_or_after` must be a quoted 24-hour HH:MM value".to_string(),
+                    &end_state.path,
+                    Some(format!("{}/at_or_after", end_state.pointer)),
+                    string_field(&end_state.mapping, "at_or_after")
+                        .and_then(|time| locate_scalar(&end_state.source, time)),
+                    Some(end_state.id.clone()),
+                ),
+                None => {}
+            }
+
+            let has_requirements = !string_list_field(&end_state.mapping, "requires").is_empty();
+            let has_points = end_state
+                .mapping
+                .get(Value::String("minimum_points".to_string()))
+                .and_then(Value::as_u64)
+                .is_some_and(|minimum| minimum > 0);
+            let has_time = string_field(&end_state.mapping, "at_or_after").is_some_and(valid_time);
+            let is_solution_target = solution_target.as_deref() == Some(&end_state.id);
+            if is_solution_target && outcome == Some("lost") {
+                self.push(
+                    Severity::Error,
+                    "end_states.solution_outcome_conflict",
+                    "the end state selected by `solution.win_state` must have outcome `won`"
+                        .to_string(),
+                    &end_state.path,
+                    Some(format!("{}/outcome", end_state.pointer)),
+                    None,
+                    Some(end_state.id.clone()),
+                );
+            }
+            if is_solution_target && (has_requirements || has_points || has_time) {
+                self.push(
+                    Severity::Error,
+                    "end_states.solution_condition_conflict",
+                    "the end state selected by `solution.win_state` must not duplicate completion conditions; answering all solution questions is its condition"
+                        .to_string(),
+                    &end_state.path,
+                    Some(end_state.pointer.clone()),
+                    None,
+                    Some(end_state.id.clone()),
+                );
+            } else if !is_solution_target && !has_requirements && !has_points && !has_time {
+                self.push(
+                    Severity::Error,
+                    "end_states.unconditional",
+                    "end state must require a persistent condition, positive point threshold, or game-clock threshold"
+                        .to_string(),
+                    &end_state.path,
+                    Some(end_state.pointer.clone()),
+                    None,
+                    Some(end_state.id.clone()),
+                );
+            }
+
+            for key in end_state.mapping.keys().filter_map(Value::as_str) {
+                if !matches!(
+                    key,
+                    "id" | "name"
+                        | "outcome"
+                        | "resolution"
+                        | "requires"
+                        | "minimum_points"
+                        | "at_or_after"
+                        | "text"
+                ) {
+                    self.push(
+                        Severity::Error,
+                        "end_states.unknown_field",
+                        format!("unknown end-state field `{key}`"),
+                        &end_state.path,
+                        Some(format!("{}/{}", end_state.pointer, escape_pointer(key))),
+                        None,
+                        Some(end_state.id.clone()),
+                    );
+                }
+            }
+        }
+        self.validate_end_state_precedence(end_states, solution_target.as_deref());
+    }
+
+    fn solution_terminal_state_id(&self) -> Option<String> {
+        self.parsed.iter().find_map(|file| {
+            file.value
+                .as_mapping()?
+                .get(Value::String("solution".to_string()))?
+                .as_mapping()
+                .and_then(|solution| string_field(solution, "win_state"))
+                .map(str::to_string)
+        })
+    }
+
+    fn validate_end_state_precedence(
+        &mut self,
+        end_states: &[Item],
+        solution_target: Option<&str>,
+    ) {
+        for (later_index, later) in end_states.iter().enumerate() {
+            if solution_target == Some(later.id.as_str()) {
+                continue;
+            }
+            let Some(later_condition) = EndStateCondition::from_item(later) else {
+                continue;
+            };
+            for earlier in &end_states[..later_index] {
+                if solution_target == Some(earlier.id.as_str()) {
+                    continue;
+                }
+                let Some(earlier_condition) = EndStateCondition::from_item(earlier) else {
+                    continue;
+                };
+                let duplicate = earlier_condition == later_condition;
+                if duplicate || earlier_condition.is_implied_by(&later_condition) {
+                    self.diagnostics.push(Diagnostic {
+                        severity: Severity::Error,
+                        code: if duplicate {
+                            "end_states.duplicate_precedence".to_string()
+                        } else {
+                            "end_states.unreachable_precedence".to_string()
+                        },
+                        message: if duplicate {
+                            format!(
+                                "end state `{}` repeats the exact condition of earlier `{}`; authored precedence would always select the earlier state",
+                                later.id, earlier.id
+                            )
+                        } else {
+                            format!(
+                                "end state `{}` is unreachable because earlier `{}` is always satisfied whenever it is; move the more specific state earlier or make the conditions distinct",
+                                later.id, earlier.id
+                            )
+                        },
+                        path: later.path.clone(),
+                        pointer: Some(later.pointer.clone()),
+                        range: None,
+                        subject_id: Some(later.id.clone()),
+                        related: vec![RelatedLocation {
+                            message: "earlier authored state is here".to_string(),
+                            path: earlier.path.clone(),
+                            pointer: Some(earlier.pointer.clone()),
+                            range: None,
+                        }],
+                    });
+                    break;
                 }
             }
         }
@@ -6891,6 +7270,7 @@ impl<'a> Validator<'a> {
         triggers: &[Item],
         testimonies: &[Item],
         win_states: &[Item],
+        end_states: &[Item],
     ) {
         let mut definitions = BTreeMap::new();
         for items in [
@@ -6906,6 +7286,7 @@ impl<'a> Validator<'a> {
             triggers,
             testimonies,
             win_states,
+            end_states,
         ] {
             for item in items {
                 if reference_kind(item.kind.name()).is_some() {
@@ -6928,6 +7309,7 @@ impl<'a> Validator<'a> {
             triggers,
             testimonies,
             win_states,
+            end_states,
         ] {
             for item in items {
                 collect_item_text_consumers(item, &mut consumers);
@@ -8169,8 +8551,9 @@ fn is_win_state_requirement_pointer(pointer: &str) -> bool {
         .collect::<Vec<_>>();
     matches!(
         parts.as_slice(),
-        ["win_states", state_index, "requires", requirement_index]
-            if state_index.parse::<usize>().is_ok()
+        [section, state_index, "requires", requirement_index]
+            if matches!(*section, "win_states" | "end_states")
+                && state_index.parse::<usize>().is_ok()
                 && requirement_index.parse::<usize>().is_ok()
     )
 }
@@ -8582,6 +8965,12 @@ fn valid_time(value: &str) -> bool {
     let hour = (bytes[0] - b'0') * 10 + bytes[1] - b'0';
     let minute = (bytes[3] - b'0') * 10 + bytes[4] - b'0';
     hour < 24 && minute < 60
+}
+
+fn time_to_minutes(value: &str) -> u16 {
+    let bytes = value.as_bytes();
+    u16::from((bytes[0] - b'0') * 10 + bytes[1] - b'0') * 60
+        + u16::from((bytes[3] - b'0') * 10 + bytes[4] - b'0')
 }
 
 fn valid_delay(value: &str) -> bool {

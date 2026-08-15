@@ -4,6 +4,7 @@
 //! implementation can run in the backend, a browser Web Worker, or the CLI.
 
 mod diagnostic;
+mod end_state;
 mod reference_text;
 mod ruleset;
 mod solution;
@@ -11,6 +12,10 @@ mod validator;
 
 pub use diagnostic::{
     Diagnostic, Position, RelatedLocation, Severity, SourceFile, SourceRange, ValidationReport,
+};
+pub use end_state::{
+    end_state_contract_metadata, end_state_contract_metadata_json, EndStateContractMetadata,
+    OutcomeResolution, END_STATE_STORY_FORMAT_VERSION,
 };
 pub use reference_text::{
     parse_reference_text, parse_reference_text_result, reference_kind,
@@ -33,7 +38,7 @@ pub use validator::{validate, validate_with_supported_features};
 
 pub const VALIDATOR_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Latest story format authored by this release.
-pub const STORY_FORMAT_VERSION: &str = "3.3.0";
+pub const STORY_FORMAT_VERSION: &str = "3.4.0";
 /// Semantic-version range this release can structurally validate. Format 3.2+
 /// features still require successful `case.features` negotiation, while the
 /// Format 3.3 Solve contract is selected by its exact ruleset version.
@@ -44,8 +49,9 @@ mod wasm {
     use wasm_bindgen::prelude::*;
 
     use crate::{
-        parse_reference_text_result, reference_text_metadata_json, solution_answer_matches,
-        solution_contract_metadata_json, validate, validate_with_supported_features, SourceFile,
+        end_state_contract_metadata_json, parse_reference_text_result,
+        reference_text_metadata_json, solution_answer_matches, solution_contract_metadata_json,
+        validate, validate_with_supported_features, SourceFile,
     };
 
     /// Validate a JSON array of `{ "path": string, "source": string }` values.
@@ -84,6 +90,11 @@ mod wasm {
     #[wasm_bindgen]
     pub fn solution_contract_metadata_json_export() -> String {
         solution_contract_metadata_json()
+    }
+
+    #[wasm_bindgen]
+    pub fn end_state_contract_metadata_json_export() -> String {
+        end_state_contract_metadata_json()
     }
 
     #[wasm_bindgen]

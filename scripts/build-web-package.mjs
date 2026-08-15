@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process'
-import { copyFile, mkdir, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -9,6 +9,22 @@ const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const output = join(root, 'pkg')
 const wasmBindgen =
   process.env.NARRATOR_WASM_BINDGEN ?? 'wasm-bindgen'
+const explicitSourceCommit = process.env.NARRATOR_VALIDATOR_SOURCE_COMMIT
+const dirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=all'], {
+  cwd: root,
+  encoding: 'utf8',
+}).trim()
+if (explicitSourceCommit === undefined && dirty !== '') {
+  throw new Error(
+    'validator worktree is dirty; commit the source or set NARRATOR_VALIDATOR_SOURCE_COMMIT to the exact source commit',
+  )
+}
+const sourceCommit =
+  explicitSourceCommit ??
+  execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim()
+if (!/^[0-9a-f]{40}$/.test(sourceCommit)) {
+  throw new Error('NARRATOR_VALIDATOR_SOURCE_COMMIT must be a full lowercase Git commit SHA')
+}
 
 execFileSync(
   'cargo',
@@ -52,9 +68,19 @@ execFileSync(
   },
 )
 
+const [indexJavaScript, indexTypes] = await Promise.all([
+  readFile(join(root, 'typescript', 'index.js'), 'utf8'),
+  readFile(join(root, 'typescript', 'index.d.ts'), 'utf8'),
+])
 await Promise.all([
-  copyFile(join(root, 'typescript', 'index.js'), join(output, 'index.js')),
-  copyFile(join(root, 'typescript', 'index.d.ts'), join(output, 'index.d.ts')),
+  writeFile(
+    join(output, 'index.js'),
+    indexJavaScript.replace('__NARRATOR_VALIDATOR_SOURCE_COMMIT__', sourceCommit),
+  ),
+  writeFile(
+    join(output, 'index.d.ts'),
+    indexTypes.replace('__NARRATOR_VALIDATOR_SOURCE_COMMIT__', sourceCommit),
+  ),
 ])
 
 const standardMysteryRulesets = ['1.0.0', '2.0.0', '3.0.0'].map((version) =>
@@ -94,6 +120,10 @@ const manifest = {
   description: rustPackage.description,
   license: rustPackage.license,
   repository: rustPackage.repository,
+  narratorValidatorSource: {
+    repository: rustPackage.repository,
+    commit: sourceCommit,
+  },
   type: 'module',
   main: 'index.js',
   module: 'index.js',

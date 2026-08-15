@@ -4,6 +4,8 @@ import { readFile, readdir } from 'node:fs/promises'
 import {
   STANDARD_MYSTERY_RULESET,
   STANDARD_MYSTERY_RULESETS,
+  VALIDATOR_SOURCE_COMMIT,
+  endStateContractMetadata,
   initializeNarratorValidator,
   parseReferenceText,
   referenceTextMetadata,
@@ -20,6 +22,9 @@ const manifest = JSON.parse(
   await readFile(new URL('../pkg/package.json', import.meta.url), 'utf8'),
 )
 await initializeNarratorValidator(wasm)
+
+assert.equal(manifest.narratorValidatorSource.commit, VALIDATOR_SOURCE_COMMIT)
+assert.match(VALIDATOR_SOURCE_COMMIT, /^[0-9a-f]{40}$/)
 
 assert.deepEqual(
   STANDARD_MYSTERY_RULESETS.map((ruleset) => ruleset.version),
@@ -61,6 +66,22 @@ assert.deepEqual(solutionContract, {
   ordered_default: false,
   prompt_disclosure: 'player_safe',
   expected_answer_disclosure: 'private_narrator',
+})
+const endStateContract = await endStateContractMetadata()
+assert.deepEqual(endStateContract, {
+  story_format_version: '3.4.0',
+  canonical_section: 'end_states',
+  canonical_file: 'end_states.yaml',
+  legacy_section: 'win_states',
+  precedence: 'authored_order_first_satisfied',
+  evaluation_timing: 'after_every_resolved_turn',
+  score_semantics: 'snapshot_and_minimum_gate',
+  legacy_outcome: 'won',
+  legacy_resolution: 'full',
+  legal_outcome_resolutions: [
+    { outcome: 'won', resolutions: ['full', 'partial'] },
+    { outcome: 'lost', resolutions: ['failure'] },
+  ],
 })
 assert.equal(
   await solutionAnswerMatches(

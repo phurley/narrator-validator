@@ -1,4 +1,5 @@
 import initWasm, {
+  end_state_contract_metadata_json_export as endStateContractMetadataJson,
   parse_reference_text_json as parseReferenceTextJson,
   reference_text_metadata_json_export as referenceTextMetadataJson,
   solution_answer_matches_json as solutionAnswerMatchesJson,
@@ -8,6 +9,7 @@ import initWasm, {
 } from './narrator_validator.js'
 
 export { STANDARD_MYSTERY_RULESET, STANDARD_MYSTERY_RULESETS } from './rulesets.js'
+export const VALIDATOR_SOURCE_COMMIT = '__NARRATOR_VALIDATOR_SOURCE_COMMIT__'
 
 /** @type {Promise<void> | undefined} */
 let initialization
@@ -77,6 +79,12 @@ export async function referenceTextMetadata() {
 export async function solutionContractMetadata() {
   await initializeNarratorValidator()
   return JSON.parse(solutionContractMetadataJson())
+}
+
+/** @returns {Promise<import('./index.js').EndStateContractMetadata>} */
+export async function endStateContractMetadata() {
+  await initializeNarratorValidator()
+  return JSON.parse(endStateContractMetadataJson())
 }
 
 /**

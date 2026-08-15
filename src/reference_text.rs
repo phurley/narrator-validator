@@ -295,6 +295,16 @@ pub const CONSUMER_FIELDS: &[ConsumerField] = &[
         disclosure: PUBLIC,
     },
     ConsumerField {
+        kind: "end",
+        path: "name",
+        disclosure: PUBLIC,
+    },
+    ConsumerField {
+        kind: "end",
+        path: "text",
+        disclosure: PUBLIC,
+    },
+    ConsumerField {
         kind: "solution",
         path: "narrator_guidance.motive",
         disclosure: PRIVATE,
@@ -481,6 +491,11 @@ pub const REFERENCE_KINDS: &[ReferenceKind] = &[
     },
     ReferenceKind {
         kind: "win",
+        default_path: Some("name"),
+        paths: WIN_PATHS,
+    },
+    ReferenceKind {
+        kind: "end",
         default_path: Some("name"),
         paths: WIN_PATHS,
     },
