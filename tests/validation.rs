@@ -1186,10 +1186,11 @@ fn format_3_4_end_states_validate_time_tier_duplicates_and_references() {
 
 #[test]
 fn format_3_4_solve_selected_end_state_must_be_a_win() {
-    let report = report(
-        format_3_4_end_state_story()
-            .replacen("outcome: won\n    resolution: full", "outcome: lost\n    resolution: failure", 1),
-    );
+    let report = report(format_3_4_end_state_story().replacen(
+        "outcome: won\n    resolution: full",
+        "outcome: lost\n    resolution: failure",
+        1,
+    ));
     assert!(report.diagnostics.iter().any(|diagnostic| {
         diagnostic.code == "end_states.solution_outcome_conflict"
             && diagnostic.pointer.as_deref() == Some("/end_states/0/outcome")
