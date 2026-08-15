@@ -783,6 +783,145 @@ fn action_triggers_snapshot_pre_effect_flags_and_time_before_deadline_precedence
 }
 
 #[test]
+fn matched_trigger_effects_settle_before_same_action_fact_and_ordered_end_evaluation() {
+    let root = std::path::Path::new("tests/fixtures/playability-analysis");
+    let mut files = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            narrator_validator::SourceFile {
+                path: path.file_name().unwrap().to_string_lossy().into_owned(),
+                source: std::fs::read_to_string(path).unwrap(),
+            }
+        })
+        .collect::<Vec<_>>();
+    let settings = files
+        .iter_mut()
+        .find(|file| file.path == "settings.yaml")
+        .unwrap();
+    settings.source = settings.source.replace(
+        "  - id: route.lab_entry\n    from: setting.lab\n    to: setting.entry\n    bidirectional: false\n    travel_minutes: 15\n",
+        "",
+    );
+    files
+        .iter_mut()
+        .find(|file| file.path == "flags.yaml")
+        .unwrap()
+        .source
+        .push_str(
+            "  - id: flag.trigger_set\n    name: Trigger-set gate\n    description: Set by the matching trigger before fact discovery.\n    initial_state: false\n",
+        );
+    let entities = files
+        .iter_mut()
+        .find(|file| file.path == "entities.yaml")
+        .unwrap();
+    entities.source = entities.source.replace(
+        "          command: command.examine\n          parameters: { target: owner }\n",
+        "          command: command.investigate\n          parameters: { target: owner }\n        when:\n          all:\n            - flag: flag.trigger_set\n",
+    );
+    files
+        .iter_mut()
+        .find(|file| file.path == "triggers.yaml")
+        .unwrap()
+        .source
+        .push_str(
+            "  - id: trigger.same_action_gate\n    name: Same-action fact gate\n    on:\n      command: command.investigate\n      parameters: { target: entity.sample }\n    effects:\n      - operation: set_flag\n        flag: flag.trigger_set\n        value: true\n      - operation: advance_time\n        minutes: 20\n",
+        );
+    let ends = files
+        .iter_mut()
+        .find(|file| file.path == "end_states.yaml")
+        .unwrap();
+    ends.source = ends.source.replacen(
+        "end_states:\n",
+        "end_states:\n  - id: end.same_action_fact\n    name: Same-action fact win\n    outcome: won\n    resolution: full\n    requires: [fact.sample_matches]\n    text: The settled trigger reveals the decisive fact.\n  - id: end.same_turn_deadline\n    name: Same-turn deadline\n    outcome: lost\n    resolution: failure\n    at_or_after: \"20:30\"\n    text: The deadline loses to the earlier satisfied fact ending.\n",
+        1,
+    );
+
+    let report = narrator_validator::validate(&files);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    let analysis = report.playability.unwrap();
+    let win = analysis
+        .terminal_paths
+        .iter()
+        .find(|path| path.id == "end.same_action_fact")
+        .unwrap();
+    assert_eq!(win.status, narrator_validator::PlayabilityStatus::Proved);
+    let bound = win.lower_bound.as_ref().unwrap();
+    assert_eq!(bound.action_count, 2);
+    assert_eq!(bound.elapsed_minutes, 30);
+    assert!(bound
+        .pivotal_unlocks
+        .contains(&"flag.trigger_set".to_string()));
+    assert!(bound
+        .pivotal_unlocks
+        .contains(&"fact.sample_matches".to_string()));
+    let deadline = analysis
+        .terminal_paths
+        .iter()
+        .find(|path| path.id == "end.same_turn_deadline")
+        .unwrap();
+    assert_eq!(
+        deadline.status,
+        narrator_validator::PlayabilityStatus::NotProved
+    );
+    assert_eq!(
+        deadline.blocker.as_ref().unwrap().code,
+        "playability.precedence_blocked"
+    );
+}
+
+#[test]
+fn elapsed_search_bound_allows_the_exact_limit_but_never_proves_beyond_it() {
+    let root = std::path::Path::new("tests/fixtures/playability-analysis");
+    for (minutes, expected) in [
+        (2_880, narrator_validator::PlayabilityStatus::Proved),
+        (2_881, narrator_validator::PlayabilityStatus::Inconclusive),
+    ] {
+        let mut files = std::fs::read_dir(root)
+            .unwrap()
+            .map(|entry| {
+                let path = entry.unwrap().path();
+                narrator_validator::SourceFile {
+                    path: path.file_name().unwrap().to_string_lossy().into_owned(),
+                    source: std::fs::read_to_string(path).unwrap(),
+                }
+            })
+            .collect::<Vec<_>>();
+        files
+            .iter_mut()
+            .find(|file| file.path == "commands.yaml")
+            .unwrap()
+            .source
+            .push_str(&format!(
+                "  - id: command.long_wait\n    name: Long wait\n    effects:\n      - operation: set_flag\n        flag: flag.missing_action\n        value: true\n      - operation: advance_time\n        minutes: {minutes}\n"
+            ));
+
+        let report = narrator_validator::validate(&files);
+        assert!(report.valid, "{:#?}", report.diagnostics);
+        let analysis = report.playability.unwrap();
+        let terminal = analysis
+            .terminal_paths
+            .iter()
+            .find(|path| path.id == "end.missing_action")
+            .unwrap();
+        assert_eq!(terminal.status, expected, "{minutes} minutes");
+        if minutes == 2_880 {
+            assert_eq!(
+                terminal.lower_bound.as_ref().unwrap().elapsed_minutes,
+                2_880
+            );
+        } else {
+            assert!(analysis.bounded);
+            assert!(terminal.lower_bound.is_none());
+            assert_eq!(
+                terminal.blocker.as_ref().unwrap().code,
+                "playability.search_bound"
+            );
+        }
+    }
+}
+
+#[test]
 fn authored_solution_questions_produce_one_exact_supported_solve_action() {
     let root = std::path::Path::new("tests/fixtures/format-3.3-solve-card-sets");
     let mut files = std::fs::read_dir(root)

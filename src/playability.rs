@@ -975,6 +975,10 @@ impl Model {
                 self.apply_action(&mut next.state, &action, &mut next.unlocks);
                 self.settle(&mut next.state, Some(&action), &mut next.unlocks);
                 self.apply_point_awards(&mut next.state, &action, &mut next.unlocks);
+                if next.state.elapsed > MAX_ELAPSED_MINUTES {
+                    bounded = true;
+                    continue;
+                }
                 let gained = next
                     .unlocks
                     .difference(&before_unlocks)
@@ -1298,17 +1302,6 @@ impl Model {
                 apply_effect(state, effect, unlocks);
             }
         }
-        for fact in self.facts.values() {
-            if fact
-                .on
-                .as_ref()
-                .is_some_and(|pattern| pattern_matches(pattern, &action.pattern))
-                && predicates_hold(&fact.when, state, self.initial_minutes)
-            {
-                state.facts.insert(fact.item.id.clone());
-                unlocks.insert(fact.item.id.clone());
-            }
-        }
         for trigger_id in matching_triggers {
             let trigger = &self.triggers[&trigger_id];
             if trigger.after > 0 {
@@ -1319,6 +1312,20 @@ impl Model {
                 state.pending.sort();
             } else {
                 complete_trigger(state, trigger, unlocks);
+            }
+        }
+        // The runtime discovers action-gated facts after the already-matched
+        // triggers settle, so their persistent conditions observe immediate
+        // trigger effects without allowing those effects to change matching.
+        for fact in self.facts.values() {
+            if fact
+                .on
+                .as_ref()
+                .is_some_and(|pattern| pattern_matches(pattern, &action.pattern))
+                && predicates_hold(&fact.when, state, self.initial_minutes)
+            {
+                state.facts.insert(fact.item.id.clone());
+                unlocks.insert(fact.item.id.clone());
             }
         }
     }
@@ -1444,7 +1451,9 @@ impl Model {
                 vec![end.item.id.clone(), "minimum_points".to_string()],
                 format!("{}/minimum_points", end.item.pointer),
             )
-        } else if end.at_or_after.is_some() {
+        } else if end.at_or_after.is_some()
+            && !states.keys().any(|state| self.end_satisfied(end, state))
+        {
             (
                 "playability.route_time_blocked",
                 "no supported route or wait action advances the clock to this terminal threshold"
