@@ -1,3 +1,4 @@
 /target/
 /pkg/
+/.ci-tools/
 .DS_Store
