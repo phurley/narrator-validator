@@ -1390,6 +1390,7 @@ impl Model {
         if !state.solution_solved
             && self.commands.contains_key("command.solve")
             && !self.unsupported_commands.contains("command.solve")
+            && self.solution_requirements_satisfied(state)
         {
             if let Some(action) = &self.solve_action {
                 actions.push(CandidateAction {
@@ -1441,6 +1442,15 @@ impl Model {
         }
         actions.sort_by(|a, b| (&a.kind, &a.id, &a.to).cmp(&(&b.kind, &b.id, &b.to)));
         actions
+    }
+
+    fn solution_requirements_satisfied(&self, state: &State) -> bool {
+        self.solution_target
+            .as_ref()
+            .and_then(|target| self.ends.iter().find(|end| &end.item.id == target))
+            .map_or(true, |target| {
+                target.requirements.iter().all(|id| has(state, id))
+            })
     }
 
     fn action_available(&self, pattern: &ActionPattern, state: &State) -> bool {
@@ -2002,4 +2012,70 @@ fn locate_scalar(source: &str, scalar: &str) -> Option<SourceRange> {
             },
         })
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn solve_action_is_gated_by_solution_target_requirements() {
+        let target_id = "end.full".to_string();
+        let mut model = Model {
+            solution_target: Some(target_id.clone()),
+            solve_action: Some("command.solve [character.answer]".to_string()),
+            ..Model::default()
+        };
+        model.commands.insert(
+            "command.solve".to_string(),
+            CommandRule {
+                id: "command.solve".to_string(),
+                effects: Vec::new(),
+                requires_binding: false,
+            },
+        );
+        model.ends.push(EndRule {
+            item: LocatedItem {
+                id: target_id,
+                path: "end_states.yaml".to_string(),
+                pointer: "/end_states/0".to_string(),
+                range: None,
+                map: Mapping::new(),
+                owner: None,
+            },
+            outcome: "won".to_string(),
+            requirements: vec!["flag.rescue_complete".to_string()],
+            minimum_points: 0,
+            at_or_after: None,
+            solution_condition: true,
+        });
+        let mut state = State {
+            entry: "setting.start".to_string(),
+            location: "setting.start".to_string(),
+            elapsed: 0,
+            facts: BTreeSet::new(),
+            available_facts: BTreeSet::new(),
+            deductions: BTreeSet::new(),
+            flags: BTreeSet::new(),
+            completed: BTreeSet::new(),
+            pending: Vec::new(),
+            score: 0,
+            point_claims: BTreeMap::new(),
+            solution_solved: false,
+        };
+
+        assert!(model
+            .actions(&state, true, true)
+            .iter()
+            .all(|action| action.kind != "solve"));
+        state.flags.insert("flag.rescue_complete".to_string());
+        assert_eq!(
+            model
+                .actions(&state, true, true)
+                .iter()
+                .filter(|action| action.kind == "solve")
+                .count(),
+            1
+        );
+    }
 }

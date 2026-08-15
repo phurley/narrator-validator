@@ -124,7 +124,7 @@ This repository includes a composite action:
 
 ```yaml
 - uses: actions/checkout@v4
-- uses: phurley/narrator-validator@v1.6.0
+- uses: phurley/narrator-validator@v1.7.0
 ```
 
 It builds the pinned validator revision and emits native GitHub annotations.
@@ -139,7 +139,9 @@ format-1 validation path remains for legacy repositories, while format-2
 repositories stop with focused migration
 guidance before the strict format-3 schema runs.
 
-Validator `1.6.0` makes automatic deduction closure the default playability
+Validator `1.7.0` adds append-only standard mystery ruleset `5.0.0`, allowing
+the full Solve end state to require persistent world state and adding explicit
+multiplayer notebook reconciliation. Validator `1.6.0` makes automatic deduction closure the default playability
 policy, reports all four fact/deduction policy combinations, and adds
 automatic-notebook Case Health findings plus the append-only standard mystery
 ruleset `4.0.0`. Validator `1.5.0` introduced the separate bounded playability
@@ -182,8 +184,9 @@ Format 3.3 pairs `solution.questions` with
 each private expected answer contains one to five unique physical setting,
 character, or entity cards. Unordered rows require exact set equality and
 `ordered: true` rows require exact sequence equality. The solution points to
-one unconditional win state for terminal name/text while other generic endings
-remain available. See the [Format 3.3 contract](docs/story-format-3.3.md) for
+one terminal state for terminal name/text while other generic endings remain
+available. Ruleset 5 may additionally require persistent world state before
+that full Solve result is eligible. See the [Format 3.3 contract](docs/story-format-3.3.md) for
 the schema, scanner bounds, migration, disclosure, and shared comparison APIs.
 
 ## Format 3.4 ordered end states
@@ -238,17 +241,20 @@ material with no runtime projection.
 ## Versioned mystery ruleset
 
 `case.ruleset` selects an exact immutable command catalog.
-`ruleset.standard_mystery@1.0.0`, `@2.0.0`, `@3.0.0`, and `@4.0.0` supply Move, Open, Search, Examine,
-Take, Drop, Use, Question, Deduce, and Solve with canonical ordered semantic
-parameter groups. Version 2 adds explicit candidate sources and portability
-filters; version 3 keeps that catalog but makes Solve parameterless so Format
-3.3 can supply authored card-set questions. Version 4 adds the parameterless
-Claim command while retaining Deduce and question-based Solve, allowing one
-validated story to run under automatic or manual notebook policies. Earlier
-versions remain immutable.
+`ruleset.standard_mystery@1.0.0`, `@2.0.0`, `@3.0.0`, `@4.0.0`, and `@5.0.0`
+supply Move, Open, Search, Examine, Take, Drop, Use, Question, Deduce, and Solve
+with canonical ordered semantic parameter groups. Version 2 adds explicit
+candidate sources and portability filters; version 3 keeps that catalog but
+makes Solve parameterless so Format 3.3 can supply authored card-set questions.
+Version 4 adds the parameterless Claim command while retaining Deduce and
+question-based Solve, allowing one validated story to run under automatic or
+manual notebook policies. Earlier versions remain immutable. Version 5 adds
+parameterless Reconcile so joined players can deliberately pool claimed facts,
+and permits persistent `requires` on the Solve-selected canonical end state.
 
 Each resolved ruleset exports `command_capabilities`. The stable
-`claim_fact`/`manual_facts`, `establish_deduction`/`manual_deductions`, and
+`claim_fact`/`manual_facts`, `establish_deduction`/`manual_deductions`,
+`reconcile_notebooks`/`multiple_players_with_unshared_facts`, and
 `submit_solution`/`always` identities let runtimes filter commands by game
 policy without copying command definitions. Versions 1 through 3 omit Claim
 and therefore report fully manual fact analysis as inconclusive.

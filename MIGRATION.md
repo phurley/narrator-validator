@@ -4,7 +4,9 @@
 
 Update validator, backend, authoring WASM, and story CI together. Current
 Format 3.4 stories that support all four notebook policies should select
-`ruleset.standard_mystery@4.0.0`. Remove copied Claim, Deduce, and Solve
+`ruleset.standard_mystery@4.0.0`, or `@5.0.0` when they need multiplayer
+notebook reconciliation or a persistent prerequisite on the full Solve ending.
+Remove copied Claim, Deduce, Reconcile, and Solve
 definitions; the ruleset supplies them and exports their policy capabilities.
 
 Audit every deduction as if it will appear without confirmation the instant

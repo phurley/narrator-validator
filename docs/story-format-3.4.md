@@ -69,9 +69,18 @@ semantics, and legacy defaults.
 
 Format 3.3 authored Solve questions continue to use `solution.win_state` so
 existing stories and replay data retain their stable reference. It may point
-to either a canonical end state or a legacy win state. Answering every authored
-question is that state's sole condition, so the selected state must not also
-declare `requires`, a positive `minimum_points`, or `at_or_after`.
+to either a canonical end state or a legacy win state. Under rulesets 3 and 4,
+answering every authored question is that state's sole condition, so the
+selected state must not also declare `requires`, a positive `minimum_points`,
+or `at_or_after`.
+
+Ruleset 5 narrowly permits persistent `requires` on a canonical Solve-selected
+end state. Correct answers and every listed requirement are conjunctive: a
+runtime must check the requirements before comparing submitted cards so an
+unavailable Solve cannot disclose correctness. The `minimum_points` field and
+`at_or_after` remain invalid on the selected state. A concrete global world
+flag is appropriate for a shared rescue or safety prerequisite; a player-scoped
+fact remains private to the player who learned it.
 
 ## Automatic and manual notebooks
 
@@ -82,6 +91,12 @@ deduction must be safe for deterministic automatic fixed-point establishment;
 false/speculative conclusions and solution-equivalent terminal deductions are
 reported by Case Health. See
 [Automatic deductions and notebook safety](automatic-deductions.md).
+
+Ruleset `5.0.0` retains those mechanics and adds parameterless Reconcile. The
+runtime offers it only when multiple joined players have claimed facts that
+another player has not received. Reconciliation shares claimed facts, not
+deductions; automatic deduction closure or deliberate Deduce remains the sole
+way each player's derived notebook knowledge is established.
 
 ## Legacy transition
 

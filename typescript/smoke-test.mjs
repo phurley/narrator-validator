@@ -28,9 +28,9 @@ assert.match(VALIDATOR_SOURCE_COMMIT, /^[0-9a-f]{40}$/)
 
 assert.deepEqual(
   STANDARD_MYSTERY_RULESETS.map((ruleset) => ruleset.version),
-  ['1.0.0', '2.0.0', '3.0.0', '4.0.0'],
+  ['1.0.0', '2.0.0', '3.0.0', '4.0.0', '5.0.0'],
 )
-assert.equal(STANDARD_MYSTERY_RULESET.version, '4.0.0')
+assert.equal(STANDARD_MYSTERY_RULESET.version, '5.0.0')
 assert.ok(
   STANDARD_MYSTERY_RULESET.commands.some(
     (command) => command.id === 'command.claim',
@@ -48,11 +48,26 @@ assert.deepEqual(STANDARD_MYSTERY_RULESET.command_capabilities, [
     enabled_when: 'manual_deductions',
   },
   {
+    command_id: 'command.reconcile',
+    mechanic: 'reconcile_notebooks',
+    enabled_when: 'multiple_players_with_unshared_facts',
+  },
+  {
     command_id: 'command.solve',
     mechanic: 'submit_solution',
     enabled_when: 'always',
   },
 ])
+assert.deepEqual(
+  STANDARD_MYSTERY_RULESET.commands.find(
+    (command) => command.id === 'command.reconcile',
+  ),
+  {
+    id: 'command.reconcile',
+    name: 'Reconcile',
+    description: 'Compare claimed notebook facts with every joined player.',
+  },
+)
 assert.equal(
   STANDARD_MYSTERY_RULESET.commands.find(
     (command) => command.id === 'command.solve',
@@ -81,7 +96,7 @@ assert.deepEqual(solutionContract, {
   story_format_version: '3.3.0',
   ruleset_id: 'ruleset.standard_mystery',
   ruleset_version: '3.0.0',
-  compatible_ruleset_versions: ['3.0.0', '4.0.0'],
+  compatible_ruleset_versions: ['3.0.0', '4.0.0', '5.0.0'],
   min_questions: 1,
   max_questions: 4,
   min_answer_cards: 1,
@@ -160,6 +175,56 @@ assert.equal(
   'command.solve [character.culprit] [setting.study entity.knife]',
 )
 assert.ok(solveTerminal.lower_bound.pivotal_unlocks.includes('solution.correct'))
+
+const ruleset5Files = solveFixtureFiles.map((file) => {
+  if (file.path === 'case.yaml') {
+    return {
+      ...file,
+      source: file.source
+        .replace('format_version: "3.3.0"', 'format_version: "3.4.0"')
+        .replace('version: "3.0.0"', 'version: "5.0.0"'),
+    }
+  }
+  if (file.path === 'win_states.yaml') {
+    return {
+      path: 'end_states.yaml',
+      source: file.source
+        .replace('win_states:', 'end_states:')
+        .replace(
+          '    text: You explain the complete solution.',
+          '    outcome: won\n    resolution: full\n    requires: [setting.study]\n    text: You explain the complete solution.',
+        ),
+    }
+  }
+  return file
+})
+const ruleset5Report = await validateRepositoryWithFeatures(ruleset5Files, [
+  'reference_text_v1',
+])
+assert.equal(ruleset5Report.valid, true)
+
+const invalidRuleset5Report = await validateRepositoryWithFeatures(
+  ruleset5Files.map((file) =>
+    file.path === 'end_states.yaml'
+      ? {
+          ...file,
+          source: file.source.replace(
+            '    requires: [setting.study]\n',
+            '    requires: [setting.study]\n    minimum_points: 0\n',
+          ),
+        }
+      : file,
+  ),
+  ['reference_text_v1'],
+)
+assert.equal(invalidRuleset5Report.valid, false)
+assert.ok(
+  invalidRuleset5Report.diagnostics.some(
+    ({ code, pointer }) =>
+      code === 'end_states.solution_condition_conflict' &&
+      pointer === '/end_states/0/minimum_points',
+  ),
+)
 
 const playabilityFixtureRoot = new URL(
   '../tests/fixtures/playability-analysis/',

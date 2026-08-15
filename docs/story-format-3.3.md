@@ -3,7 +3,8 @@
 Story Format 3.3 replaces the legacy fixed suspect/deduction Solve signature
 with one to four authored questions answered using physical story cards. It is
 paired with the immutable `ruleset.standard_mystery@3.0.0` catalog; Format 3.4
-may use the compatible `@4.0.0` notebook-policy catalog.
+may use the compatible `@4.0.0` notebook-policy catalog or the `@5.0.0`
+solution-prerequisite and notebook-reconciliation catalog.
 
 ```yaml
 case:
