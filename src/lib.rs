@@ -42,7 +42,10 @@ pub use solution::{
     SolutionContractMetadata, MAX_SOLUTION_ANSWER_CARDS, MAX_SOLUTION_QUESTIONS,
     MIN_SOLUTION_ANSWER_CARDS, MIN_SOLUTION_QUESTIONS, SOLUTION_STORY_FORMAT_VERSION,
 };
-pub use validator::{validate, validate_with_supported_features};
+pub use validator::{
+    validate, validate_with_supported_features, validate_without_playability,
+    validate_without_playability_with_features,
+};
 
 pub const VALIDATOR_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Latest story format authored by this release.

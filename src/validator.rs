@@ -367,6 +367,78 @@ pub fn validate_with_supported_features(
     }
 }
 
+/// Validate without running the CPU-heavy playability state-space search.
+///
+/// Workspace creation and save operations only need to know whether the YAML
+/// is structurally correct before committing — they do not consume the
+/// playability report. Skipping it cuts validation from ~10s to ~15ms on
+/// the 1-vCPU staging droplet.
+///
+/// The explicit "validate" button and simulation reports should continue to
+/// use [`validate`] or [`validate_with_supported_features`], which include
+/// playability diagnostics the author cares about.
+pub fn validate_without_playability(files: &[SourceFile]) -> ValidationReport {
+    validate_without_playability_with_features(
+        files,
+        &SUPPORTED_FEATURES
+            .iter()
+            .map(|feature| (*feature).to_string())
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// Same as [`validate_without_playability`] but with an explicit feature set.
+pub fn validate_without_playability_with_features(
+    files: &[SourceFile],
+    supported_features: &[String],
+) -> ValidationReport {
+    let mut validator = Validator {
+        files,
+        parsed: Vec::new(),
+        diagnostics: Vec::new(),
+        definitions: BTreeMap::new(),
+        sections: BTreeMap::new(),
+        format_version: None,
+        format_compatible: true,
+        ruleset: None,
+        features: Vec::new(),
+        supported_features: supported_features.iter().cloned().collect(),
+        feature_compatible: true,
+        reference_text: Vec::new(),
+    };
+    validator.run();
+    validator.diagnostics.sort_by(|left, right| {
+        (
+            &left.path,
+            left.range.map(|range| range.start.line).unwrap_or(0),
+            left.range.map(|range| range.start.column).unwrap_or(0),
+            &left.code,
+            &left.message,
+        )
+            .cmp(&(
+                &right.path,
+                right.range.map(|range| range.start.line).unwrap_or(0),
+                right.range.map(|range| range.start.column).unwrap_or(0),
+                &right.code,
+                &right.message,
+            ))
+    });
+    let valid = validator
+        .diagnostics
+        .iter()
+        .all(|diagnostic| diagnostic.severity != Severity::Error);
+    let format_version = validator.format_version.map(|version| version.to_string());
+    ValidationReport {
+        validator_version: VALIDATOR_VERSION.to_string(),
+        format_version,
+        valid,
+        diagnostics: validator.diagnostics,
+        features: validator.features,
+        reference_text: validator.reference_text,
+        playability: None,
+    }
+}
+
 impl<'a> Validator<'a> {
     fn is_format_3(&self) -> bool {
         self.format_version
