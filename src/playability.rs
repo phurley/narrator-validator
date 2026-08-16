@@ -252,6 +252,7 @@ struct Model {
     unsupported_triggers: BTreeSet<String>,
     solve_action: Option<String>,
     solution_answer_rows: Vec<BTreeSet<String>>,
+    precomputed_patterns: Vec<ActionPattern>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -989,6 +990,47 @@ impl Model {
             .sort_by(|a, b| (&a.id, &a.from, &a.to).cmp(&(&b.id, &b.from, &b.to)));
         self.unsupported
             .sort_by(|a, b| (&a.path, &a.pointer, &a.code).cmp(&(&b.path, &b.pointer, &b.code)));
+        self.precompute_patterns();
+    }
+
+    fn precompute_patterns(&mut self) {
+        let mut patterns = BTreeMap::<String, ActionPattern>::new();
+        for pattern in self
+            .facts
+            .values()
+            .filter_map(|fact| fact.on.as_ref())
+            .chain(
+                self.triggers
+                    .values()
+                    .filter_map(|trigger| trigger.on.as_ref()),
+            )
+        {
+            patterns.insert(pattern_key(pattern), pattern.clone());
+        }
+        let uncovered_commands = self
+            .commands
+            .values()
+            .filter(|command| {
+                !(command.requires_binding
+                    || self.unsupported_commands.contains(&command.id)
+                    || matches!(command.id.as_str(), "command.claim" | "command.deduce")
+                    || (command.id == "command.solve" && self.solve_action.is_some())
+                    || patterns
+                        .values()
+                        .any(|pattern| pattern.command == command.id))
+            })
+            .map(|command| command.id.clone())
+            .collect::<Vec<_>>();
+        for command_id in uncovered_commands {
+            patterns.insert(
+                command_id.clone(),
+                ActionPattern {
+                    command: command_id,
+                    bindings: BTreeMap::new(),
+                },
+            );
+        }
+        self.precomputed_patterns = patterns.into_values().collect();
     }
 
     fn solution_equivalent_deductions(&self) -> BTreeSet<String> {
@@ -1329,44 +1371,8 @@ impl Model {
                 });
             }
         }
-        let mut patterns = BTreeMap::<String, ActionPattern>::new();
-        for pattern in self
-            .facts
-            .values()
-            .filter_map(|fact| fact.on.as_ref())
-            .chain(
-                self.triggers
-                    .values()
-                    .filter_map(|trigger| trigger.on.as_ref()),
-            )
-        {
-            patterns.insert(pattern_key(pattern), pattern.clone());
-        }
-        let uncovered_commands = self
-            .commands
-            .values()
-            .filter(|command| {
-                !(command.requires_binding
-                    || self.unsupported_commands.contains(&command.id)
-                    || matches!(command.id.as_str(), "command.claim" | "command.deduce")
-                    || (command.id == "command.solve" && self.solve_action.is_some())
-                    || patterns
-                        .values()
-                        .any(|pattern| pattern.command == command.id))
-            })
-            .map(|command| command.id.clone())
-            .collect::<Vec<_>>();
-        for command_id in uncovered_commands {
-            patterns.insert(
-                command_id.clone(),
-                ActionPattern {
-                    command: command_id,
-                    bindings: BTreeMap::new(),
-                },
-            );
-        }
-        for pattern in patterns.into_values() {
-            if self.action_available(&pattern, state) {
+        for pattern in &self.precomputed_patterns {
+            if self.action_available(pattern, state) {
                 let advances_time = self
                     .commands
                     .get(&pattern.command)
@@ -1379,8 +1385,8 @@ impl Model {
                     .unwrap_or(false);
                 actions.push(CandidateAction {
                     kind: if advances_time { "wait" } else { "command" },
-                    id: pattern_key(&pattern),
-                    pattern,
+                    id: pattern_key(pattern),
+                    pattern: pattern.clone(),
                     from: None,
                     to: None,
                     minutes: 0,
