@@ -2,3 +2,6 @@
 /pkg/
 /.ci-tools/
 .DS_Store
+
+# scripts/verify.sh writes per-step logs here
+.verify-logs/
