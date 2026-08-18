@@ -57,3 +57,13 @@ jobs:
         run: node scripts/build-web-package.mjs
       - name: Smoke-test browser package
         run: node typescript/smoke-test.mjs
+      - name: Run native validator against fixture story
+        run: >-
+          cargo run --quiet --locked --
+          --format json tests/fixtures/format-3.3-solve-card-sets/
+          > "$RUNNER_TEMP/native-report.json"
+      - name: Check native/WASM parity
+        run: >-
+          node scripts/check-wasm-parity.mjs
+          tests/fixtures/format-3.3-solve-card-sets pkg
+          "$RUNNER_TEMP/native-report.json"
