@@ -127,7 +127,15 @@ This repository includes a composite action:
 - uses: phurley/narrator-validator@v1.7.0
 ```
 
-It builds the pinned validator revision and emits native GitHub annotations.
+It builds the pinned validator revision and, by default, emits native GitHub
+annotations. Inputs:
+
+- `path` (default `.`) — repository-relative path containing the story.
+- `format` (default `github`) — `text`, `json`, or `github`, passed straight
+  to the validator.
+- `report-path` (default unset) — if set, the report is also written to this
+  runner-relative path (in addition to stdout), so a later step can
+  post-process it, e.g. a JSON report for a story-specific coverage check.
 
 ## Story format versions
 

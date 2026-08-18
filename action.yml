@@ -1,10 +1,25 @@
 name: Narrator story validation
-description: Validate a complete Narrator story repository
+description: >-
+  Validate a complete Narrator story repository. The report is always
+  printed to stdout (as `text`, `json`, or GitHub-annotation output,
+  per `format`); set `report-path` to also write it to a file so a
+  consumer workflow can post-process it, e.g. with a JSON report.
 inputs:
   path:
     description: Repository-relative path containing the story
     required: false
     default: .
+  format:
+    description: Output format passed to the validator (text, json, or github)
+    required: false
+    default: github
+  report-path:
+    description: >-
+      If set, a runner-relative path the validator's report is also
+      written to (in addition to stdout), in the format requested via
+      `format`.
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
@@ -12,7 +27,15 @@ runs:
       uses: dtolnay/rust-toolchain@1.80.0
     - name: Build and run validator
       shell: bash
-      run: >-
-        cargo run --quiet --locked
-        --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml"
-        -- --format github "$GITHUB_WORKSPACE/${{ inputs.path }}"
+      run: |
+        set -o pipefail
+        if [ -n "${{ inputs.report-path }}" ]; then
+          cargo run --quiet --locked \
+            --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml" \
+            -- --format "${{ inputs.format }}" "$GITHUB_WORKSPACE/${{ inputs.path }}" \
+            | tee "${{ inputs.report-path }}"
+        else
+          cargo run --quiet --locked \
+            --manifest-path "$GITHUB_ACTION_PATH/Cargo.toml" \
+            -- --format "${{ inputs.format }}" "$GITHUB_WORKSPACE/${{ inputs.path }}"
+        fi
