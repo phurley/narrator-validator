@@ -1,0 +1,190 @@
+
+case:
+  id: case.example
+  format_version: "3.0.0"
+  players:
+    min: 1
+    max: 4
+  initial_time: "21:00"
+  entry_settings: [setting.foyer]
+  exit_settings: [setting.foyer]
+solution:
+  victim: character.victim
+  culprit: character.culprit
+  weapon: entity.knife
+  location: setting.study
+  deduction: deduction.solution
+settings:
+  - id: setting.world
+    type: island
+    navigable: false
+    description: The world containing the playable rooms.
+  - id: setting.foyer
+    type: room
+    description: The entry foyer.
+    parent: setting.world
+    facts:
+      - id: fact.setting_detail
+        statement: A setting-owned fact.
+        narrative_detail: SAFE_NARRATIVE_DETAIL
+        occurred_at:
+          day: 0
+          time: "21:18"
+  - id: setting.study
+    type: room
+    description: The study where the mystery occurred.
+    parent: setting.world
+routes:
+  - id: route.foyer_study
+    from: setting.foyer
+    to: setting.study
+    bidirectional: true
+    travel_minutes: 1
+characters:
+  - id: character.victim
+    description: The victim at the center of the mystery.
+  - id: character.culprit
+    description: A suspect with a carefully guarded secret.
+    facts:
+      - id: fact.character_detail
+        statement: A character-owned fact.
+        narrative_detail: SAFE_NARRATIVE_DETAIL
+        occurred_at:
+          day: 0
+          time: "21:18"
+entities:
+  - id: entity.knife
+    description: A knife found in the study.
+    initial:
+      container: setting.study
+    facts:
+      - id: fact.knife_is_present
+        statement: The knife is present.
+        narrative_detail: SAFE_NARRATIVE_DETAIL
+        occurred_at:
+          day: 0
+          time: "21:18"
+      - id: fact.knife_has_blood
+        statement: The knife carries the victim's blood.
+        about: [entity.knife, character.victim]
+        when:
+          all:
+            - flag: flag.knife_analysis_complete
+      - id: fact.knife_connects_to_scene
+        statement: The knife connects the culprit to the study.
+        when:
+          all:
+            - knows: fact.knife_is_present
+            - owns: entity.knife
+events:
+  - id: event.murder
+    day: 0
+    time: "21:18"
+    duration_minutes: 0
+    location: setting.study
+    participants: [character.victim, character.culprit]
+    facts:
+      - id: fact.event_detail
+        statement: An event-owned fact.
+        narrative_detail: SAFE_NARRATIVE_DETAIL
+        occurred_at:
+          day: 0
+          time: "21:18"
+deductions:
+  - id: deduction.solution
+    conclusion: The knife was used in the study.
+    inputs: [fact.knife_has_blood, fact.knife_connects_to_scene]
+    truth: true
+flags:
+  - id: flag.knife_examined
+    name: Knife examined
+    description: Whether the knife has been examined.
+    initial_state: false
+  - id: flag.knife_analysis_complete
+    name: Knife analysis complete
+    description: Whether the delayed knife analysis has completed.
+    initial_state: false
+commands:
+  - id: command.claim
+    name: Claim
+    description: Learn that the knife is present.
+    effects:
+      - operation: learn_fact
+        fact_id: fact.knife_is_present
+  - id: command.investigate
+    name: Investigate
+    description: Resolve the authored effects of investigating an entity.
+    parameters:
+      - name: target
+        types: [entity]
+        min: 1
+        max: 1
+      - name: destination
+        types: [setting]
+        min: 0
+        max: 1
+      - name: companion
+        types: [character]
+        min: 0
+        max: 1
+      - name: conclusion
+        types: [deduction]
+        min: 0
+        max: 1
+      - name: incident
+        types: [event]
+        min: 0
+        max: 1
+    effects:
+      - operation: advance_time
+        minutes: 12
+      - operation: move
+        subjects: [player, character.culprit, param1, param3]
+        setting: param2
+      - operation: transform
+        entity_from: param1
+        entity_to: entity.knife
+      - operation: learn_fact
+        fact_id: fact.knife_has_blood
+      - operation: establish_deduction
+        deduction_id: param4
+      - operation: describe
+        text: The examination reveals a carefully staged scene.
+      - operation: win
+        text: The player has solved the mystery.
+      - operation: lose
+        text: The trail has gone cold.
+triggers:
+  - id: trigger.investigate_knife
+    name: Investigate the knife
+    on:
+      command: command.investigate
+      parameters:
+        target: entity.knife
+    effects:
+      - operation: set_flag
+        flag: flag.knife_analysis_complete
+        value: true
+        after: 20m
+    facts:
+      - id: fact.trigger_detail
+        statement: A trigger-owned fact.
+        narrative_detail: SAFE_NARRATIVE_DETAIL
+        occurred_at:
+          day: 0
+          time: "21:18"
+cards:
+  - tag_id: 0
+    subject: setting.foyer
+  - tag_id: 1
+    subject: setting.study
+  - tag_id: 2
+    subject: character.victim
+  - tag_id: 3
+    subject: character.culprit
+  - tag_id: 4
+    subject: entity.knife
+  - tag_id: 5
+    subject: command.claim
+  - tag_id: 6
+    subject: command.investigate

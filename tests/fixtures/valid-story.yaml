@@ -1,0 +1,86 @@
+
+case:
+  id: case.example
+  format_version: "1.0.0"
+  entry_settings: [setting.foyer]
+  exit_settings: [setting.foyer]
+solution:
+  victim: character.victim
+  culprit: character.culprit
+  weapon: entity.knife
+  location: setting.study
+settings:
+  - id: setting.world
+    type: island
+  - id: setting.foyer
+    type: room
+    parent: setting.world
+  - id: setting.study
+    type: room
+    parent: setting.world
+routes:
+  - id: route.foyer_study
+    from: setting.foyer
+    to: setting.study
+    bidirectional: true
+    travel_minutes: 1
+characters:
+  - id: character.victim
+  - id: character.culprit
+entities:
+  - id: entity.knife
+    initial:
+      container: setting.study
+events:
+  - id: event.murder
+    day: 0
+    time: "21:18"
+    duration_minutes: 0
+    location: setting.study
+    participants: [character.victim, character.culprit]
+clues:
+  - id: clue.weapon
+    discover_by:
+      target: entity.knife
+deductions:
+  - id: deduction.solution
+    supported_by: [clue.weapon]
+flags:
+  - id: flag.knife_examined
+    name: Knife examined
+    description: Whether the knife has been examined.
+    initial_state: false
+commands:
+  - id: command.examine
+    name: Examine
+    description: Inspect an entity.
+    parameters:
+      - name: target
+        type: entity
+        required: true
+    effects: []
+triggers:
+  - id: trigger.examine_knife
+    name: Examine the knife
+    command: command.examine
+    once: true
+    time:
+      relation: at
+      value: "21:18"
+    location: setting.study
+    any_of: [character.culprit, entity.knife]
+    all_of: [flag.knife_examined]
+    effects: []
+cards:
+  - tag_id: 0
+    subject: setting.foyer
+  - tag_id: 1
+    subject: setting.study
+  - tag_id: 2
+    subject: character.victim
+  - tag_id: 3
+    subject: character.culprit
+  - tag_id: 4
+    subject: entity.knife
+  - tag_id: 5
+    subject: command.examine

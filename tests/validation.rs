@@ -8,253 +8,9 @@ use narrator_validator::{
 };
 use serde_yaml::{Mapping, Value};
 
-const VALID_STORY: &str = r#"
-case:
-  id: case.example
-  format_version: "1.0.0"
-  entry_settings: [setting.foyer]
-  exit_settings: [setting.foyer]
-solution:
-  victim: character.victim
-  culprit: character.culprit
-  weapon: entity.knife
-  location: setting.study
-settings:
-  - id: setting.world
-    type: island
-  - id: setting.foyer
-    type: room
-    parent: setting.world
-  - id: setting.study
-    type: room
-    parent: setting.world
-routes:
-  - id: route.foyer_study
-    from: setting.foyer
-    to: setting.study
-    bidirectional: true
-    travel_minutes: 1
-characters:
-  - id: character.victim
-  - id: character.culprit
-entities:
-  - id: entity.knife
-    initial:
-      container: setting.study
-events:
-  - id: event.murder
-    day: 0
-    time: "21:18"
-    duration_minutes: 0
-    location: setting.study
-    participants: [character.victim, character.culprit]
-clues:
-  - id: clue.weapon
-    discover_by:
-      target: entity.knife
-deductions:
-  - id: deduction.solution
-    supported_by: [clue.weapon]
-flags:
-  - id: flag.knife_examined
-    name: Knife examined
-    description: Whether the knife has been examined.
-    initial_state: false
-commands:
-  - id: command.examine
-    name: Examine
-    description: Inspect an entity.
-    parameters:
-      - name: target
-        type: entity
-        required: true
-    effects: []
-triggers:
-  - id: trigger.examine_knife
-    name: Examine the knife
-    command: command.examine
-    once: true
-    time:
-      relation: at
-      value: "21:18"
-    location: setting.study
-    any_of: [character.culprit, entity.knife]
-    all_of: [flag.knife_examined]
-    effects: []
-cards:
-  - tag_id: 0
-    subject: setting.foyer
-  - tag_id: 1
-    subject: setting.study
-  - tag_id: 2
-    subject: character.victim
-  - tag_id: 3
-    subject: character.culprit
-  - tag_id: 4
-    subject: entity.knife
-  - tag_id: 5
-    subject: command.examine
-"#;
+const VALID_STORY: &str = include_str!("fixtures/valid-story.yaml");
 
-const VALID_FORMAT_3_STORY: &str = r#"
-case:
-  id: case.example
-  format_version: "3.0.0"
-  players:
-    min: 1
-    max: 4
-  initial_time: "21:00"
-  entry_settings: [setting.foyer]
-  exit_settings: [setting.foyer]
-solution:
-  victim: character.victim
-  culprit: character.culprit
-  weapon: entity.knife
-  location: setting.study
-  deduction: deduction.solution
-settings:
-  - id: setting.world
-    type: island
-    navigable: false
-    description: The world containing the playable rooms.
-  - id: setting.foyer
-    type: room
-    description: The entry foyer.
-    parent: setting.world
-  - id: setting.study
-    type: room
-    description: The study where the mystery occurred.
-    parent: setting.world
-routes:
-  - id: route.foyer_study
-    from: setting.foyer
-    to: setting.study
-    bidirectional: true
-    travel_minutes: 1
-characters:
-  - id: character.victim
-    description: The victim at the center of the mystery.
-  - id: character.culprit
-    description: A suspect with a carefully guarded secret.
-entities:
-  - id: entity.knife
-    description: A knife found in the study.
-    initial:
-      container: setting.study
-    facts:
-      - id: fact.knife_is_present
-        statement: The knife is present.
-      - id: fact.knife_has_blood
-        statement: The knife carries the victim's blood.
-        about: [entity.knife, character.victim]
-        when:
-          all:
-            - flag: flag.knife_analysis_complete
-      - id: fact.knife_connects_to_scene
-        statement: The knife connects the culprit to the study.
-        when:
-          all:
-            - knows: fact.knife_is_present
-            - owns: entity.knife
-events:
-  - id: event.murder
-    day: 0
-    time: "21:18"
-    duration_minutes: 0
-    location: setting.study
-    participants: [character.victim, character.culprit]
-deductions:
-  - id: deduction.solution
-    conclusion: The knife was used in the study.
-    inputs: [fact.knife_has_blood, fact.knife_connects_to_scene]
-    truth: true
-flags:
-  - id: flag.knife_examined
-    name: Knife examined
-    description: Whether the knife has been examined.
-    initial_state: false
-  - id: flag.knife_analysis_complete
-    name: Knife analysis complete
-    description: Whether the delayed knife analysis has completed.
-    initial_state: false
-commands:
-  - id: command.claim
-    name: Claim
-    description: Learn that the knife is present.
-    effects:
-      - operation: learn_fact
-        fact_id: fact.knife_is_present
-  - id: command.investigate
-    name: Investigate
-    description: Resolve the authored effects of investigating an entity.
-    parameters:
-      - name: target
-        types: [entity]
-        min: 1
-        max: 1
-      - name: destination
-        types: [setting]
-        min: 0
-        max: 1
-      - name: companion
-        types: [character]
-        min: 0
-        max: 1
-      - name: conclusion
-        types: [deduction]
-        min: 0
-        max: 1
-      - name: incident
-        types: [event]
-        min: 0
-        max: 1
-    effects:
-      - operation: advance_time
-        minutes: 12
-      - operation: move
-        subjects: [player, character.culprit, param1, param3]
-        setting: param2
-      - operation: transform
-        entity_from: param1
-        entity_to: entity.knife
-      - operation: learn_fact
-        fact_id: fact.knife_has_blood
-      - operation: establish_deduction
-        deduction_id: param4
-      - operation: describe
-        text: The examination reveals a carefully staged scene.
-      - operation: win
-        text: The player has solved the mystery.
-      - operation: lose
-        text: The trail has gone cold.
-triggers:
-  - id: trigger.investigate_knife
-    name: Investigate the knife
-    on:
-      command: command.investigate
-      parameters:
-        target: entity.knife
-    effects:
-      - operation: set_flag
-        flag: flag.knife_analysis_complete
-        value: true
-        after: 20m
-cards:
-  - tag_id: 0
-    subject: setting.foyer
-  - tag_id: 1
-    subject: setting.study
-  - tag_id: 2
-    subject: character.victim
-  - tag_id: 3
-    subject: character.culprit
-  - tag_id: 4
-    subject: entity.knife
-  - tag_id: 5
-    subject: command.claim
-  - tag_id: 6
-    subject: command.investigate
-"#;
+const VALID_FORMAT_3_STORY: &str = include_str!("fixtures/valid-format-3-story.yaml");
 
 fn report(source: impl Into<String>) -> narrator_validator::ValidationReport {
     validate(&story_files(source.into()))
@@ -1078,34 +834,11 @@ fn codes(source: impl Into<String>) -> Vec<String> {
 }
 
 fn format_3_story_with_narrative_details() -> String {
-    VALID_FORMAT_3_STORY
-        .replace(
-            "  - id: setting.foyer\n    type: room\n    description: The entry foyer.\n    parent: setting.world",
-            "  - id: setting.foyer\n    type: room\n    description: The entry foyer.\n    parent: setting.world\n    facts:\n      - id: fact.setting_detail\n        statement: A setting-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL",
-        )
-        .replace(
-            "  - id: character.culprit\n    description: A suspect with a carefully guarded secret.\nentities:",
-            "  - id: character.culprit\n    description: A suspect with a carefully guarded secret.\n    facts:\n      - id: fact.character_detail\n        statement: A character-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL\nentities:",
-        )
-        .replace(
-            "        statement: The knife is present.",
-            "        statement: The knife is present.\n        narrative_detail: SAFE_NARRATIVE_DETAIL",
-        )
-        .replace(
-            "    participants: [character.victim, character.culprit]\ndeductions:",
-            "    participants: [character.victim, character.culprit]\n    facts:\n      - id: fact.event_detail\n        statement: An event-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL\ndeductions:",
-        )
-        .replace(
-            "        after: 20m\n",
-            "        after: 20m\n    facts:\n      - id: fact.trigger_detail\n        statement: A trigger-owned fact.\n        narrative_detail: SAFE_NARRATIVE_DETAIL\n",
-        )
+    include_str!("fixtures/format-3-story-with-narrative-details.yaml").to_string()
 }
 
 fn format_3_story_with_occurrences_on_every_fact_owner() -> String {
-    format_3_story_with_narrative_details().replace(
-        "        narrative_detail: SAFE_NARRATIVE_DETAIL",
-        "        narrative_detail: SAFE_NARRATIVE_DETAIL\n        occurred_at:\n          day: 0\n          time: \"21:18\"",
-    )
+    include_str!("fixtures/format-3-story-with-occurrences-on-every-fact-owner.yaml").to_string()
 }
 
 fn format_3_story_with_entity_occurrence(occurred_at: &str) -> String {
@@ -1128,13 +861,7 @@ fn format_3_story_with_character_fields(fields: &str) -> String {
 }
 
 fn format_3_story_with_player_safe_character_behavior() -> String {
-    format_3_story_with_character_fields(
-        "    portrayal:\n      demeanor: Controlled and professionally helpful.\n      speech_style: Precise, restrained sentences.\n    testimony:\n      - id: testimony.culprit_opening_account\n        text: The culprit gives a player-safe opening account.\n        requires: [command.question, character.culprit]\n        reveals: [fact.knife_is_present]\n      - id: testimony.culprit_follow_up\n        text: The culprit gives a second player-safe account.\n        requires: [command.question, character.culprit, fact.knife_is_present]\n        reveals: []\n",
-    )
-    .replace(
-        "  - id: character.victim\n",
-        "  - id: character.victim\n    portrayal:\n      demeanor: Quietly formal.\n    testimony: []\n",
-    )
+    include_str!("fixtures/format-3-story-with-player-safe-character-behavior.yaml").to_string()
 }
 
 fn story_files(source: String) -> Vec<SourceFile> {
@@ -1270,41 +997,15 @@ fn standard_ruleset_5_0_is_format_3_4_and_adds_reconciliation() {
 }
 
 fn format_3_3_question_story() -> String {
-    VALID_FORMAT_3_STORY
-        .replace(
-            "  format_version: \"3.0.0\"",
-            "  format_version: \"3.3.0\"\n  features: [reference_text_v1]\n  ruleset:\n    id: ruleset.standard_mystery\n    version: \"3.0.0\"",
-        )
-        .replace(
-            "solution:\n  victim: character.victim\n  culprit: character.culprit\n  weapon: entity.knife\n  location: setting.study\n  deduction: deduction.solution\n",
-            "solution:\n  win_state: win.solve_case\n  questions:\n    - prompt: Who killed [[character.victim.description]]?\n      answer: [character.culprit]\n    - prompt: Which cards identify the weapon and location?\n      answer: [entity.knife, setting.study]\n      ordered: true\nwin_states:\n  - id: win.solve_case\n    name: Solved the case\n    text: You answer every question correctly.\n",
-        )
-        .replace(
-            "  - id: command.claim\n    name: Claim\n    description: Learn that the knife is present.\n    effects:\n      - operation: learn_fact\n        fact_id: fact.knife_is_present\n",
-            "",
-        )
-        .replace("    subject: command.claim", "    subject: command.solve")
+    include_str!("fixtures/format-3.3-question-story.yaml").to_string()
 }
 
 fn format_3_4_end_state_story() -> String {
-    let end_states = fs::read_to_string("tests/fixtures/format-3.4-end-states.yaml")
-        .expect("Format 3.4 end-state fixture");
-    format_3_3_question_story()
-        .replacen("format_version: \"3.3.0\"", "format_version: \"3.4.0\"", 1)
-        .replace(
-            "win_states:\n  - id: win.solve_case\n    name: Solved the case\n    text: You answer every question correctly.\n",
-            &end_states,
-        )
+    include_str!("fixtures/format-3.4-end-state-story.yaml").to_string()
 }
 
 fn format_3_4_ruleset_5_solution_prerequisite_story() -> String {
-    format_3_4_end_state_story()
-        .replacen("version: \"3.0.0\"", "version: \"5.0.0\"", 1)
-        .replacen(
-            "    text: You answer every question and explain the complete case.",
-            "    requires: [flag.knife_examined]\n    text: You answer every question and explain the complete case.",
-            1,
-        )
+    include_str!("fixtures/format-3.4-ruleset-5-solution-prerequisite-story.yaml").to_string()
 }
 
 #[test]
@@ -5128,19 +4829,7 @@ fn github_cli_supports_repository_level_annotations() {
 }
 
 fn format_3_2_reference_story() -> String {
-    VALID_FORMAT_3_STORY
-        .replace(
-            "  format_version: \"3.0.0\"",
-            "  format_version: \"3.2.0\"\n  features: [reference_text_v1]\n  title: The Last Tide\n  opening: \"[[character.victim]] waits in [[setting.foyer.name]].\"",
-        )
-        .replace(
-            "  - id: character.victim\n",
-            "  - id: character.victim\n    name: Morgan Vale\n",
-        )
-        .replace(
-            "  - id: setting.foyer\n",
-            "  - id: setting.foyer\n    name: The Foyer\n",
-        )
+    include_str!("fixtures/format-3.2-reference-story.yaml").to_string()
 }
 
 #[test]

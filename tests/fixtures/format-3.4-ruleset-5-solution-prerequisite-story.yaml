@@ -1,0 +1,185 @@
+
+case:
+  id: case.example
+  format_version: "3.4.0"
+  features: [reference_text_v1]
+  ruleset:
+    id: ruleset.standard_mystery
+    version: "5.0.0"
+  players:
+    min: 1
+    max: 4
+  initial_time: "21:00"
+  entry_settings: [setting.foyer]
+  exit_settings: [setting.foyer]
+solution:
+  win_state: win.solve_case
+  questions:
+    - prompt: Who killed [[character.victim.description]]?
+      answer: [character.culprit]
+    - prompt: Which cards identify the weapon and location?
+      answer: [entity.knife, setting.study]
+      ordered: true
+end_states:
+  - id: win.solve_case
+    name: The whole truth
+    outcome: won
+    resolution: full
+    requires: [flag.knife_examined]
+    text: You answer every question and explain the complete case.
+  - id: end.partial_truth
+    name: A defensible theory
+    outcome: won
+    resolution: partial
+    requires: [deduction.solution]
+    minimum_points: 20
+    text: You establish the central theory, but part of the case remains unresolved.
+  - id: end.deadline_failure
+    name: The trail goes cold
+    outcome: lost
+    resolution: failure
+    requires: [flag.knife_examined]
+    at_or_after: "23:00"
+    text: The deadline passes before you can preserve the evidence.
+  - id: end.condition_failure
+    name: The evidence is compromised
+    outcome: lost
+    resolution: failure
+    requires: [flag.knife_analysis_complete]
+    text: The compromised analysis prevents a defensible conclusion.
+settings:
+  - id: setting.world
+    type: island
+    navigable: false
+    description: The world containing the playable rooms.
+  - id: setting.foyer
+    type: room
+    description: The entry foyer.
+    parent: setting.world
+  - id: setting.study
+    type: room
+    description: The study where the mystery occurred.
+    parent: setting.world
+routes:
+  - id: route.foyer_study
+    from: setting.foyer
+    to: setting.study
+    bidirectional: true
+    travel_minutes: 1
+characters:
+  - id: character.victim
+    description: The victim at the center of the mystery.
+  - id: character.culprit
+    description: A suspect with a carefully guarded secret.
+entities:
+  - id: entity.knife
+    description: A knife found in the study.
+    initial:
+      container: setting.study
+    facts:
+      - id: fact.knife_is_present
+        statement: The knife is present.
+      - id: fact.knife_has_blood
+        statement: The knife carries the victim's blood.
+        about: [entity.knife, character.victim]
+        when:
+          all:
+            - flag: flag.knife_analysis_complete
+      - id: fact.knife_connects_to_scene
+        statement: The knife connects the culprit to the study.
+        when:
+          all:
+            - knows: fact.knife_is_present
+            - owns: entity.knife
+events:
+  - id: event.murder
+    day: 0
+    time: "21:18"
+    duration_minutes: 0
+    location: setting.study
+    participants: [character.victim, character.culprit]
+deductions:
+  - id: deduction.solution
+    conclusion: The knife was used in the study.
+    inputs: [fact.knife_has_blood, fact.knife_connects_to_scene]
+    truth: true
+flags:
+  - id: flag.knife_examined
+    name: Knife examined
+    description: Whether the knife has been examined.
+    initial_state: false
+  - id: flag.knife_analysis_complete
+    name: Knife analysis complete
+    description: Whether the delayed knife analysis has completed.
+    initial_state: false
+commands:
+  - id: command.investigate
+    name: Investigate
+    description: Resolve the authored effects of investigating an entity.
+    parameters:
+      - name: target
+        types: [entity]
+        min: 1
+        max: 1
+      - name: destination
+        types: [setting]
+        min: 0
+        max: 1
+      - name: companion
+        types: [character]
+        min: 0
+        max: 1
+      - name: conclusion
+        types: [deduction]
+        min: 0
+        max: 1
+      - name: incident
+        types: [event]
+        min: 0
+        max: 1
+    effects:
+      - operation: advance_time
+        minutes: 12
+      - operation: move
+        subjects: [player, character.culprit, param1, param3]
+        setting: param2
+      - operation: transform
+        entity_from: param1
+        entity_to: entity.knife
+      - operation: learn_fact
+        fact_id: fact.knife_has_blood
+      - operation: establish_deduction
+        deduction_id: param4
+      - operation: describe
+        text: The examination reveals a carefully staged scene.
+      - operation: win
+        text: The player has solved the mystery.
+      - operation: lose
+        text: The trail has gone cold.
+triggers:
+  - id: trigger.investigate_knife
+    name: Investigate the knife
+    on:
+      command: command.investigate
+      parameters:
+        target: entity.knife
+    effects:
+      - operation: set_flag
+        flag: flag.knife_analysis_complete
+        value: true
+        after: 20m
+cards:
+  - tag_id: 0
+    subject: setting.foyer
+  - tag_id: 1
+    subject: setting.study
+  - tag_id: 2
+    subject: character.victim
+  - tag_id: 3
+    subject: character.culprit
+  - tag_id: 4
+    subject: entity.knife
+  - tag_id: 5
+    subject: command.solve
+  - tag_id: 6
+    subject: command.investigate
