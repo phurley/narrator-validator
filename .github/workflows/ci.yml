@@ -27,6 +27,8 @@ jobs:
         with:
           components: clippy,rustfmt
           targets: wasm32-unknown-unknown
+      - name: Check reproducible browser build flags
+        run: bash scripts/check-reproducible-rustflags.sh
       - run: cargo fmt --check
       - run: cargo clippy --all-targets --all-features -- -D warnings
       - run: cargo test --all-features
