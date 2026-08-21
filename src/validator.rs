@@ -9687,3 +9687,300 @@ fn contains_yaml_anchor_or_alias(source: &str) -> bool {
     }
     false
 }
+
+#[cfg(test)]
+mod resource_cap_boundary_tests {
+    use super::*;
+
+    fn report(files: Vec<SourceFile>) -> ValidationReport {
+        validate_without_playability(&files)
+    }
+
+    fn invalid_yaml_of_len(len: usize) -> String {
+        assert!(len >= 3, "the invalid-YAML sentinel needs three bytes");
+        let source = format!(":\n#{}", "x".repeat(len - 3));
+        assert_eq!(
+            source.len(),
+            len,
+            "fixture must have the requested byte count"
+        );
+        source
+    }
+
+    fn files_for_total_bytes(total: usize) -> Vec<SourceFile> {
+        const FILES: usize = 5;
+        let base = total / FILES;
+        let remainder = total % FILES;
+        let files = (0..FILES)
+            .map(|index| {
+                let bytes = base + usize::from(index < remainder);
+                SourceFile {
+                    path: format!("source-{index}.yaml"),
+                    source: invalid_yaml_of_len(bytes),
+                }
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            files.iter().map(|file| file.source.len()).sum::<usize>(),
+            total,
+            "fixture must have the requested aggregate byte count"
+        );
+        assert!(
+            files.iter().all(|file| file.source.len() <= MAX_FILE_BYTES),
+            "aggregate fixture must not also exceed the per-file cap"
+        );
+        files
+    }
+
+    fn sequence_with_nodes(nodes: usize) -> String {
+        assert!(nodes >= 1, "a YAML document always has a root node");
+        let source = format!("[{}]\n", vec!["x"; nodes - 1].join(","));
+        let value: Value = serde_yaml::from_str(&source).expect("generated YAML parses");
+        let (depth, actual_nodes) = yaml_metrics(&value, 0);
+        assert_eq!(
+            actual_nodes, nodes,
+            "fixture must have the requested node count"
+        );
+        assert_eq!(depth, 1, "flat sequence fixture must have depth one");
+        source
+    }
+
+    fn sequence_with_depth(depth: usize) -> String {
+        let source = format!("{}x{}\n", "[".repeat(depth), "]".repeat(depth));
+        let value: Value = serde_yaml::from_str(&source).expect("generated YAML parses");
+        let (actual_depth, nodes) = yaml_metrics(&value, 0);
+        assert_eq!(
+            actual_depth, depth,
+            "fixture must have the requested YAML depth"
+        );
+        assert_eq!(nodes, depth + 1, "nested sequence node count is explicit");
+        source
+    }
+
+    fn yaml_metrics(value: &Value, depth: usize) -> (usize, usize) {
+        match value {
+            Value::Sequence(values) => values.iter().fold((depth, 1), |metrics, value| {
+                merge_metrics(metrics, yaml_metrics(value, depth + 1))
+            }),
+            Value::Mapping(values) => values.iter().fold((depth, 1), |metrics, (key, value)| {
+                merge_metrics(
+                    merge_metrics(metrics, yaml_metrics(key, depth + 1)),
+                    yaml_metrics(value, depth + 1),
+                )
+            }),
+            Value::Tagged(value) => {
+                merge_metrics((depth, 1), yaml_metrics(&value.value, depth + 1))
+            }
+            _ => (depth, 1),
+        }
+    }
+
+    fn merge_metrics(left: (usize, usize), right: (usize, usize)) -> (usize, usize) {
+        (left.0.max(right.0), left.1 + right.1)
+    }
+
+    fn assert_refused_before_parsing(report: ValidationReport, code: &str, path: &str) {
+        assert_eq!(
+            report.diagnostics.len(),
+            1,
+            "refusal must stop normal validation"
+        );
+        let diagnostic = &report.diagnostics[0];
+        assert_eq!(diagnostic.code, code);
+        assert_eq!(diagnostic.path, path);
+        assert!(
+            diagnostic.range.is_none(),
+            "resource caps have no source range"
+        );
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code.starts_with("yaml.")
+                    || diagnostic.code.starts_with("schema.")),
+            "the malformed sentinel must not reach parsing or schema validation"
+        );
+    }
+
+    #[test]
+    fn repository_file_cap_accepts_the_exact_limit_and_refuses_the_next_file() {
+        assert_eq!(
+            MAX_REPOSITORY_FILES, 512,
+            "the exact limit is inclusive policy"
+        );
+        for count in [MAX_REPOSITORY_FILES - 1, MAX_REPOSITORY_FILES] {
+            let files = (0..count)
+                .map(|index| SourceFile {
+                    path: format!("file-{index}.yaml"),
+                    source: ":\n".to_string(),
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                files.len(),
+                count,
+                "fixture must have the requested file count"
+            );
+            let report = report(files);
+            assert!(!report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "repository.too_many_files"));
+            assert!(report.diagnostics.iter().any(|d| d.code == "yaml.invalid"));
+        }
+
+        let files = (0..=MAX_REPOSITORY_FILES)
+            .map(|index| SourceFile {
+                path: format!("file-{index}.yaml"),
+                source: ":\n".to_string(),
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(files.len(), MAX_REPOSITORY_FILES + 1);
+        assert_refused_before_parsing(report(files), "repository.too_many_files", "");
+    }
+
+    #[test]
+    fn repository_byte_cap_accepts_the_exact_limit_and_refuses_the_next_byte() {
+        assert_eq!(
+            MAX_REPOSITORY_BYTES,
+            1024 * 1024,
+            "the exact limit is inclusive policy"
+        );
+        for bytes in [MAX_REPOSITORY_BYTES - 1, MAX_REPOSITORY_BYTES] {
+            let report = report(files_for_total_bytes(bytes));
+            assert!(!report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "repository.too_large"));
+            assert!(report.diagnostics.iter().any(|d| d.code == "yaml.invalid"));
+        }
+
+        assert_refused_before_parsing(
+            report(files_for_total_bytes(MAX_REPOSITORY_BYTES + 1)),
+            "repository.too_large",
+            "",
+        );
+    }
+
+    #[test]
+    fn per_file_byte_cap_accepts_the_exact_limit_and_refuses_the_next_byte() {
+        assert_eq!(
+            MAX_FILE_BYTES,
+            256 * 1024,
+            "the exact limit is inclusive policy"
+        );
+        for bytes in [MAX_FILE_BYTES - 1, MAX_FILE_BYTES] {
+            let source = invalid_yaml_of_len(bytes);
+            assert_eq!(source.len(), bytes);
+            let report = report(vec![SourceFile {
+                path: "large.yaml".to_string(),
+                source,
+            }]);
+            assert!(!report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "repository.file_too_large"));
+            assert!(report.diagnostics.iter().any(|d| d.code == "yaml.invalid"));
+        }
+
+        let source = invalid_yaml_of_len(MAX_FILE_BYTES + 1);
+        assert_eq!(source.len(), MAX_FILE_BYTES + 1);
+        assert_refused_before_parsing(
+            report(vec![SourceFile {
+                path: "large.yaml".to_string(),
+                source,
+            }]),
+            "repository.file_too_large",
+            "large.yaml",
+        );
+    }
+
+    #[test]
+    fn yaml_depth_cap_accepts_the_exact_limit_and_refuses_the_next_level() {
+        assert_eq!(MAX_YAML_DEPTH, 64, "the exact limit is inclusive policy");
+        for depth in [MAX_YAML_DEPTH - 1, MAX_YAML_DEPTH] {
+            let source = sequence_with_depth(depth);
+            let report = report(vec![SourceFile {
+                path: "depth.yaml".to_string(),
+                source,
+            }]);
+            assert!(!report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "yaml.too_complex"));
+            assert!(report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "schema.root_type"));
+        }
+
+        let report = report(vec![SourceFile {
+            path: "depth.yaml".to_string(),
+            source: sequence_with_depth(MAX_YAML_DEPTH + 1),
+        }]);
+        let diagnostic = report
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "yaml.too_complex")
+            .expect("depth refusal diagnostic");
+        assert_eq!(diagnostic.path, "depth.yaml");
+        assert!(diagnostic.range.is_none());
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "schema.root_type"),
+            "refused YAML must not reach root schema validation"
+        );
+    }
+
+    #[test]
+    fn yaml_node_cap_accepts_the_exact_limit_and_refuses_the_next_node() {
+        assert_eq!(
+            MAX_YAML_NODES, 100_000,
+            "the exact limit is inclusive policy"
+        );
+        for nodes in [MAX_YAML_NODES - 1, MAX_YAML_NODES] {
+            let source = sequence_with_nodes(nodes);
+            assert!(
+                source.len() <= MAX_FILE_BYTES,
+                "node fixture must not exceed the file cap"
+            );
+            let report = report(vec![SourceFile {
+                path: "nodes.yaml".to_string(),
+                source,
+            }]);
+            assert!(!report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "yaml.too_complex"));
+            assert!(report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "schema.root_type"));
+        }
+
+        let source = sequence_with_nodes(MAX_YAML_NODES + 1);
+        assert!(
+            source.len() <= MAX_FILE_BYTES,
+            "node fixture must not exceed the file cap"
+        );
+        let report = report(vec![SourceFile {
+            path: "nodes.yaml".to_string(),
+            source,
+        }]);
+        let diagnostic = report
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "yaml.too_complex")
+            .expect("node refusal diagnostic");
+        assert_eq!(diagnostic.path, "nodes.yaml");
+        assert!(diagnostic.range.is_none());
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "schema.root_type"),
+            "refused YAML must not reach root schema validation"
+        );
+    }
+}
