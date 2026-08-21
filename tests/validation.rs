@@ -915,7 +915,7 @@ fn valid_repository_has_no_diagnostics() {
 fn valid_format_3_repository_has_no_diagnostics() {
     let report = report(VALID_FORMAT_3_STORY);
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert_eq!(report.validator_version, "1.7.0");
+    assert_eq!(report.validator_version, "1.7.1");
     assert_eq!(report.format_version.as_deref(), Some("3.0.0"));
     assert!(report.diagnostics.is_empty());
 }

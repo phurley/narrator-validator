@@ -83,9 +83,10 @@ run() {
   else printf 'FAIL (%ss)  -> %s\n' "$(( $(date +%s) - s ))" "$log"; SUMMARY+=$(printf '\n  FAIL  %-16s %s' "$name" "$log"); FAILED=$((FAILED+1)); fi
 }
 
-run fmt    "${CARGO[@]}" fmt --check
-run clippy "${CARGO[@]}" clippy --all-targets --all-features -- -D warnings
-run test   "${CARGO[@]}" test --all-features
+run rustflags bash scripts/check-reproducible-rustflags.sh
+run fmt       "${CARGO[@]}" fmt --check
+run clippy    "${CARGO[@]}" clippy --all-targets --all-features -- -D warnings
+run test      "${CARGO[@]}" test --all-features
 
 if [ "$QUICK" -eq 0 ]; then
   run wasm-check  "${CARGO[@]}" check --release --target wasm32-unknown-unknown --features wasm --lib

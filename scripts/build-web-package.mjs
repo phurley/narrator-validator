@@ -2,8 +2,11 @@
 
 import { execFileSync } from 'node:child_process'
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+import { buildReproducibleRustflags } from './reproducible-rustflags.mjs'
 
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
 const output = join(root, 'pkg')
@@ -26,6 +29,14 @@ if (!/^[0-9a-f]{40}$/.test(sourceCommit)) {
   throw new Error('NARRATOR_VALIDATOR_SOURCE_COMMIT must be a full lowercase Git commit SHA')
 }
 
+const cargoEnvironment = { ...process.env }
+cargoEnvironment.CARGO_ENCODED_RUSTFLAGS = buildReproducibleRustflags({
+  sourceRoot: root,
+  cargoHome: process.env.CARGO_HOME ?? join(homedir(), '.cargo'),
+  environment: process.env,
+})
+delete cargoEnvironment.RUSTFLAGS
+
 execFileSync(
   'cargo',
   [
@@ -39,6 +50,7 @@ execFileSync(
   ],
   {
     cwd: root,
+    env: cargoEnvironment,
     stdio: 'inherit',
   },
 )
