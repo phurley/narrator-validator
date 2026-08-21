@@ -45,11 +45,15 @@ export function buildReproducibleRustflags({
   }
 
   const absoluteSourceRoot = resolve(sourceRoot)
-  const absoluteCargoHome = resolve(cargoHome)
+  // Cargo resolves a relative CARGO_HOME from its own cwd. The package build
+  // runs Cargo from the validator root, regardless of the Node caller's cwd.
+  const absoluteCargoHome = resolve(absoluteSourceRoot, cargoHome)
   const reproducibleRemaps = [
-    `--remap-path-prefix=${absoluteSourceRoot}=${REPRODUCIBLE_SOURCE_PREFIX}`,
     `--remap-path-prefix=${resolve(absoluteCargoHome, 'registry', 'src')}=${REPRODUCIBLE_CARGO_REGISTRY_PREFIX}`,
     `--remap-path-prefix=${resolve(absoluteCargoHome, 'git', 'checkouts')}=${REPRODUCIBLE_CARGO_GIT_PREFIX}`,
+    // rustc applies the last matching remap. Keep the checkout-specific rule
+    // last so a source checkout nested under Cargo home retains its identity.
+    `--remap-path-prefix=${absoluteSourceRoot}=${REPRODUCIBLE_SOURCE_PREFIX}`,
   ]
 
   return [...existing, ...reproducibleRemaps].join(encodedFlagSeparator)

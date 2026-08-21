@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-expected="reproducible rustflags contract: 5/5 cases"
+expected="reproducible rustflags contract: 7/7 cases"
 output="$(node scripts/test-reproducible-rustflags.mjs)"
 printf '%s\n' "$output"
 
