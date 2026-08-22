@@ -5,14 +5,15 @@ use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
 
 use crate::{
-    parse_reference_text, reference_kind, resolve_ruleset, Diagnostic, DisclosureClass, Position,
-    ReferenceProvenance, ReferenceTextSegment, RelatedLocation, ResolvedReferenceText,
-    RulesetReference, Severity, SourceFile, SourceRange, ValidationReport, CONSUMER_FIELDS,
-    MAX_SOLUTION_ANSWER_CARDS, MAX_SOLUTION_QUESTIONS, MIN_SOLUTION_ANSWER_CARDS,
-    MIN_SOLUTION_QUESTIONS, REFERENCE_TEXT_FEATURE, STANDARD_MYSTERY_RULESET_ID,
-    STANDARD_MYSTERY_RULESET_VERSION_2, STANDARD_MYSTERY_RULESET_VERSION_3,
-    STANDARD_MYSTERY_RULESET_VERSION_4, STANDARD_MYSTERY_RULESET_VERSION_5, STORY_FORMAT_VERSION,
-    SUPPORTED_FEATURES, VALIDATOR_VERSION,
+    parse_reference_text, reference_kind, resolve_ruleset, scanner_control_role_for_tag_id,
+    Diagnostic, DisclosureClass, Position, ReferenceProvenance, ReferenceTextSegment,
+    RelatedLocation, ResolvedReferenceText, RulesetReference, Severity, SourceFile, SourceRange,
+    ValidationReport, CONSUMER_FIELDS, MAX_SOLUTION_ANSWER_CARDS, MAX_SOLUTION_QUESTIONS,
+    MIN_SOLUTION_ANSWER_CARDS, MIN_SOLUTION_QUESTIONS, REFERENCE_TEXT_FEATURE,
+    STANDARD_MYSTERY_RULESET_ID, STANDARD_MYSTERY_RULESET_VERSION_2,
+    STANDARD_MYSTERY_RULESET_VERSION_3, STANDARD_MYSTERY_RULESET_VERSION_4,
+    STANDARD_MYSTERY_RULESET_VERSION_5, STORY_FORMAT_VERSION, SUPPORTED_FEATURES,
+    VALIDATOR_VERSION,
 };
 
 const MAX_REPOSITORY_FILES: usize = 512;
@@ -3462,6 +3463,20 @@ impl<'a> Validator<'a> {
                         None,
                         None,
                     );
+                } else if let Some(role) = scanner_control_role_for_tag_id(tag_id.unwrap()) {
+                    self.push(
+                        Severity::Error,
+                        "deck.tag_id_reserved_scanner_control",
+                        format!(
+                            "tagStandard41h12 ID {} is reserved for the {} scanner control card and cannot be bound to a story subject",
+                            tag_id.unwrap(),
+                            role.name()
+                        ),
+                        &path,
+                        Some(tag_pointer.clone()),
+                        None,
+                        None,
+                    );
                 }
 
                 let subject_pointer = format!("{pointer}/subject");
@@ -3507,9 +3522,10 @@ impl<'a> Validator<'a> {
                     }
                 }
 
-                if let Some(tag_id) =
-                    tag_id.filter(|id| (0..=TAG_STANDARD_41H12_MAX_ID).contains(id))
-                {
+                if let Some(tag_id) = tag_id.filter(|id| {
+                    (0..=TAG_STANDARD_41H12_MAX_ID).contains(id)
+                        && scanner_control_role_for_tag_id(*id).is_none()
+                }) {
                     let range = None;
                     if let Some((first_subject, first_pointer, first_range)) =
                         seen_tags.get(&tag_id)
