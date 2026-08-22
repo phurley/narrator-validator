@@ -1533,6 +1533,33 @@ fn rejects_deck_bindings_of_reserved_enter_scanner_control_ids() {
 }
 
 #[test]
+fn checked_in_scanner_control_artifacts_match_the_source() {
+    let generated_json = narrator_validator::scanner_control_manifest_json();
+    let checked_in_json = fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/scanner-controls.json"),
+    )
+    .expect("docs/scanner-controls.json must exist");
+    assert_eq!(
+        checked_in_json.trim_end(),
+        generated_json.trim_end(),
+        "docs/scanner-controls.json is out of date -- regenerate with:\n\
+         cargo run --example generate_scanner_controls_json > docs/scanner-controls.json"
+    );
+
+    let generated_dart = narrator_validator::scanner_control_dart_source();
+    let checked_in_dart = fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/scanner_control.dart"),
+    )
+    .expect("docs/scanner_control.dart must exist");
+    assert_eq!(
+        checked_in_dart.trim_end(),
+        generated_dart.trim_end(),
+        "docs/scanner_control.dart is out of date -- regenerate with:\n\
+         cargo run --example generate_scanner_controls_dart > docs/scanner_control.dart"
+    );
+}
+
+#[test]
 fn accepts_semantically_compatible_story_format_versions() {
     for version in ["1.7.3", "3.4.1"] {
         let source = if version.starts_with('1') {
