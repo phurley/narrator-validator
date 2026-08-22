@@ -52,7 +52,14 @@ cards — the app removes them before creating an action. Consumers that need
 to recognize a scanned tag as a scanner control before resolving it against a
 deck (the app's scanner, the printable-fixture generator) should use the
 library's `scanner_control_role_for_tag_id`, `ENTER_1_TAG_ID`, and
-`ENTER_2_TAG_ID` rather than hard-coding the numbers.
+`ENTER_2_TAG_ID` rather than hard-coding the numbers. Non-Rust consumers
+(e.g. narrator-app's Dart scanner) must not hand-copy these either; they
+should vendor the generated `docs/scanner_control.dart`, or read the
+generated `docs/scanner-controls.json` manifest, both produced from
+`src/scanner_control.rs` by `examples/generate_scanner_controls_dart.rs` and
+`examples/generate_scanner_controls_json.rs`. `tests/validation.rs`'s
+`checked_in_scanner_control_artifacts_match_the_source` fails if either
+checked-in copy drifts from the Rust source.
 
 Commands and triggers share one ordered world-effect contract. Canonical
 operations are `set_flag`, `move`, `transform`, `reveal`, `conceal`,

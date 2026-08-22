@@ -1,0 +1,14 @@
+{
+  "reserved_scanner_control_tags": [
+    {
+      "role": "enter1",
+      "label": "ENTER-1",
+      "tag_id": 2114
+    },
+    {
+      "role": "enter2",
+      "label": "ENTER-2",
+      "tag_id": 2113
+    }
+  ]
+}

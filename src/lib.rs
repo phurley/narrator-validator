@@ -39,8 +39,9 @@ pub use ruleset::{
     STANDARD_MYSTERY_RULESET_VERSION_5,
 };
 pub use scanner_control::{
-    scanner_control_role_for_tag_id, ScannerControlRole, ENTER_1_TAG_ID, ENTER_2_TAG_ID,
-    RESERVED_SCANNER_CONTROL_TAG_IDS,
+    reserved_scanner_control_tags, scanner_control_dart_source, scanner_control_manifest_json,
+    scanner_control_role_for_tag_id, ScannerControlManifestEntry, ScannerControlRole,
+    ENTER_1_TAG_ID, ENTER_2_TAG_ID, RESERVED_SCANNER_CONTROL_TAG_IDS,
 };
 pub use solution::{
     solution_answer_matches, solution_contract_metadata, solution_contract_metadata_json,
