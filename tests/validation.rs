@@ -1479,6 +1479,60 @@ fn validates_physical_deck_bindings() {
 }
 
 #[test]
+fn rejects_deck_bindings_of_reserved_enter_scanner_control_ids() {
+    use narrator_validator::{scanner_control_role_for_tag_id, RESERVED_SCANNER_CONTROL_TAG_IDS};
+
+    // Guard against a future refactor silently checking zero reservations.
+    assert_eq!(
+        RESERVED_SCANNER_CONTROL_TAG_IDS.len(),
+        2,
+        "expected exactly two reserved scanner-control tag IDs (ENTER-1, ENTER-2)"
+    );
+
+    for (role, tag_id) in RESERVED_SCANNER_CONTROL_TAG_IDS {
+        let source = VALID_FORMAT_3_STORY.replacen("tag_id: 4", &format!("tag_id: {tag_id}"), 1);
+        let report = report(source);
+        let diagnostic = report
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == "deck.tag_id_reserved_scanner_control")
+            .unwrap_or_else(|| {
+                panic!(
+                    "expected reserved-ID diagnostic for {tag_id}: {:#?}",
+                    report.diagnostics
+                )
+            });
+        assert_eq!(diagnostic.pointer.as_deref(), Some("/cards/4/tag_id"));
+        assert!(
+            diagnostic.message.contains(role.name()),
+            "diagnostic should name the reserved role {}: {}",
+            role.name(),
+            diagnostic.message
+        );
+    }
+
+    // Adjacent, non-reserved IDs continue to validate normally.
+    let lowest_reserved = RESERVED_SCANNER_CONTROL_TAG_IDS
+        .iter()
+        .map(|(_, id)| *id)
+        .min()
+        .unwrap();
+    for tag_id in [lowest_reserved - 1, 0] {
+        assert!(scanner_control_role_for_tag_id(tag_id).is_none());
+        let source = VALID_FORMAT_3_STORY.replacen("tag_id: 4", &format!("tag_id: {tag_id}"), 1);
+        let report = report(source);
+        assert!(
+            !report
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "deck.tag_id_reserved_scanner_control"),
+            "{tag_id} should not be rejected as reserved: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
 fn accepts_semantically_compatible_story_format_versions() {
     for version in ["1.7.3", "3.4.1"] {
         let source = if version.starts_with('1') {

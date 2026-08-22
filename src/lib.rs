@@ -8,6 +8,7 @@ mod end_state;
 mod playability;
 mod reference_text;
 mod ruleset;
+mod scanner_control;
 mod solution;
 mod validator;
 
@@ -36,6 +37,10 @@ pub use ruleset::{
     STANDARD_MYSTERY_RULESET_VERSION_1, STANDARD_MYSTERY_RULESET_VERSION_2,
     STANDARD_MYSTERY_RULESET_VERSION_3, STANDARD_MYSTERY_RULESET_VERSION_4,
     STANDARD_MYSTERY_RULESET_VERSION_5,
+};
+pub use scanner_control::{
+    scanner_control_role_for_tag_id, ScannerControlRole, ENTER_1_TAG_ID, ENTER_2_TAG_ID,
+    RESERVED_SCANNER_CONTROL_TAG_IDS,
 };
 pub use solution::{
     solution_answer_matches, solution_contract_metadata, solution_contract_metadata_json,

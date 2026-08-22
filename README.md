@@ -43,6 +43,17 @@ printed edition can replace only `deck.yaml` while reusing every semantic story
 file. Standard command cards bind their existing `command.*` definitions; the
 deck never copies command behavior.
 
+IDs 2113 and 2114 are permanently reserved for the physical ENTER-2 and
+ENTER-1 scanner control cards and can never be bound to a story `subject`;
+binding either in `deck.yaml` produces `deck.tag_id_reserved_scanner_control`.
+ENTER cards are recognized by the camera before any story deck is parsed and
+are not `command.*` items, deck subjects, candidates, or game-engine action
+cards — the app removes them before creating an action. Consumers that need
+to recognize a scanned tag as a scanner control before resolving it against a
+deck (the app's scanner, the printable-fixture generator) should use the
+library's `scanner_control_role_for_tag_id`, `ENTER_1_TAG_ID`, and
+`ENTER_2_TAG_ID` rather than hard-coding the numbers.
+
 Commands and triggers share one ordered world-effect contract. Canonical
 operations are `set_flag`, `move`, `transform`, `reveal`, `conceal`,
 `learn_fact`, `establish_deduction`, `describe`, `advance_time`, `win`, and
