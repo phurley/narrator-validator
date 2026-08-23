@@ -6,6 +6,7 @@ import initWasm, {
   solution_contract_metadata_json_export as solutionContractMetadataJson,
   validate_json as validateJson,
   validate_json_with_features as validateJsonWithFeatures,
+  validate_json_without_playability_with_features as validateJsonWithoutPlayabilityWithFeatures,
 } from './narrator_validator.js'
 
 export { STANDARD_MYSTERY_RULESET, STANDARD_MYSTERY_RULESETS } from './rulesets.js'
@@ -63,6 +64,30 @@ export async function validateRepositoryWithFeatures(files, supportedFeatures) {
   await initializeNarratorValidator()
   return JSON.parse(
     validateJsonWithFeatures(
+      JSON.stringify(files),
+      JSON.stringify(supportedFeatures),
+    ),
+  )
+}
+
+/**
+ * Validate structure and references without running playability analysis.
+ *
+ * This is useful for profiling and for consumers that explicitly do not use
+ * the playability report. It returns the same report shape with `playability`
+ * absent.
+ *
+ * @param {readonly import('./index.js').SourceFile[]} files
+ * @param {readonly string[]} supportedFeatures
+ * @returns {Promise<import('./index.js').ValidationReport>}
+ */
+export async function validateRepositoryWithoutPlayabilityWithFeatures(
+  files,
+  supportedFeatures,
+) {
+  await initializeNarratorValidator()
+  return JSON.parse(
+    validateJsonWithoutPlayabilityWithFeatures(
       JSON.stringify(files),
       JSON.stringify(supportedFeatures),
     ),

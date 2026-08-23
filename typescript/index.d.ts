@@ -291,6 +291,11 @@ export function validateRepositoryWithFeatures(
   supportedFeatures: readonly string[],
 ): Promise<ValidationReport>
 
+export function validateRepositoryWithoutPlayabilityWithFeatures(
+  files: readonly SourceFile[],
+  supportedFeatures: readonly string[],
+): Promise<ValidationReport>
+
 export function referenceTextMetadata(): Promise<ReferenceTextMetadata>
 
 export function solutionContractMetadata(): Promise<SolutionContractMetadata>

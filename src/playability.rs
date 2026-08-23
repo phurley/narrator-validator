@@ -253,6 +253,7 @@ struct Model {
     solve_action: Option<String>,
     solution_answer_rows: Vec<BTreeSet<String>>,
     precomputed_patterns: Vec<ActionPattern>,
+    elapsed_equivalence_horizon: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -990,7 +991,46 @@ impl Model {
             .sort_by(|a, b| (&a.id, &a.from, &a.to).cmp(&(&b.id, &b.from, &b.to)));
         self.unsupported
             .sort_by(|a, b| (&a.path, &a.pointer, &a.code).cmp(&(&b.path, &b.pointer, &b.code)));
+        self.precompute_elapsed_equivalence_horizon();
         self.precompute_patterns();
+    }
+
+    fn precompute_elapsed_equivalence_horizon(&mut self) {
+        // Absolute clock values can affect the model only while an authored
+        // predicate or terminal threshold can still change truth value. One
+        // minute beyond the latest boundary, elapsed values are observationally
+        // equivalent except for delayed work, which search_state_key preserves
+        // as time remaining.
+        let predicate_thresholds = self
+            .facts
+            .values()
+            .flat_map(|fact| &fact.when)
+            .chain(self.triggers.values().flat_map(|trigger| &trigger.when))
+            .filter_map(|predicate| match predicate {
+                Predicate::TimeAfter(value)
+                | Predicate::TimeEqual(value)
+                | Predicate::TimeBefore(value) => Some(*value),
+                _ => None,
+            });
+        let latest = predicate_thresholds
+            .chain(self.ends.iter().filter_map(|end| end.at_or_after))
+            .max();
+        self.elapsed_equivalence_horizon = latest.map_or(0, |threshold| {
+            threshold
+                .saturating_sub(self.initial_minutes)
+                .saturating_add(1)
+        });
+    }
+
+    fn search_state_key(&self, state: &State) -> State {
+        let mut key = state.clone();
+        let canonical_elapsed = state.elapsed.min(self.elapsed_equivalence_horizon);
+        key.elapsed = canonical_elapsed;
+        for pending in &mut key.pending {
+            let remaining = pending.due.saturating_sub(state.elapsed);
+            pending.due = canonical_elapsed.saturating_add(remaining);
+        }
+        key
     }
 
     fn precompute_patterns(&mut self) {
@@ -1123,7 +1163,12 @@ impl Model {
 
     fn search(&self, auto_facts: bool, auto_deductions: bool) -> NotebookPolicyAnalysis {
         let mut queue = BinaryHeap::new();
-        let mut best = BTreeMap::<State, (u32, u32)>::new();
+        // A canonical state can be reached with fewer actions but more elapsed
+        // time, or vice versa. Neither dominates the other under both search
+        // caps, so retain the Pareto frontier rather than choosing one scalar
+        // cost and accidentally weakening a bounded proof.
+        let mut best = BTreeMap::<State, Vec<(u32, u32)>>::new();
+        let mut reached_states = Vec::new();
         for entry in &self.entries {
             let opening_facts = self
                 .facts
@@ -1159,7 +1204,10 @@ impl Model {
                 steps: Vec::new(),
                 unlocks,
             };
-            best.insert(node.state.clone(), (0, 0));
+            best.entry(self.search_state_key(&node.state))
+                .or_default()
+                .push((0, 0));
+            reached_states.push(node.state.clone());
             queue.push(QueueNode(node));
         }
         let mut proofs = BTreeMap::<String, Node>::new();
@@ -1167,6 +1215,25 @@ impl Model {
         let mut bounded = false;
         let solution_equivalent = self.solution_equivalent_deductions();
         let mut answerable: Option<(u32, Vec<String>)> = None;
+        let unsupported_policy = if !auto_facts
+            && !self.facts.is_empty()
+            && !self.commands.contains_key("command.claim")
+        {
+            Some((
+                "playability.unsupported_manual_facts",
+                "manual fact acquisition requires a supported Claim command",
+            ))
+        } else if !auto_deductions
+            && !self.deductions.is_empty()
+            && !self.commands.contains_key("command.deduce")
+        {
+            Some((
+                "playability.unsupported_manual_deductions",
+                "manual deduction establishment requires a supported Deduce command",
+            ))
+        } else {
+            None
+        };
         while let Some(QueueNode(node)) = queue.pop() {
             if explored >= MAX_EXPLORED_STATES {
                 bounded = true;
@@ -1251,10 +1318,16 @@ impl Model {
                     unlocks: gained,
                 });
                 let cost = (next.actions, next.state.elapsed);
-                if best.get(&next.state).is_some_and(|known| *known <= cost) {
+                let costs = best.entry(self.search_state_key(&next.state)).or_default();
+                if costs
+                    .iter()
+                    .any(|known| known.0 <= cost.0 && known.1 <= cost.1)
+                {
                     continue;
                 }
-                best.insert(next.state.clone(), cost);
+                costs.retain(|known| !(cost.0 <= known.0 && cost.1 <= known.1));
+                costs.push(cost);
+                reached_states.push(next.state.clone());
                 queue.push(QueueNode(next));
             }
         }
@@ -1270,17 +1343,19 @@ impl Model {
                     .any(|requirement| !self.has_possible_producer(requirement));
                 let unsupported = self.unsupported.first();
                 let inconclusive = !hard_missing
-                    && (bounded || unsupported.is_some() || end.solution_condition);
+                    && (bounded || unsupported.is_some() || unsupported_policy.is_some() || end.solution_condition);
                 let blocker = if hard_missing {
-                    self.blocker(end, &best)
+                    self.blocker(end, &reached_states)
                 } else if let Some(reason) = unsupported {
                     PlayabilityBlocker { code: reason.code.clone(), message: reason.message.clone(), path: reason.path.clone(), pointer: reason.pointer.clone(), range: reason.range, chain: vec![end.item.id.clone()] }
+                } else if let Some((code, message)) = unsupported_policy {
+                    PlayabilityBlocker { code: code.to_string(), message: message.to_string(), path: end.item.path.clone(), pointer: end.item.pointer.clone(), range: end.item.range, chain: vec![end.item.id.clone()] }
                 } else if end.solution_condition {
                     PlayabilityBlocker { code: "playability.unsupported_solution_selection".to_string(), message: "the authored Solve contract could not be represented as one exact supported action".to_string(), path: end.item.path.clone(), pointer: end.item.pointer.clone(), range: end.item.range, chain: vec![end.item.id.clone()] }
                 } else if bounded {
                     PlayabilityBlocker { code: "playability.search_bound".to_string(), message: format!("analysis reached its deterministic bound of {MAX_EXPLORED_STATES} states, {MAX_ACTIONS} actions, or {MAX_ELAPSED_MINUTES} elapsed minutes"), path: end.item.path.clone(), pointer: end.item.pointer.clone(), range: end.item.range, chain: vec![end.item.id.clone()] }
                 } else {
-                    self.blocker(end, &best)
+                    self.blocker(end, &reached_states)
                 };
                 TerminalPathAnalysis { id: end.item.id.clone(), outcome: end.outcome.clone(), status: if inconclusive { PlayabilityStatus::Inconclusive } else { PlayabilityStatus::NotProved }, path: end.item.path.clone(), pointer: end.item.pointer.clone(), range: end.item.range, lower_bound: None, blocker: Some(blocker) }
             }
@@ -1299,7 +1374,10 @@ impl Model {
                 }
             } else {
                 SolutionAnswerability {
-                    status: if self.unsupported.is_empty() && !bounded {
+                    status: if self.unsupported.is_empty()
+                        && unsupported_policy.is_none()
+                        && !bounded
+                    {
                         PlayabilityStatus::NotProved
                     } else {
                         PlayabilityStatus::Inconclusive
@@ -1720,11 +1798,11 @@ impl Model {
             })
     }
 
-    fn blocker(&self, end: &EndRule, states: &BTreeMap<State, (u32, u32)>) -> PlayabilityBlocker {
+    fn blocker(&self, end: &EndRule, states: &[State]) -> PlayabilityBlocker {
         let mut missing = end
             .requirements
             .iter()
-            .filter(|id| !states.keys().any(|state| has(state, id)))
+            .filter(|id| !states.iter().any(|state| has(state, id)))
             .cloned()
             .collect::<Vec<_>>();
         missing.sort();
@@ -1745,19 +1823,19 @@ impl Model {
                 chain,
                 format!("{}/requires/{requirement_index}", end.item.pointer),
             )
-        } else if end.minimum_points > states.keys().map(|state| state.score).max().unwrap_or(0) {
+        } else if end.minimum_points > states.iter().map(|state| state.score).max().unwrap_or(0) {
             (
                 "playability.insufficient_score",
                 format!(
                     "supported actions reach at most {} points, below required {}",
-                    states.keys().map(|state| state.score).max().unwrap_or(0),
+                    states.iter().map(|state| state.score).max().unwrap_or(0),
                     end.minimum_points
                 ),
                 vec![end.item.id.clone(), "minimum_points".to_string()],
                 format!("{}/minimum_points", end.item.pointer),
             )
         } else if end.at_or_after.is_some()
-            && !states.keys().any(|state| self.end_satisfied(end, state))
+            && !states.iter().any(|state| self.end_satisfied(end, state))
         {
             (
                 "playability.route_time_blocked",
@@ -1787,7 +1865,7 @@ impl Model {
     fn missing_chain(
         &self,
         id: &str,
-        states: &BTreeMap<State, (u32, u32)>,
+        states: &[State],
         visiting: &mut BTreeSet<String>,
     ) -> Vec<String> {
         if !visiting.insert(id.to_string()) {
@@ -1797,14 +1875,14 @@ impl Model {
             deduction
                 .dependencies
                 .iter()
-                .find(|dependency| !states.keys().any(|state| has(state, dependency)))
+                .find(|dependency| !states.iter().any(|state| has(state, dependency)))
                 .cloned()
         } else if let Some(fact) = self.facts.get(id) {
             fact.when
                 .iter()
                 .find_map(|predicate| match predicate {
                     Predicate::Has(dependency)
-                        if !states.keys().any(|state| has(state, dependency)) =>
+                        if !states.iter().any(|state| has(state, dependency)) =>
                     {
                         Some(dependency.clone())
                     }
@@ -1906,6 +1984,112 @@ fn has_id_in_initial_or_catalog(model: &Model, id: &str) -> bool {
             .iter()
             .any(|route| route.from == id || route.to == id)
         || id.starts_with("entity.")
+}
+
+#[cfg(test)]
+mod elapsed_equivalence_tests {
+    use super::*;
+
+    fn item(id: &str) -> LocatedItem {
+        LocatedItem {
+            id: id.to_string(),
+            path: "fixture.yaml".to_string(),
+            pointer: format!("/{id}"),
+            range: None,
+            map: Mapping::new(),
+            owner: None,
+        }
+    }
+
+    fn state(elapsed: u32, pending_due: Option<u32>) -> State {
+        State {
+            entry: "setting.entry".to_string(),
+            location: "setting.entry".to_string(),
+            elapsed,
+            facts: BTreeSet::new(),
+            available_facts: BTreeSet::new(),
+            deductions: BTreeSet::new(),
+            flags: BTreeSet::new(),
+            completed: BTreeSet::new(),
+            pending: pending_due
+                .map(|due| {
+                    vec![Pending {
+                        due,
+                        trigger: "trigger.delayed".to_string(),
+                    }]
+                })
+                .unwrap_or_default(),
+            score: 0,
+            point_claims: BTreeMap::new(),
+            solution_solved: false,
+        }
+    }
+
+    #[test]
+    fn elapsed_equivalence_starts_only_after_every_authored_time_boundary() {
+        let mut model = Model {
+            initial_minutes: 60,
+            ..Model::default()
+        };
+        model.facts.insert(
+            "fact.after".to_string(),
+            FactRule {
+                item: item("fact.after"),
+                on: None,
+                when: vec![Predicate::TimeAfter(70)],
+                opening: false,
+            },
+        );
+        model.triggers.insert(
+            "trigger.at".to_string(),
+            TriggerRule {
+                item: item("trigger.at"),
+                on: None,
+                when: vec![Predicate::TimeEqual(75), Predicate::TimeBefore(78)],
+                after: 0,
+                effects: Vec::new(),
+                facts: Vec::new(),
+                once: true,
+            },
+        );
+        model.ends.push(EndRule {
+            item: item("end.deadline"),
+            outcome: "lost".to_string(),
+            requirements: Vec::new(),
+            minimum_points: 0,
+            at_or_after: Some(80),
+            solution_condition: false,
+        });
+
+        model.precompute_elapsed_equivalence_horizon();
+
+        assert_eq!(model.elapsed_equivalence_horizon, 21);
+        assert_ne!(
+            model.search_state_key(&state(20, None)),
+            model.search_state_key(&state(21, None))
+        );
+        assert_eq!(
+            model.search_state_key(&state(21, None)),
+            model.search_state_key(&state(2_000, None))
+        );
+    }
+
+    #[test]
+    fn elapsed_equivalence_preserves_delayed_trigger_remaining_time() {
+        let model = Model {
+            elapsed_equivalence_horizon: 10,
+            ..Model::default()
+        };
+
+        assert_eq!(
+            model.search_state_key(&state(20, Some(25))),
+            model.search_state_key(&state(2_000, Some(2_005)))
+        );
+        assert_ne!(
+            model.search_state_key(&state(20, Some(25))),
+            model.search_state_key(&state(2_000, Some(2_006)))
+        );
+    }
 }
 
 fn pattern_matches(expected: &ActionPattern, actual: &ActionPattern) -> bool {
