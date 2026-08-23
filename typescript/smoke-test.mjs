@@ -13,6 +13,7 @@ import {
   solutionContractMetadata,
   validateRepository,
   validateRepositoryWithFeatures,
+  validateRepositoryWithoutPlayabilityWithFeatures,
 } from '../pkg/index.js'
 
 const wasm = await readFile(
@@ -151,6 +152,13 @@ const solveFixtureFiles = await Promise.all(
 const solveReport = await validateRepositoryWithFeatures(solveFixtureFiles, [
   'reference_text_v1',
 ])
+const solveStructuralReport =
+  await validateRepositoryWithoutPlayabilityWithFeatures(solveFixtureFiles, [
+    'reference_text_v1',
+  ])
+assert.equal(solveStructuralReport.playability, undefined)
+assert.deepEqual(solveStructuralReport.diagnostics, solveReport.diagnostics)
+assert.deepEqual(solveStructuralReport.reference_text, solveReport.reference_text)
 assert.equal(solveReport.valid, true)
 assert.equal(solveReport.format_version, '3.3.0')
 assert.equal(

@@ -68,7 +68,8 @@ mod wasm {
     use crate::{
         end_state_contract_metadata_json, parse_reference_text_result,
         reference_text_metadata_json, solution_answer_matches, solution_contract_metadata_json,
-        validate, validate_with_supported_features, SourceFile,
+        validate, validate_with_supported_features, validate_without_playability_with_features,
+        SourceFile,
     };
 
     /// Validate a JSON array of `{ "path": string, "source": string }` values.
@@ -97,6 +98,27 @@ mod wasm {
             })?;
         serde_json::to_string(&validate_with_supported_features(&files, &features))
             .map_err(|error| JsValue::from_str(&format!("could not serialize report: {error}")))
+    }
+
+    /// Validate structure and references without the bounded playability search.
+    ///
+    /// This export also gives profiling tools a mechanically comparable baseline
+    /// for separating validation work from state-space exploration.
+    #[wasm_bindgen]
+    pub fn validate_json_without_playability_with_features(
+        files_json: &str,
+        supported_features_json: &str,
+    ) -> Result<String, JsValue> {
+        let files: Vec<SourceFile> = serde_json::from_str(files_json)
+            .map_err(|error| JsValue::from_str(&format!("invalid source-file JSON: {error}")))?;
+        let features: Vec<String> =
+            serde_json::from_str(supported_features_json).map_err(|error| {
+                JsValue::from_str(&format!("invalid supported-feature JSON: {error}"))
+            })?;
+        serde_json::to_string(&validate_without_playability_with_features(
+            &files, &features,
+        ))
+        .map_err(|error| JsValue::from_str(&format!("could not serialize report: {error}")))
     }
 
     #[wasm_bindgen]

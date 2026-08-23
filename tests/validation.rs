@@ -133,6 +133,22 @@ fn playability_json_cli_matches_native_report() {
 }
 
 #[test]
+fn author_save_performance_fixture_reports_all_policy_work_without_hitting_state_cap() {
+    let files: Vec<SourceFile> = serde_json::from_str(include_str!(
+        "fixtures/performance/author-save-two-question.json"
+    ))
+    .unwrap();
+    let report = validate_with_supported_features(&files, &["reference_text_v1".to_string()]);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    let policies = &report.playability.unwrap().notebook_policies;
+    assert_eq!(policies.len(), 4);
+    assert!(policies.iter().all(|policy| policy.explored_states > 0));
+    assert!(policies
+        .iter()
+        .all(|policy| policy.explored_states < 25_000));
+}
+
+#[test]
 fn deduction_graph_reports_large_branching_cascades_deterministically() {
     let source = VALID_FORMAT_3_STORY.replace(
         "    truth: true\nflags:",
