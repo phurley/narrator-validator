@@ -84,6 +84,7 @@ run() {
 }
 
 run rustflags bash scripts/check-reproducible-rustflags.sh
+run release-tag bash scripts/test-check-release-tag.sh
 run fmt       "${CARGO[@]}" fmt --check
 run clippy    "${CARGO[@]}" clippy --all-targets --all-features -- -D warnings
 run test      "${CARGO[@]}" test --all-features
