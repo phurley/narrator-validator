@@ -23,6 +23,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          # The release-tag gate compares HEAD with its parent and fails closed
+          # if that history is unavailable.
+          fetch-depth: 2
+      - name: Test release-tag gate
+        run: bash scripts/test-check-release-tag.sh
+      - name: Fetch release tags
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: git fetch --force origin 'refs/tags/*:refs/tags/*'
+      - name: Require an exact release tag for a version bump on main
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: bash scripts/check-release-tag.sh
       - uses: dtolnay/rust-toolchain@1.80.0
         with:
           components: clippy,rustfmt
