@@ -1215,6 +1215,25 @@ impl Model {
         let mut bounded = false;
         let solution_equivalent = self.solution_equivalent_deductions();
         let mut answerable: Option<(u32, Vec<String>)> = None;
+        let unsupported_policy = if !auto_facts
+            && !self.facts.is_empty()
+            && !self.commands.contains_key("command.claim")
+        {
+            Some((
+                "playability.unsupported_manual_facts",
+                "manual fact acquisition requires a supported Claim command",
+            ))
+        } else if !auto_deductions
+            && !self.deductions.is_empty()
+            && !self.commands.contains_key("command.deduce")
+        {
+            Some((
+                "playability.unsupported_manual_deductions",
+                "manual deduction establishment requires a supported Deduce command",
+            ))
+        } else {
+            None
+        };
         while let Some(QueueNode(node)) = queue.pop() {
             if explored >= MAX_EXPLORED_STATES {
                 bounded = true;
@@ -1324,11 +1343,13 @@ impl Model {
                     .any(|requirement| !self.has_possible_producer(requirement));
                 let unsupported = self.unsupported.first();
                 let inconclusive = !hard_missing
-                    && (bounded || unsupported.is_some() || end.solution_condition);
+                    && (bounded || unsupported.is_some() || unsupported_policy.is_some() || end.solution_condition);
                 let blocker = if hard_missing {
                     self.blocker(end, &reached_states)
                 } else if let Some(reason) = unsupported {
                     PlayabilityBlocker { code: reason.code.clone(), message: reason.message.clone(), path: reason.path.clone(), pointer: reason.pointer.clone(), range: reason.range, chain: vec![end.item.id.clone()] }
+                } else if let Some((code, message)) = unsupported_policy {
+                    PlayabilityBlocker { code: code.to_string(), message: message.to_string(), path: end.item.path.clone(), pointer: end.item.pointer.clone(), range: end.item.range, chain: vec![end.item.id.clone()] }
                 } else if end.solution_condition {
                     PlayabilityBlocker { code: "playability.unsupported_solution_selection".to_string(), message: "the authored Solve contract could not be represented as one exact supported action".to_string(), path: end.item.path.clone(), pointer: end.item.pointer.clone(), range: end.item.range, chain: vec![end.item.id.clone()] }
                 } else if bounded {
@@ -1353,7 +1374,10 @@ impl Model {
                 }
             } else {
                 SolutionAnswerability {
-                    status: if self.unsupported.is_empty() && !bounded {
+                    status: if self.unsupported.is_empty()
+                        && unsupported_policy.is_none()
+                        && !bounded
+                    {
                         PlayabilityStatus::NotProved
                     } else {
                         PlayabilityStatus::Inconclusive
