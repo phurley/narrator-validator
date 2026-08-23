@@ -142,10 +142,14 @@ fn author_save_performance_fixture_reports_all_policy_work_without_hitting_state
     assert!(report.valid, "{:#?}", report.diagnostics);
     let policies = &report.playability.unwrap().notebook_policies;
     assert_eq!(policies.len(), 4);
-    assert!(policies.iter().all(|policy| policy.explored_states > 0));
-    assert!(policies
-        .iter()
-        .all(|policy| policy.explored_states < 25_000));
+    assert_eq!(
+        policies
+            .iter()
+            .map(|policy| policy.explored_states)
+            .collect::<Vec<_>>(),
+        [32, 40, 1_408, 1_664]
+    );
+    assert!(policies.iter().all(|policy| !policy.bounded));
 }
 
 #[test]

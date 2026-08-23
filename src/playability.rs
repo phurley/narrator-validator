@@ -996,6 +996,11 @@ impl Model {
     }
 
     fn precompute_elapsed_equivalence_horizon(&mut self) {
+        // Absolute clock values can affect the model only while an authored
+        // predicate or terminal threshold can still change truth value. One
+        // minute beyond the latest boundary, elapsed values are observationally
+        // equivalent except for delayed work, which search_state_key preserves
+        // as time remaining.
         let predicate_thresholds = self
             .facts
             .values()
@@ -1158,6 +1163,10 @@ impl Model {
 
     fn search(&self, auto_facts: bool, auto_deductions: bool) -> NotebookPolicyAnalysis {
         let mut queue = BinaryHeap::new();
+        // A canonical state can be reached with fewer actions but more elapsed
+        // time, or vice versa. Neither dominates the other under both search
+        // caps, so retain the Pareto frontier rather than choosing one scalar
+        // cost and accidentally weakening a bounded proof.
         let mut best = BTreeMap::<State, Vec<(u32, u32)>>::new();
         let mut reached_states = Vec::new();
         for entry in &self.entries {
