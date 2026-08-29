@@ -925,11 +925,31 @@ mod tests {
         // without duplicating the complete YAML in the test. A new command
         // contract belongs in a new ruleset version, never an edit in place.
         for (version, expected_len, expected_fingerprint) in [
-            (STANDARD_MYSTERY_RULESET_VERSION_1, 3_164, 0xbcd9c7cdae74ca72),
-            (STANDARD_MYSTERY_RULESET_VERSION_2, 3_868, 0x3c94f7819056250f),
-            (STANDARD_MYSTERY_RULESET_VERSION_3, 3_489, 0x9e6c0afc9739bddf),
-            (STANDARD_MYSTERY_RULESET_VERSION_4, 3_642, 0x5ee57ab388c05f5d),
-            (STANDARD_MYSTERY_RULESET_VERSION_5, 3_763, 0x5a3515089d128df6),
+            (
+                STANDARD_MYSTERY_RULESET_VERSION_1,
+                3_164,
+                0xbcd9c7cdae74ca72,
+            ),
+            (
+                STANDARD_MYSTERY_RULESET_VERSION_2,
+                3_868,
+                0x3c94f7819056250f,
+            ),
+            (
+                STANDARD_MYSTERY_RULESET_VERSION_3,
+                3_489,
+                0x9e6c0afc9739bddf,
+            ),
+            (
+                STANDARD_MYSTERY_RULESET_VERSION_4,
+                3_642,
+                0x5ee57ab388c05f5d,
+            ),
+            (
+                STANDARD_MYSTERY_RULESET_VERSION_5,
+                3_763,
+                0x5a3515089d128df6,
+            ),
         ] {
             let resolved = resolve_ruleset(&RulesetReference {
                 id: STANDARD_MYSTERY_RULESET_ID.to_string(),
@@ -962,7 +982,10 @@ mod tests {
         })
         .expect("standard ruleset 6.0");
 
-        assert_eq!(resolved.command_capabilities, version_5.command_capabilities);
+        assert_eq!(
+            resolved.command_capabilities,
+            version_5.command_capabilities
+        );
 
         // Stripping every `default_cost_minutes` line from 6.0.0 must yield
         // exactly 5.0.0's catalog: same commands, same shapes, same order.
