@@ -909,6 +909,7 @@ fn story_files(source: String) -> Vec<SourceFile> {
             Some("commands") => "commands.yaml",
             Some("triggers") => "triggers.yaml",
             Some("cards") => "deck.yaml",
+            Some("command_costs") => "costs.yaml",
             _ => "story.yaml",
         };
         documents.entry(path).or_default().insert(key, value);
