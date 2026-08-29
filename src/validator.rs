@@ -43,6 +43,7 @@ const SINGLE_SECTIONS: &[&str] = &[
     "commands",
     "triggers",
     "cards",
+    "command_costs",
 ];
 const CANONICAL_SECTION_FILES: &[(&str, &str)] = &[
     ("case", "case.yaml"),
@@ -60,6 +61,7 @@ const CANONICAL_SECTION_FILES: &[(&str, &str)] = &[
     ("commands", "commands.yaml"),
     ("triggers", "triggers.yaml"),
     ("cards", "deck.yaml"),
+    ("command_costs", "costs.yaml"),
 ];
 
 #[derive(Debug)]
@@ -86,6 +88,7 @@ enum Kind {
     Testimony,
     EndState,
     WinState,
+    CommandCost,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -190,6 +193,7 @@ impl Kind {
             Self::Testimony => "testimony",
             Self::EndState => "end",
             Self::WinState => "win",
+            Self::CommandCost => "cost",
         }
     }
 
@@ -471,6 +475,12 @@ impl<'a> Validator<'a> {
             .is_some_and(|version| version.major == 3 && version.minor >= 4)
     }
 
+    fn is_format_3_5_or_later(&self) -> bool {
+        self.format_version
+            .as_ref()
+            .is_some_and(|version| version.major == 3 && version.minor >= 5)
+    }
+
     fn uses_question_solution_ruleset(&self) -> bool {
         self.ruleset.as_ref().is_some_and(|ruleset| {
             ruleset.id == STANDARD_MYSTERY_RULESET_ID
@@ -515,6 +525,7 @@ impl<'a> Validator<'a> {
         let local_commands = self.items("commands", Kind::Command, true);
         self.validate_command_migration(&local_commands);
         let commands = self.merge_ruleset_commands(local_commands);
+        let command_costs = self.items("command_costs", Kind::CommandCost, true);
         let triggers = self.items("triggers", Kind::Trigger, true);
         let win_states = self.items("win_states", Kind::WinState, true);
         let end_states = self.items_with_prefixes(
@@ -609,6 +620,7 @@ impl<'a> Validator<'a> {
             self.validate_automatic_deduction_safety(&deductions, &end_states, &win_states);
         }
         self.validate_command_values(&commands);
+        self.validate_command_costs(&command_costs, &commands);
         self.validate_point_awards(&[
             settings.as_slice(),
             entities.as_slice(),
@@ -5191,6 +5203,201 @@ impl<'a> Validator<'a> {
                 self.validate_runtime_command_signature(command, &parameter_types);
             }
             self.validate_world_effects(command, &parameter_types);
+        }
+    }
+
+    /// Validates `command_costs` (Format 3.5, ADR-004 §2): per-`(command,
+    /// target)` clock-cost overrides. Each entry must name a command the
+    /// resolved ruleset/story declares (never `command.move`, and never a
+    /// parameterless command with no target to key on), a target that
+    /// exists and is of a kind that command's first parameter accepts, a
+    /// non-negative whole-minute cost, and must not repeat an already-seen
+    /// `(command, target)` pair.
+    fn validate_command_costs(&mut self, command_costs: &[Item], commands: &[Item]) {
+        if command_costs.is_empty() {
+            return;
+        }
+        if !self.is_format_3_5_or_later() {
+            self.push(
+                Severity::Error,
+                "command_costs.format_incompatible",
+                "`command_costs` require story format 3.5 or later".to_string(),
+                command_costs.first().map_or("", |cost| cost.path.as_str()),
+                Some("/command_costs".to_string()),
+                None,
+                None,
+            );
+            return;
+        }
+
+        let commands_by_id: BTreeMap<&str, &Item> = commands
+            .iter()
+            .map(|command| (command.id.as_str(), command))
+            .collect();
+        let mut seen_pairs: BTreeMap<(String, String), &Item> = BTreeMap::new();
+
+        for cost in command_costs {
+            for key in cost.mapping.keys().filter_map(Value::as_str) {
+                if !matches!(key, "id" | "command" | "target" | "minutes") {
+                    self.push(
+                        Severity::Error,
+                        "command_costs.unknown_field",
+                        format!("`{key}` is not valid in a `command_costs` entry"),
+                        &cost.path,
+                        Some(format!("{}/{}", cost.pointer, escape_pointer(key))),
+                        None,
+                        Some(cost.id.clone()),
+                    );
+                }
+            }
+
+            let Some(command_id) =
+                string_field(&cost.mapping, "command").filter(|value| !value.trim().is_empty())
+            else {
+                self.push(
+                    Severity::Error,
+                    "command_costs.command_missing",
+                    "`command_costs` entry `command` must be a non-empty command ID".to_string(),
+                    &cost.path,
+                    Some(format!("{}/command", cost.pointer)),
+                    None,
+                    Some(cost.id.clone()),
+                );
+                continue;
+            };
+
+            let Some(command_item) = commands_by_id.get(command_id).copied() else {
+                self.push(
+                    Severity::Error,
+                    "command_costs.command_unknown",
+                    format!("`command_costs` entry references unknown command `{command_id}`"),
+                    &cost.path,
+                    Some(format!("{}/command", cost.pointer)),
+                    locate_scalar(&cost.source, command_id),
+                    Some(cost.id.clone()),
+                );
+                continue;
+            };
+
+            if command_id == "command.move" {
+                self.push(
+                    Severity::Error,
+                    "command_costs.command_move_disallowed",
+                    "`command_costs` cannot override `command.move`; its cost is always determined by the route taken"
+                        .to_string(),
+                    &cost.path,
+                    Some(format!("{}/command", cost.pointer)),
+                    locate_scalar(&cost.source, command_id),
+                    Some(cost.id.clone()),
+                );
+                continue;
+            }
+
+            let parameter_types = command_parameter_types(command_item);
+            let Some(Some(target_shape)) = parameter_types.first() else {
+                self.push(
+                    Severity::Error,
+                    "command_costs.command_parameterless",
+                    format!("`{command_id}` takes no target parameter to override a cost for"),
+                    &cost.path,
+                    Some(format!("{}/command", cost.pointer)),
+                    locate_scalar(&cost.source, command_id),
+                    Some(cost.id.clone()),
+                );
+                continue;
+            };
+
+            let Some(target_id) =
+                string_field(&cost.mapping, "target").filter(|value| !value.trim().is_empty())
+            else {
+                self.push(
+                    Severity::Error,
+                    "command_costs.target_missing",
+                    "`command_costs` entry `target` must be a non-empty ID".to_string(),
+                    &cost.path,
+                    Some(format!("{}/target", cost.pointer)),
+                    None,
+                    Some(cost.id.clone()),
+                );
+                continue;
+            };
+
+            match self.definitions.get(target_id) {
+                None => {
+                    self.push(
+                        Severity::Error,
+                        "command_costs.target_unknown",
+                        format!("`command_costs` entry references unknown target `{target_id}`"),
+                        &cost.path,
+                        Some(format!("{}/target", cost.pointer)),
+                        locate_scalar(&cost.source, target_id),
+                        Some(cost.id.clone()),
+                    );
+                }
+                Some(definition)
+                    if !target_shape
+                        .types
+                        .iter()
+                        .any(|parameter_type| parameter_type.kind() == definition.kind) =>
+                {
+                    self.push(
+                        Severity::Error,
+                        "command_costs.target_kind_mismatch",
+                        format!(
+                            "`{target_id}` is a {}; `{command_id}` accepts {} as its target",
+                            definition.kind.name(),
+                            target_shape
+                                .types
+                                .iter()
+                                .map(|parameter_type| parameter_type.name())
+                                .collect::<Vec<_>>()
+                                .join(" or ")
+                        ),
+                        &cost.path,
+                        Some(format!("{}/target", cost.pointer)),
+                        locate_scalar(&cost.source, target_id),
+                        Some(cost.id.clone()),
+                    );
+                }
+                Some(_) => {
+                    let pair = (command_id.to_string(), target_id.to_string());
+                    if let Some(first) = seen_pairs.get(&pair) {
+                        self.diagnostics.push(Diagnostic {
+                            severity: Severity::Error,
+                            code: "command_costs.duplicate_pair".to_string(),
+                            message: format!(
+                                "`command_costs` already overrides `{command_id}` for `{target_id}`"
+                            ),
+                            path: cost.path.clone(),
+                            pointer: Some(cost.pointer.clone()),
+                            range: locate_id(&cost.source, &cost.id),
+                            subject_id: Some(cost.id.clone()),
+                            related: vec![RelatedLocation {
+                                message: "first defined here".to_string(),
+                                path: first.path.clone(),
+                                pointer: Some(first.pointer.clone()),
+                                range: locate_id(&first.source, &first.id),
+                            }],
+                        });
+                    } else {
+                        seen_pairs.insert(pair, cost);
+                    }
+                }
+            }
+
+            match integer_field(&cost.mapping, "minutes") {
+                Some(value) if value >= 0 && u32::try_from(value).is_ok() => {}
+                _ => self.push(
+                    Severity::Error,
+                    "command_costs.minutes_invalid",
+                    "`command_costs` entry `minutes` must be a non-negative whole number supported by the runtime"
+                        .to_string(),
+                    &cost.path,
+                    Some(format!("{}/minutes", cost.pointer)),
+                    None,
+                    Some(cost.id.clone()),
+                ),
+            }
         }
     }
 

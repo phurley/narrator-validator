@@ -909,6 +909,7 @@ fn story_files(source: String) -> Vec<SourceFile> {
             Some("commands") => "commands.yaml",
             Some("triggers") => "triggers.yaml",
             Some("cards") => "deck.yaml",
+            Some("command_costs") => "costs.yaml",
             _ => "story.yaml",
         };
         documents.entry(path).or_default().insert(key, value);
@@ -1026,6 +1027,147 @@ fn format_3_4_end_state_story() -> String {
 
 fn format_3_4_ruleset_5_solution_prerequisite_story() -> String {
     include_str!("fixtures/format-3.4-ruleset-5-solution-prerequisite-story.yaml").to_string()
+}
+
+fn format_3_5_command_costs_story() -> String {
+    include_str!("fixtures/format-3.5-command-costs-story.yaml").to_string()
+}
+
+#[test]
+fn command_cost_override_validates_end_to_end() {
+    let report = report(format_3_5_command_costs_story());
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert!(report.diagnostics.is_empty(), "{:#?}", report.diagnostics);
+    assert_eq!(report.format_version.as_deref(), Some("3.5.0"));
+}
+
+#[test]
+fn command_costs_require_format_3_5() {
+    let source = format_3_5_command_costs_story().replacen(
+        "format_version: \"3.5.0\"",
+        "format_version: \"3.4.0\"",
+        1,
+    );
+    let report = report(source);
+    assert!(report.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "command_costs.format_incompatible"
+            && diagnostic.pointer.as_deref() == Some("/command_costs")
+    }));
+}
+
+#[test]
+fn command_costs_reject_unknown_command() {
+    let source = format_3_5_command_costs_story().replace(
+        "command: command.investigate",
+        "command: command.nonexistent",
+    );
+    let report = report(source);
+    let diagnostic = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "command_costs.command_unknown")
+        .expect("unknown command diagnostic");
+    assert_eq!(
+        diagnostic.pointer.as_deref(),
+        Some("/command_costs/0/command")
+    );
+    assert_eq!(
+        diagnostic.subject_id.as_deref(),
+        Some("cost.investigate_knife")
+    );
+    assert!(diagnostic.message.contains("command.nonexistent"));
+}
+
+#[test]
+fn command_costs_reject_unknown_target() {
+    let source = format_3_5_command_costs_story().replace(
+        "target: entity.knife\n    minutes: 8",
+        "target: entity.nonexistent\n    minutes: 8",
+    );
+    let report = report(source);
+    let diagnostic = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "command_costs.target_unknown")
+        .expect("unknown target diagnostic");
+    assert_eq!(
+        diagnostic.pointer.as_deref(),
+        Some("/command_costs/0/target")
+    );
+    assert!(diagnostic.message.contains("entity.nonexistent"));
+}
+
+#[test]
+fn command_costs_reject_mismatched_target_kind() {
+    let source = format_3_5_command_costs_story().replace(
+        "target: entity.knife\n    minutes: 8",
+        "target: character.victim\n    minutes: 8",
+    );
+    let report = report(source);
+    let diagnostic = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "command_costs.target_kind_mismatch")
+        .expect("target kind mismatch diagnostic");
+    assert_eq!(
+        diagnostic.pointer.as_deref(),
+        Some("/command_costs/0/target")
+    );
+    assert!(diagnostic.message.contains("character.victim"));
+    assert!(diagnostic.message.contains("entity"));
+}
+
+#[test]
+fn command_costs_reject_duplicate_command_target_pairs() {
+    let source = format_3_5_command_costs_story().replace(
+        "command_costs:\n  - id: cost.investigate_knife\n    command: command.investigate\n    target: entity.knife\n    minutes: 8\n",
+        "command_costs:\n  - id: cost.investigate_knife\n    command: command.investigate\n    target: entity.knife\n    minutes: 8\n  - id: cost.investigate_knife_again\n    command: command.investigate\n    target: entity.knife\n    minutes: 3\n",
+    );
+    let report = report(source);
+    let diagnostic = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "command_costs.duplicate_pair")
+        .expect("duplicate pair diagnostic");
+    assert_eq!(
+        diagnostic.subject_id.as_deref(),
+        Some("cost.investigate_knife_again")
+    );
+    assert_eq!(diagnostic.related.len(), 1);
+    assert_eq!(diagnostic.related[0].message, "first defined here");
+}
+
+#[test]
+fn command_costs_reject_out_of_bounds_minutes() {
+    let source = format_3_5_command_costs_story().replace("minutes: 8", "minutes: -1");
+    let report = report(source);
+    let diagnostic = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "command_costs.minutes_invalid")
+        .expect("minutes invalid diagnostic");
+    assert_eq!(
+        diagnostic.pointer.as_deref(),
+        Some("/command_costs/0/minutes")
+    );
+}
+
+#[test]
+fn command_costs_reject_command_move_override() {
+    let source = format_3_5_command_costs_story().replace(
+        "command_costs:\n  - id: cost.investigate_knife\n    command: command.investigate\n    target: entity.knife\n    minutes: 8\n",
+        "command_costs:\n  - id: cost.move_override\n    command: command.move\n    target: route.foyer_study\n    minutes: 8\n",
+    );
+    let report = report(source);
+    let diagnostic = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "command_costs.command_move_disallowed")
+        .expect("command.move disallowed diagnostic");
+    assert_eq!(
+        diagnostic.pointer.as_deref(),
+        Some("/command_costs/0/command")
+    );
 }
 
 #[test]
