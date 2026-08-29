@@ -10,8 +10,9 @@ pub const STANDARD_MYSTERY_RULESET_VERSION_2: &str = "2.0.0";
 pub const STANDARD_MYSTERY_RULESET_VERSION_3: &str = "3.0.0";
 pub const STANDARD_MYSTERY_RULESET_VERSION_4: &str = "4.0.0";
 pub const STANDARD_MYSTERY_RULESET_VERSION_5: &str = "5.0.0";
+pub const STANDARD_MYSTERY_RULESET_VERSION_6: &str = "6.0.0";
 /// Latest standard mystery ruleset authored by this validator release.
-pub const STANDARD_MYSTERY_RULESET_VERSION: &str = STANDARD_MYSTERY_RULESET_VERSION_5;
+pub const STANDARD_MYSTERY_RULESET_VERSION: &str = STANDARD_MYSTERY_RULESET_VERSION_6;
 
 /// A story's exact ruleset selection. Released versions are append-only: an
 /// existing `(id, version)` pair must never be changed in place.
@@ -41,10 +42,10 @@ pub struct RulesetCommandCapability {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RulesetError {
-    #[error("unknown ruleset `{id}`; supported rulesets: ruleset.standard_mystery@1.0.0, @2.0.0, @3.0.0, @4.0.0, and @5.0.0")]
+    #[error("unknown ruleset `{id}`; supported rulesets: ruleset.standard_mystery@1.0.0, @2.0.0, @3.0.0, @4.0.0, @5.0.0, and @6.0.0")]
     Unknown { id: String },
     #[error(
-        "ruleset `{id}` does not support version `{version}`; use version 1.0.0, 2.0.0, 3.0.0, 4.0.0, or 5.0.0"
+        "ruleset `{id}` does not support version `{version}`; use version 1.0.0, 2.0.0, 3.0.0, 4.0.0, 5.0.0, or 6.0.0"
     )]
     IncompatibleVersion { id: String, version: String },
 }
@@ -74,6 +75,10 @@ pub fn resolve_ruleset(reference: &RulesetReference) -> Result<ResolvedRuleset, 
         ),
         STANDARD_MYSTERY_RULESET_VERSION_5 => (
             standard_mystery_commands_5_0_yaml(),
+            RECONCILIATION_COMMAND_CAPABILITIES,
+        ),
+        STANDARD_MYSTERY_RULESET_VERSION_6 => (
+            STANDARD_MYSTERY_COMMANDS_6_0_YAML,
             RECONCILIATION_COMMAND_CAPABILITIES,
         ),
         _ => {
@@ -488,6 +493,160 @@ fn standard_mystery_commands_5_0_yaml() -> &'static str {
         .as_str()
 }
 
+// This is the immutable 6.0.0 catalog. Identical to 5.0.0's reconciliation
+// catalog with `default_cost_minutes` added to every command, per ADR-004.
+// `command.move`'s default is unused (its real cost flows through the
+// existing route mechanism) but is still authored, as is `0` for every
+// notebook command (`command.claim`, `command.deduce`, `command.reconcile`,
+// `command.solve`), since the field is required on every command.
+const STANDARD_MYSTERY_COMMANDS_6_0_YAML: &str = r#"commands:
+  - id: command.move
+    name: Move
+    description: Travel to a setting connected to the player's current location.
+    default_cost_minutes: 0
+    parameters:
+      - name: destination
+        description: The setting the player wants to reach.
+        types: [setting]
+        min: 1
+        max: 1
+        candidates:
+          from: [reachable]
+    effects:
+      - operation: move
+        subjects: [player]
+        setting: param1
+      - operation: advance_time
+        route: route
+
+  - id: command.open
+    name: Open
+    description: Open a container or the player's current setting.
+    default_cost_minutes: 1
+    parameters:
+      - name: target
+        description: The container or current setting to open.
+        types: [entity, setting]
+        min: 1
+        max: 1
+        candidates:
+          from: [current_location]
+
+  - id: command.search
+    name: Search
+    description: Search a container or the player's current setting.
+    default_cost_minutes: 5
+    parameters:
+      - name: target
+        description: The container or current setting to search.
+        types: [entity, setting]
+        min: 1
+        max: 1
+        candidates:
+          from: [current_location]
+
+  - id: command.examine
+    name: Examine
+    description: Inspect a person, place, or object for useful details.
+    default_cost_minutes: 3
+    parameters:
+      - name: target
+        description: The person, place, or object to inspect.
+        types: [entity, character, setting]
+        min: 1
+        max: 1
+        candidates:
+          from: [current_location, inventory]
+
+  - id: command.take
+    name: Take
+    description: Pick up an entity that is present and portable.
+    default_cost_minutes: 1
+    parameters:
+      - name: item
+        description: The entity the player wants to carry.
+        types: [entity]
+        min: 1
+        max: 1
+        candidates:
+          from: [current_location]
+          capabilities: [portable]
+
+  - id: command.drop
+    name: Drop
+    description: Put a carried entity down in the player's current setting.
+    default_cost_minutes: 1
+    parameters:
+      - name: item
+        description: The carried entity the player wants to put down.
+        types: [entity]
+        min: 1
+        max: 1
+        candidates:
+          from: [inventory]
+          capabilities: [portable]
+
+  - id: command.use
+    name: Use
+    description: Use one entity on another entity or setting.
+    default_cost_minutes: 2
+    parameters:
+      - name: item
+        description: The entity being used.
+        types: [entity]
+        min: 1
+        max: 1
+        candidates:
+          from: [inventory]
+      - name: target
+        description: The optional entity or setting the item will affect.
+        types: [entity, setting]
+        min: 0
+        max: 1
+        candidates:
+          from: [current_location, inventory]
+
+  - id: command.question
+    name: Question
+    description: Ask a character about a known person, place, event, object, or deduction.
+    default_cost_minutes: 4
+    parameters:
+      - name: character
+        description: The character being questioned.
+        types: [character]
+        min: 1
+        max: 1
+        candidates:
+          from: [current_location]
+      - name: topic
+        description: The optional subject being discussed.
+        types: [character, setting, event, entity, deduction]
+        min: 0
+        max: 5
+        candidates:
+          from: [known]
+
+  - id: command.claim
+    name: Claim
+    description: Deliberately add one available fact to the player's notebook.
+    default_cost_minutes: 0
+
+  - id: command.deduce
+    name: Deduce
+    description: Deliberately establish an authoritative notebook deduction from one to three known facts or prior deductions.
+    default_cost_minutes: 0
+
+  - id: command.reconcile
+    name: Reconcile
+    description: Compare claimed notebook facts with every joined player.
+    default_cost_minutes: 0
+
+  - id: command.solve
+    name: Solve
+    description: Answer the story's authored solution questions with physical cards.
+    default_cost_minutes: 0
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -748,6 +907,171 @@ mod tests {
                     enabled_when: "always",
                 },
             ]
+        );
+    }
+
+    fn fnv1a(text: &str) -> u64 {
+        text.as_bytes()
+            .iter()
+            .fold(0xcbf29ce484222325_u64, |hash, byte| {
+                (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+            })
+    }
+
+    #[test]
+    fn released_catalogs_1_0_through_5_0_are_byte_for_byte_pinned() {
+        // Length and FNV-1a fingerprint recorded from each released catalog.
+        // Any accidental edit to an already-published version fails here
+        // without duplicating the complete YAML in the test. A new command
+        // contract belongs in a new ruleset version, never an edit in place.
+        for (version, expected_len, expected_fingerprint) in [
+            (
+                STANDARD_MYSTERY_RULESET_VERSION_1,
+                3_164,
+                0xbcd9c7cdae74ca72,
+            ),
+            (
+                STANDARD_MYSTERY_RULESET_VERSION_2,
+                3_868,
+                0x3c94f7819056250f,
+            ),
+            (
+                STANDARD_MYSTERY_RULESET_VERSION_3,
+                3_489,
+                0x9e6c0afc9739bddf,
+            ),
+            (
+                STANDARD_MYSTERY_RULESET_VERSION_4,
+                3_642,
+                0x5ee57ab388c05f5d,
+            ),
+            (
+                STANDARD_MYSTERY_RULESET_VERSION_5,
+                3_763,
+                0x5a3515089d128df6,
+            ),
+        ] {
+            let resolved = resolve_ruleset(&RulesetReference {
+                id: STANDARD_MYSTERY_RULESET_ID.to_string(),
+                version: version.to_string(),
+            })
+            .unwrap_or_else(|_| panic!("standard ruleset {version}"));
+            assert_eq!(
+                resolved.commands_yaml.len(),
+                expected_len,
+                "catalog length changed for {version}"
+            );
+            assert_eq!(
+                fnv1a(resolved.commands_yaml),
+                expected_fingerprint,
+                "catalog contents changed for {version}"
+            );
+        }
+    }
+
+    #[test]
+    fn standard_catalog_6_0_adds_only_default_cost_minutes() {
+        let version_5 = resolve_ruleset(&RulesetReference {
+            id: STANDARD_MYSTERY_RULESET_ID.to_string(),
+            version: STANDARD_MYSTERY_RULESET_VERSION_5.to_string(),
+        })
+        .expect("standard ruleset 5.0");
+        let resolved = resolve_ruleset(&RulesetReference {
+            id: STANDARD_MYSTERY_RULESET_ID.to_string(),
+            version: STANDARD_MYSTERY_RULESET_VERSION_6.to_string(),
+        })
+        .expect("standard ruleset 6.0");
+
+        assert_eq!(
+            resolved.command_capabilities,
+            version_5.command_capabilities
+        );
+
+        // Stripping every `default_cost_minutes` line from 6.0.0 must yield
+        // exactly 5.0.0's catalog: same commands, same shapes, same order.
+        let stripped: String = resolved
+            .commands_yaml
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("default_cost_minutes:"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(stripped.trim_end(), version_5.commands_yaml.trim_end());
+
+        let document: serde_yaml::Value =
+            serde_yaml::from_str(resolved.commands_yaml).expect("catalog YAML");
+        let commands = document["commands"].as_sequence().expect("commands");
+        assert!(!commands.is_empty());
+        for command in commands {
+            let id = command["id"].as_str().expect("command id");
+            let cost = command["default_cost_minutes"].as_i64();
+            assert!(
+                cost.is_some_and(|minutes| minutes >= 0),
+                "{id} is missing a non-negative default_cost_minutes"
+            );
+        }
+    }
+
+    #[test]
+    fn every_published_ruleset_version_declares_default_cost_minutes_where_present() {
+        // Acceptance criterion: every command in every published ruleset
+        // version declares `default_cost_minutes` wherever the field exists
+        // at all (6.0.0 onward). Versions before 6.0.0 never mention the
+        // field, so they are exempt rather than silently satisfied.
+        for version in [
+            STANDARD_MYSTERY_RULESET_VERSION_1,
+            STANDARD_MYSTERY_RULESET_VERSION_2,
+            STANDARD_MYSTERY_RULESET_VERSION_3,
+            STANDARD_MYSTERY_RULESET_VERSION_4,
+            STANDARD_MYSTERY_RULESET_VERSION_5,
+            STANDARD_MYSTERY_RULESET_VERSION_6,
+        ] {
+            let resolved = resolve_ruleset(&RulesetReference {
+                id: STANDARD_MYSTERY_RULESET_ID.to_string(),
+                version: version.to_string(),
+            })
+            .unwrap_or_else(|_| panic!("standard ruleset {version}"));
+            let declares_field = resolved.commands_yaml.contains("default_cost_minutes");
+            if !declares_field {
+                continue;
+            }
+            let document: serde_yaml::Value =
+                serde_yaml::from_str(resolved.commands_yaml).expect("catalog YAML");
+            let commands = document["commands"].as_sequence().expect("commands");
+            for command in commands {
+                let id = command["id"].as_str().expect("command id");
+                assert!(
+                    command["default_cost_minutes"].as_i64().is_some(),
+                    "{version}: {id} has no explicit default_cost_minutes"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn unknown_version_error_names_6_0_0() {
+        let error = resolve_ruleset(&RulesetReference {
+            id: STANDARD_MYSTERY_RULESET_ID.to_string(),
+            version: "7.0.0".to_string(),
+        })
+        .expect_err("unpublished version must error");
+        assert!(matches!(error, RulesetError::IncompatibleVersion { .. }));
+        assert!(error.to_string().contains("6.0.0"));
+
+        let unknown_id_error = resolve_ruleset(&RulesetReference {
+            id: "ruleset.unknown".to_string(),
+            version: "1.0.0".to_string(),
+        })
+        .expect_err("unknown ruleset id must error");
+        assert!(matches!(unknown_id_error, RulesetError::Unknown { .. }));
+        assert!(unknown_id_error.to_string().contains("6.0.0"));
+    }
+
+    #[test]
+    fn ruleset_version_constant_points_at_6_0_0() {
+        assert_eq!(STANDARD_MYSTERY_RULESET_VERSION, "6.0.0");
+        assert_eq!(
+            STANDARD_MYSTERY_RULESET_VERSION,
+            STANDARD_MYSTERY_RULESET_VERSION_6
         );
     }
 }
