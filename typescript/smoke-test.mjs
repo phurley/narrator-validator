@@ -97,7 +97,7 @@ assert.deepEqual(solutionContract, {
   story_format_version: '3.3.0',
   ruleset_id: 'ruleset.standard_mystery',
   ruleset_version: '3.0.0',
-  compatible_ruleset_versions: ['3.0.0', '4.0.0', '5.0.0'],
+  compatible_ruleset_versions: ['3.0.0', '4.0.0', '5.0.0', '6.0.0'],
   min_questions: 1,
   max_questions: 4,
   min_answer_cards: 1,

@@ -12,8 +12,8 @@ use crate::{
     MIN_SOLUTION_ANSWER_CARDS, MIN_SOLUTION_QUESTIONS, REFERENCE_TEXT_FEATURE,
     STANDARD_MYSTERY_RULESET_ID, STANDARD_MYSTERY_RULESET_VERSION_2,
     STANDARD_MYSTERY_RULESET_VERSION_3, STANDARD_MYSTERY_RULESET_VERSION_4,
-    STANDARD_MYSTERY_RULESET_VERSION_5, STORY_FORMAT_VERSION, SUPPORTED_FEATURES,
-    VALIDATOR_VERSION,
+    STANDARD_MYSTERY_RULESET_VERSION_5, STANDARD_MYSTERY_RULESET_VERSION_6, STORY_FORMAT_VERSION,
+    SUPPORTED_FEATURES, VALIDATOR_VERSION,
 };
 
 const MAX_REPOSITORY_FILES: usize = 512;
@@ -489,6 +489,7 @@ impl<'a> Validator<'a> {
                     STANDARD_MYSTERY_RULESET_VERSION_3
                         | STANDARD_MYSTERY_RULESET_VERSION_4
                         | STANDARD_MYSTERY_RULESET_VERSION_5
+                        | STANDARD_MYSTERY_RULESET_VERSION_6
                 )
         })
     }
@@ -496,7 +497,10 @@ impl<'a> Validator<'a> {
     fn uses_solution_target_requirements(&self) -> bool {
         self.ruleset.as_ref().is_some_and(|ruleset| {
             ruleset.id == STANDARD_MYSTERY_RULESET_ID
-                && ruleset.version == STANDARD_MYSTERY_RULESET_VERSION_5
+                && matches!(
+                    ruleset.version.as_str(),
+                    STANDARD_MYSTERY_RULESET_VERSION_5 | STANDARD_MYSTERY_RULESET_VERSION_6
+                )
         })
     }
 
@@ -1711,14 +1715,16 @@ impl<'a> Validator<'a> {
         if reference.id == STANDARD_MYSTERY_RULESET_ID
             && matches!(
                 reference.version.as_str(),
-                STANDARD_MYSTERY_RULESET_VERSION_4 | STANDARD_MYSTERY_RULESET_VERSION_5
+                STANDARD_MYSTERY_RULESET_VERSION_4
+                    | STANDARD_MYSTERY_RULESET_VERSION_5
+                    | STANDARD_MYSTERY_RULESET_VERSION_6
             )
             && !self.is_format_3_4_or_later()
         {
             self.push(
                 Severity::Error,
                 "ruleset.format_incompatible",
-                "ruleset.standard_mystery@4.0.0 and @5.0.0 declare automatic/manual notebook mechanics and the authored-question Solve contract; set `case.format_version` to \"3.4.0\" or select an earlier ruleset version"
+                "ruleset.standard_mystery@4.0.0, @5.0.0, and @6.0.0 declare automatic/manual notebook mechanics and the authored-question Solve contract; set `case.format_version` to \"3.4.0\" or select an earlier ruleset version"
                     .to_string(),
                 &case.path,
                 Some(format!("{pointer}/version")),
@@ -2119,6 +2125,7 @@ impl<'a> Validator<'a> {
                 "effects",
                 "points",
                 "author_notes",
+                "default_cost_minutes",
             ],
         );
         self.validate_item_fields(
@@ -2547,7 +2554,7 @@ impl<'a> Validator<'a> {
             self.push(
                 Severity::Error,
                 "solution.ruleset_incompatible",
-                "authored questions require `case.ruleset` ruleset.standard_mystery@3.0.0, @4.0.0, or @5.0.0"
+                "authored questions require `case.ruleset` ruleset.standard_mystery@3.0.0, @4.0.0, @5.0.0, or @6.0.0"
                     .to_string(),
                 path,
                 Some("/solution".to_string()),
