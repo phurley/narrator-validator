@@ -7,6 +7,7 @@ use serde::Serialize;
 use crate::{
     DisclosureClass, STANDARD_MYSTERY_RULESET_ID, STANDARD_MYSTERY_RULESET_VERSION_3,
     STANDARD_MYSTERY_RULESET_VERSION_4, STANDARD_MYSTERY_RULESET_VERSION_5,
+    STANDARD_MYSTERY_RULESET_VERSION_6,
 };
 
 pub const MIN_SOLUTION_QUESTIONS: usize = 1;
@@ -20,7 +21,7 @@ pub struct SolutionContractMetadata {
     pub story_format_version: &'static str,
     pub ruleset_id: &'static str,
     pub ruleset_version: &'static str,
-    pub compatible_ruleset_versions: [&'static str; 3],
+    pub compatible_ruleset_versions: [&'static str; 4],
     pub min_questions: usize,
     pub max_questions: usize,
     pub min_answer_cards: usize,
@@ -39,6 +40,7 @@ pub fn solution_contract_metadata() -> SolutionContractMetadata {
             STANDARD_MYSTERY_RULESET_VERSION_3,
             STANDARD_MYSTERY_RULESET_VERSION_4,
             STANDARD_MYSTERY_RULESET_VERSION_5,
+            STANDARD_MYSTERY_RULESET_VERSION_6,
         ],
         min_questions: MIN_SOLUTION_QUESTIONS,
         max_questions: MAX_SOLUTION_QUESTIONS,
@@ -118,5 +120,13 @@ mod tests {
             &ids(&["setting.observatory", "setting.shed"]),
             true
         ));
+    }
+
+    #[test]
+    fn solution_contract_metadata_lists_ruleset_6_0_0_as_compatible() {
+        let metadata = solution_contract_metadata();
+        assert!(metadata
+            .compatible_ruleset_versions
+            .contains(&STANDARD_MYSTERY_RULESET_VERSION_6));
     }
 }

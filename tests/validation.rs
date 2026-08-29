@@ -1017,6 +1017,22 @@ fn standard_ruleset_5_0_is_format_3_4_and_adds_reconciliation() {
     }));
 }
 
+#[test]
+fn standard_ruleset_6_0_validates_the_same_solution_contract_as_5_0() {
+    let source =
+        format_3_4_end_state_story().replacen("version: \"3.0.0\"", "version: \"6.0.0\"", 1);
+    let valid_report = report(source);
+    assert!(valid_report.valid, "{:#?}", valid_report.diagnostics);
+    assert_eq!(valid_report.playability.unwrap().notebook_policies.len(), 4);
+
+    let incompatible =
+        report(format_3_3_question_story().replacen("version: \"3.0.0\"", "version: \"6.0.0\"", 1));
+    assert!(incompatible.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "ruleset.format_incompatible"
+            && diagnostic.pointer.as_deref() == Some("/case/ruleset/version")
+    }));
+}
+
 fn format_3_3_question_story() -> String {
     include_str!("fixtures/format-3.3-question-story.yaml").to_string()
 }
@@ -1979,6 +1995,32 @@ fn ruleset_5_allows_only_persistent_requirements_on_the_solution_target() {
             invalid.diagnostics
         );
     }
+}
+
+#[test]
+fn ruleset_6_0_allows_only_persistent_requirements_on_the_solution_target() {
+    let source = format_3_4_ruleset_5_solution_prerequisite_story().replacen(
+        "version: \"5.0.0\"",
+        "version: \"6.0.0\"",
+        1,
+    );
+
+    let valid = report(source.clone());
+    assert!(valid.valid, "{:#?}", valid.diagnostics);
+
+    let invalid = report(source.replacen(
+        "    requires: [flag.knife_examined]\n    text: You answer every question",
+        "    requires: [entity.knife]\n    text: You answer every question",
+        1,
+    ));
+    assert!(
+        invalid.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "end_states.solution_requirement_kind"
+                && diagnostic.pointer.as_deref() == Some("/end_states/0/requires/0")
+        }),
+        "missing precise unsupported-kind diagnostic: {:#?}",
+        invalid.diagnostics
+    );
 }
 
 #[test]
