@@ -57,6 +57,29 @@ execFileSync(
 
 await mkdir(output, { recursive: true })
 
+// Ask cargo where it actually put the build output, rather than assuming
+// the default `<root>/target` -- a `.cargo/config.toml` `target-dir`
+// override (e.g. the per-ticket isolation `scripts/orch/new-worktree.sh`
+// writes for this repo, narrator-system#137) relocates it, and this script
+// used to look in the wrong place whenever one was present.
+const cargoMetadata = JSON.parse(
+  execFileSync(
+    'cargo',
+    ['metadata', '--no-deps', '--format-version', '1'],
+    {
+      cwd: root,
+      env: cargoEnvironment,
+      encoding: 'utf8',
+    },
+  ),
+)
+const wasmArtifact = join(
+  cargoMetadata.target_directory,
+  'wasm32-unknown-unknown',
+  'release',
+  'narrator_validator.wasm',
+)
+
 execFileSync(
   wasmBindgen,
   [
@@ -66,13 +89,7 @@ execFileSync(
     output,
     '--out-name',
     'narrator_validator',
-    join(
-      root,
-      'target',
-      'wasm32-unknown-unknown',
-      'release',
-      'narrator_validator.wasm',
-    ),
+    wasmArtifact,
   ],
   {
     cwd: root,
@@ -109,17 +126,7 @@ await writeFile(
   `export const STANDARD_MYSTERY_RULESETS = Object.freeze(${JSON.stringify(standardMysteryRulesets)}.map(Object.freeze))\nexport const STANDARD_MYSTERY_RULESET = STANDARD_MYSTERY_RULESETS.at(-1)\n`,
 )
 
-const metadata = JSON.parse(
-  execFileSync(
-    'cargo',
-    ['metadata', '--no-deps', '--format-version', '1'],
-    {
-      cwd: root,
-      encoding: 'utf8',
-    },
-  ),
-)
-const rustPackage = metadata.packages.find(
+const rustPackage = cargoMetadata.packages.find(
   (candidate) => candidate.manifest_path === join(root, 'Cargo.toml'),
 )
 if (rustPackage === undefined) {
