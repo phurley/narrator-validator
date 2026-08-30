@@ -171,7 +171,8 @@ vocabulary accepted wherever authored conditions accept IDs (fact and
 trigger `when.all`, testimony `requires`). Validator `1.9.0` adds this
 format-3.6 support. See
 [Story Format 3.6](docs/story-format-3.6.md). Format 3.5 adds `command_costs`,
-optional per-`(command, target)` clock-cost overrides. Validator
+optional per-`(command, target)` clock-cost overrides. See
+[Story Format 3.5](docs/story-format-3.5.md). Validator
 `1.7.0` adds append-only standard mystery ruleset `5.0.0`, allowing
 the full Solve end state to require persistent world state and adding explicit
 multiplayer notebook reconciliation. Validator `1.6.0` makes automatic deduction closure the default playability
@@ -191,6 +192,7 @@ privacy decisions are recorded in
 [Story Format 3.2](docs/story-format-3.2.md),
 [Story Format 3.3](docs/story-format-3.3.md),
 [Story Format 3.4](docs/story-format-3.4.md),
+[Story Format 3.5](docs/story-format-3.5.md),
 [Story Format 3.6](docs/story-format-3.6.md), and
 [ADR 0001](docs/adr/0001-story-format-3.1-character-presence-and-command-candidates.md).
 The [ADR index](docs/adr/README.md) is the discovery point for architecture
