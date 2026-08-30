@@ -168,7 +168,8 @@ guidance before the strict format-3 schema runs.
 Format 3.6 adds an optional `case.players.description` and selectable
 `case.players.personas`, plus a `persona.`/`player.` condition-token
 vocabulary accepted wherever authored conditions accept IDs (fact and
-trigger `when.all`, testimony `requires`). See
+trigger `when.all`, testimony `requires`). Validator `1.9.0` adds this
+format-3.6 support. See
 [Story Format 3.6](docs/story-format-3.6.md). Format 3.5 adds `command_costs`,
 optional per-`(command, target)` clock-cost overrides. Validator
 `1.7.0` adds append-only standard mystery ruleset `5.0.0`, allowing
