@@ -845,6 +845,71 @@ fn authored_solution_questions_produce_one_exact_supported_solve_action() {
         .contains(&"solution.correct".to_string()));
 }
 
+/// Renaming a referenced definition (Format 3.2+ `[[...]]` reference text) is
+/// validator behaviour: every resolved pointer that references the renamed
+/// definition must pick up the new display value on the next validation, and
+/// none may still show the old value or leak an unresolved `[[...]]` marker
+/// or raw `kind.id` token. This used to be proved incidentally by
+/// `simple_mystery` mutating a YAML snapshot and re-validating in-process via
+/// the WASM API; it moved here when story repos standardised on the `@v1`
+/// action (a single action invocation only produces one report, so the story
+/// repo can no longer validate twice). See narrator-system#15 and #39.
+#[test]
+fn renaming_a_referenced_definition_propagates_to_every_resolved_pointer() {
+    let root = std::path::Path::new("tests/fixtures/format-3.3-solve-card-sets");
+    let mut files = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            narrator_validator::SourceFile {
+                path: path.file_name().unwrap().to_string_lossy().into_owned(),
+                source: std::fs::read_to_string(path).unwrap(),
+            }
+        })
+        .collect::<Vec<_>>();
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+
+    let before = narrator_validator::validate(&files);
+    assert!(before.valid, "{:#?}", before.diagnostics);
+    let prompt_before = before
+        .reference_text
+        .iter()
+        .find(|field| field.pointer == "/solution/questions/0/prompt")
+        .expect("solution question prompt is a registered reference-text consumer");
+    assert_eq!(
+        prompt_before.resolved,
+        "Who planned the crime against Rowan Vale?"
+    );
+
+    let characters = files
+        .iter_mut()
+        .find(|file| file.path == "characters.yaml")
+        .expect("characters.yaml fixture file");
+    assert!(
+        characters.source.contains("name: Rowan Vale"),
+        "fixture must still define the name this test renames"
+    );
+    characters.source = characters
+        .source
+        .replace("name: Rowan Vale", "name: Rowan Ashford");
+
+    let after = narrator_validator::validate(&files);
+    assert!(after.valid, "{:#?}", after.diagnostics);
+    let prompt_after = after
+        .reference_text
+        .iter()
+        .find(|field| field.pointer == "/solution/questions/0/prompt")
+        .expect("solution question prompt is still a registered reference-text consumer");
+    assert_eq!(
+        prompt_after.resolved,
+        "Who planned the crime against Rowan Ashford?"
+    );
+    assert!(!prompt_after.resolved.contains("Rowan Vale"));
+    assert!(!prompt_after.resolved.contains("[["));
+    assert!(!prompt_after.resolved.contains("]]"));
+    assert!(!prompt_after.resolved.contains("character.victim"));
+}
+
 fn codes(source: impl Into<String>) -> Vec<String> {
     report(source)
         .diagnostics
