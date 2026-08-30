@@ -840,6 +840,24 @@ impl Model {
                     "inventory ownership predicates are outside the static subset",
                 );
                 result.push(Predicate::Never);
+            } else if string(map, "player").is_some() {
+                // The static search proves reachability for a single,
+                // persona-less playthrough and never models which persona
+                // or player slot is "acting". A `player` predicate is
+                // therefore treated as never satisfied here: content gated
+                // on it cannot make an otherwise-winnable default
+                // playthrough unreachable (the fact is simply excluded from
+                // the reachable set), but if the authored solution depends
+                // on such a fact, the missing producer surfaces as an
+                // inconclusive/unsupported terminal path rather than a
+                // silent false pass.
+                self.unsupported(
+                    file,
+                    &format!("{pointer}/when/all/{index}/player"),
+                    "playability.unsupported_player_condition",
+                    "persona/player-slot conditions are outside the static, persona-less playability subset",
+                );
+                result.push(Predicate::Never);
             } else if let Some(id) = string(map, "at") {
                 result.push(Predicate::At(id.to_string()));
             } else if let Some(time) = field(map, "time").and_then(Value::as_mapping) {

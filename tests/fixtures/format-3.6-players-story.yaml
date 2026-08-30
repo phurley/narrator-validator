@@ -1,0 +1,134 @@
+case:
+  id: case.example
+  format_version: "3.6.0"
+  features: [reference_text_v1]
+  ruleset:
+    id: ruleset.standard_mystery
+    version: "3.0.0"
+  players:
+    min: 1
+    max: 4
+    description: One of you is secretly the detective; the rest play witnesses.
+    personas:
+      - id: persona.detective
+        name: The Detective
+        description: Leads the investigation and asks the questions.
+        narrator_guidance: Address this player directly when revealing deductions.
+      - id: persona.witness
+        name: A Witness
+        description: Has firsthand knowledge of the night's events.
+  initial_time: "21:00"
+  entry_settings: [setting.foyer]
+  exit_settings: [setting.foyer]
+solution:
+  win_state: win.solve_case
+  questions:
+    - prompt: Who killed [[character.victim.description]]?
+      answer: [character.culprit]
+    - prompt: Which cards identify the weapon and location?
+      answer: [entity.knife, setting.study]
+      ordered: true
+end_states:
+  - id: win.solve_case
+    name: The whole truth
+    outcome: won
+    resolution: full
+    text: You answer every question and explain the complete case.
+settings:
+  - id: setting.world
+    type: island
+    navigable: false
+    description: The world containing the playable rooms.
+  - id: setting.foyer
+    type: room
+    description: The entry foyer.
+    parent: setting.world
+  - id: setting.study
+    type: room
+    description: The study where the mystery occurred.
+    parent: setting.world
+routes:
+  - id: route.foyer_study
+    from: setting.foyer
+    to: setting.study
+    bidirectional: true
+    travel_minutes: 1
+characters:
+  - id: character.victim
+    description: The victim at the center of the mystery.
+  - id: character.culprit
+    description: A suspect with a carefully guarded secret.
+entities:
+  - id: entity.knife
+    description: A knife found in the study.
+    initial:
+      container: setting.study
+    facts:
+      - id: fact.knife_is_present
+        statement: The knife is present.
+      - id: fact.detective_hunch
+        statement: The detective suspects the knife matters.
+        about: [entity.knife]
+        when:
+          all:
+            - player: persona.detective
+events:
+  - id: event.murder
+    day: 0
+    time: "21:18"
+    duration_minutes: 0
+    location: setting.study
+    participants: [character.victim, character.culprit]
+deductions:
+  - id: deduction.solution
+    conclusion: The knife was used in the study.
+    inputs: [fact.knife_is_present]
+    truth: true
+flags:
+  - id: flag.knife_examined
+    name: Knife examined
+    description: Whether the knife has been examined.
+    initial_state: false
+commands:
+  - id: command.investigate
+    name: Investigate
+    description: Resolve the authored effects of investigating an entity.
+    parameters:
+      - name: target
+        types: [entity]
+        min: 1
+        max: 1
+    effects:
+      - operation: advance_time
+        minutes: 12
+      - operation: learn_fact
+        fact_id: fact.knife_is_present
+triggers:
+  - id: trigger.detective_briefing
+    name: Detective briefing
+    on:
+      command: command.investigate
+      parameters:
+        target: entity.knife
+    when:
+      all:
+        - player: persona.detective
+    effects:
+      - operation: set_flag
+        flag: flag.knife_examined
+        value: true
+cards:
+  - tag_id: 0
+    subject: setting.foyer
+  - tag_id: 1
+    subject: setting.study
+  - tag_id: 2
+    subject: character.victim
+  - tag_id: 3
+    subject: character.culprit
+  - tag_id: 4
+    subject: entity.knife
+  - tag_id: 5
+    subject: command.solve
+  - tag_id: 6
+    subject: command.investigate

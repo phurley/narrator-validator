@@ -158,14 +158,20 @@ annotations. Inputs:
 ## Story format versions
 
 Every story declares a quoted semantic version at `case.format_version`.
-This validator authors format `3.4.0`. Format 3 minor and patch releases remain
+This validator authors format `3.6.0`. Format 3 minor and patch releases remain
 structurally compatible within the major format, while capabilities added by a
 minor release must be explicitly negotiated through `case.features`. The
 format-1 validation path remains for legacy repositories, while format-2
 repositories stop with focused migration
 guidance before the strict format-3 schema runs.
 
-Validator `1.7.0` adds append-only standard mystery ruleset `5.0.0`, allowing
+Format 3.6 adds an optional `case.players.description` and selectable
+`case.players.personas`, plus a `persona.`/`player.` condition-token
+vocabulary accepted wherever authored conditions accept IDs (fact and
+trigger `when.all`, testimony `requires`). See
+[Story Format 3.6](docs/story-format-3.6.md). Format 3.5 adds `command_costs`,
+optional per-`(command, target)` clock-cost overrides. Validator
+`1.7.0` adds append-only standard mystery ruleset `5.0.0`, allowing
 the full Solve end state to require persistent world state and adding explicit
 multiplayer notebook reconciliation. Validator `1.6.0` makes automatic deduction closure the default playability
 policy, reports all four fact/deduction policy combinations, and adds
@@ -183,7 +189,8 @@ privacy decisions are recorded in
 [Story Format 3.1](docs/story-format-3.1.md),
 [Story Format 3.2](docs/story-format-3.2.md),
 [Story Format 3.3](docs/story-format-3.3.md),
-[Story Format 3.4](docs/story-format-3.4.md), and
+[Story Format 3.4](docs/story-format-3.4.md),
+[Story Format 3.6](docs/story-format-3.6.md), and
 [ADR 0001](docs/adr/0001-story-format-3.1-character-presence-and-command-candidates.md).
 The [ADR index](docs/adr/README.md) is the discovery point for architecture
 decisions shared by validator consumers.
@@ -242,6 +249,10 @@ case:
     min: 2
     max: 6
 ```
+
+Format 3.6 stories may additionally describe the player role with
+`case.players.description` and offer selectable `case.players.personas`. See
+[Story Format 3.6](docs/story-format-3.6.md).
 
 Every character, entity, and setting has one baseline player-safe
 `description`. Discoveries that are not safe at first sight belong in a gated
@@ -397,10 +408,14 @@ entities:
 ```
 
 Persistent predicates are explicit mappings: `at` takes a setting, `owns` an
-entity, `knows` a fact or deduction, `flag` a flag, `completed` a trigger, and
-`time` a `relation`/`value` mapping. The engine evaluates them when a player
+entity, `knows` a fact or deduction, `flag` a flag, `completed` a trigger,
+`time` a `relation`/`value` mapping, and (Format 3.6+) `player` a declared
+`persona.<id>` or in-range `player.<n>` seat token meaning "the acting player
+is this persona/slot." The engine evaluates them when a player
 joins and after actions or delayed work resolve. `on` and `when` may be combined;
-both must match. Format 3 rejects the former fact `requires` ID bag.
+both must match. Format 3 rejects the former fact `requires` ID bag. See
+[Story Format 3.6](docs/story-format-3.6.md) for the `player` predicate and
+how playability analysis treats persona-gated facts.
 
 ## Entity placement, visibility, and portability
 

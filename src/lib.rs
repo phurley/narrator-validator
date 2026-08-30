@@ -55,7 +55,7 @@ pub use validator::{
 
 pub const VALIDATOR_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Latest story format authored by this release.
-pub const STORY_FORMAT_VERSION: &str = "3.5.0";
+pub const STORY_FORMAT_VERSION: &str = "3.6.0";
 /// Semantic-version range this release can structurally validate. Format 3.2+
 /// features still require successful `case.features` negotiation, while the
 /// Format 3.3 Solve contract is selected by its exact ruleset version.

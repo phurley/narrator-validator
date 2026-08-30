@@ -89,6 +89,16 @@ enum Kind {
     EndState,
     WinState,
     CommandCost,
+    /// A selectable player persona declared under `case.players.personas`
+    /// (Format 3.6). Registered in `self.definitions` alongside every other
+    /// authored ID so persona identifiers participate in the same
+    /// uniqueness, collision, and reference-resolution machinery.
+    Persona,
+    /// A synthesized `player.<n>` identity token for each seat within
+    /// `case.players.min..=max` (Format 3.6). Not authored directly; the
+    /// validator registers one per valid seat number so player-slot
+    /// references reuse the standard reference-resolution machinery.
+    Player,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -194,6 +204,8 @@ impl Kind {
             Self::EndState => "end",
             Self::WinState => "win",
             Self::CommandCost => "cost",
+            Self::Persona => "persona",
+            Self::Player => "player",
         }
     }
 
@@ -479,6 +491,12 @@ impl<'a> Validator<'a> {
         self.format_version
             .as_ref()
             .is_some_and(|version| version.major == 3 && version.minor >= 5)
+    }
+
+    fn is_format_3_6_or_later(&self) -> bool {
+        self.format_version
+            .as_ref()
+            .is_some_and(|version| version.major == 3 && version.minor >= 6)
     }
 
     fn uses_question_solution_ruleset(&self) -> bool {
@@ -1908,15 +1926,33 @@ impl<'a> Validator<'a> {
             );
             return;
         };
+        let format_3_6 = self.is_format_3_6_or_later();
+        // `description` and `personas` are always accepted here so this call
+        // never duplicates the versioned diagnostic pushed below; presence
+        // under an older format is reported by that dedicated check instead
+        // of a generic `unknown_field`.
         self.validate_mapping_fields(
             players,
-            &["min", "max"],
+            &["min", "max", "description", "personas"],
             "case.players",
             &case.path,
             &case.source,
             &pointer,
             Some(&case.id),
         );
+        let has_description = players.contains_key(Value::String("description".to_string()));
+        let has_personas = players.contains_key(Value::String("personas".to_string()));
+        if !format_3_6 && (has_description || has_personas) {
+            self.push(
+                Severity::Error,
+                "case.players_personas_format_incompatible",
+                "`case.players.description` and `case.players.personas` require story format 3.6.0 or later".to_string(),
+                &case.path,
+                Some(pointer.clone()),
+                None,
+                Some(case.id.clone()),
+            );
+        }
         let min = players
             .get(Value::String("min".to_string()))
             .and_then(Value::as_i64);
@@ -1942,10 +1978,226 @@ impl<'a> Validator<'a> {
                 "case.players_order",
                 "`case.players.min` cannot exceed `case.players.max`".to_string(),
                 &case.path,
-                Some(pointer),
+                Some(pointer.clone()),
                 None,
                 Some(case.id.clone()),
             );
+        }
+
+        if !format_3_6 {
+            return;
+        }
+
+        if let Some(description) = players.get(Value::String("description".to_string())) {
+            if !description
+                .as_str()
+                .is_some_and(|value| !value.trim().is_empty())
+            {
+                self.push(
+                    Severity::Error,
+                    "case.players_description_type",
+                    "`case.players.description` must be a non-empty string".to_string(),
+                    &case.path,
+                    Some(format!("{pointer}/description")),
+                    None,
+                    Some(case.id.clone()),
+                );
+            }
+        }
+
+        let valid_bounds = min.zip(max).filter(|(min, max)| {
+            *min > 0
+                && *max > 0
+                && usize::try_from(*min).is_ok()
+                && usize::try_from(*max).is_ok()
+                && min <= max
+        });
+
+        self.validate_personas(case, players, &pointer, valid_bounds.map(|(_, max)| max));
+
+        if let Some((min, max)) = valid_bounds {
+            for seat in min..=max {
+                let id = format!("player.{seat}");
+                // Player-slot tokens are synthesized, not authored, so there
+                // is nothing to flag as a duplicate here; a story cannot
+                // author its own `player.<n>` ID (see `id.wrong_prefix`
+                // elsewhere), so no other definition can collide with it.
+                self.definitions.entry(id).or_insert(Definition {
+                    kind: Kind::Player,
+                    path: case.path.clone(),
+                    pointer: pointer.clone(),
+                    range: None,
+                });
+            }
+        }
+    }
+
+    /// Validates `case.players.personas` (Format 3.6): an optional list of
+    /// selectable player identities. Each persona ID is registered in
+    /// `self.definitions` under `Kind::Persona`, reusing the same
+    /// duplicate/collision machinery every other authored ID goes through,
+    /// so a `persona.` ID that collides with any other authored namespace
+    /// is reported exactly like any other duplicate ID.
+    fn validate_personas(
+        &mut self,
+        case: &Item,
+        players: &Mapping,
+        players_pointer: &str,
+        max: Option<i64>,
+    ) {
+        let Some(value) = players.get(Value::String("personas".to_string())) else {
+            return;
+        };
+        let personas_pointer = format!("{players_pointer}/personas");
+        let Some(personas) = value.as_sequence().filter(|personas| !personas.is_empty()) else {
+            self.push(
+                Severity::Error,
+                "case.players_personas_type",
+                "`case.players.personas` must be a non-empty sequence of persona mappings"
+                    .to_string(),
+                &case.path,
+                Some(personas_pointer),
+                None,
+                Some(case.id.clone()),
+            );
+            return;
+        };
+        if let Some(max) = max {
+            if personas.len() as i64 > max {
+                self.push(
+                    Severity::Error,
+                    "case.players_personas_max",
+                    format!(
+                        "`case.players.personas` declares {} personas, more than `case.players.max` ({max})",
+                        personas.len()
+                    ),
+                    &case.path,
+                    Some(personas_pointer.clone()),
+                    None,
+                    Some(case.id.clone()),
+                );
+            }
+        }
+        for (index, persona) in personas.iter().enumerate() {
+            let pointer = format!("{personas_pointer}/{index}");
+            let Some(persona) = persona.as_mapping() else {
+                self.push(
+                    Severity::Error,
+                    "case.players_persona_type",
+                    "each `case.players.personas` entry must be a mapping".to_string(),
+                    &case.path,
+                    Some(pointer),
+                    None,
+                    Some(case.id.clone()),
+                );
+                continue;
+            };
+            self.validate_mapping_fields(
+                persona,
+                &["id", "name", "description", "narrator_guidance"],
+                "case.players.persona",
+                &case.path,
+                &case.source,
+                &pointer,
+                Some(&case.id),
+            );
+            let id_pointer = format!("{pointer}/id");
+            let Some(id) = string_field(persona, "id")
+                .filter(|id| !id.trim().is_empty())
+                .map(str::to_string)
+            else {
+                self.push(
+                    Severity::Error,
+                    "case.players_persona_id_missing",
+                    "persona is missing a string `id`".to_string(),
+                    &case.path,
+                    Some(id_pointer),
+                    None,
+                    Some(case.id.clone()),
+                );
+                continue;
+            };
+            let range = locate_id(&case.source, &id);
+            if !valid_id(&id) {
+                self.push(
+                    Severity::Error,
+                    "id.invalid",
+                    format!(
+                        "`{id}` must contain a lowercase kind prefix, a dot, and a lowercase snake-case name"
+                    ),
+                    &case.path,
+                    Some(id_pointer.clone()),
+                    range,
+                    Some(id.clone()),
+                );
+            } else if id_prefix(&id) != Some(Kind::Persona.prefix()) {
+                self.push(
+                    Severity::Error,
+                    "id.wrong_prefix",
+                    format!(
+                        "persona ID `{id}` must start with `{}.`",
+                        Kind::Persona.prefix()
+                    ),
+                    &case.path,
+                    Some(id_pointer.clone()),
+                    range,
+                    Some(id.clone()),
+                );
+            }
+            if let Some(first) = self.definitions.get(&id).cloned() {
+                self.diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    code: "id.duplicate".to_string(),
+                    message: format!("ID `{id}` is defined more than once"),
+                    path: case.path.clone(),
+                    pointer: Some(id_pointer),
+                    range,
+                    subject_id: Some(id.clone()),
+                    related: vec![RelatedLocation {
+                        message: "first defined here".to_string(),
+                        path: first.path,
+                        pointer: Some(format!("{}/id", first.pointer)),
+                        range: first.range,
+                    }],
+                });
+            } else {
+                self.definitions.insert(
+                    id.clone(),
+                    Definition {
+                        kind: Kind::Persona,
+                        path: case.path.clone(),
+                        pointer: pointer.clone(),
+                        range,
+                    },
+                );
+            }
+            if !string_field(persona, "name").is_some_and(|name| !name.trim().is_empty()) {
+                self.push(
+                    Severity::Error,
+                    "case.players_persona_name",
+                    "persona `name` must be a non-empty string".to_string(),
+                    &case.path,
+                    Some(format!("{pointer}/name")),
+                    None,
+                    Some(id.clone()),
+                );
+            }
+            for field in ["description", "narrator_guidance"] {
+                if persona
+                    .get(Value::String(field.to_string()))
+                    .is_some_and(|value| value.as_str().is_none())
+                {
+                    self.push(
+                        Severity::Error,
+                        "case.players_persona_field_type",
+                        format!("persona `{field}` must be a string"),
+                        &case.path,
+                        Some(format!("{pointer}/{field}")),
+                        None,
+                        Some(id.clone()),
+                    );
+                }
+            }
         }
     }
 
@@ -7017,7 +7269,7 @@ impl<'a> Validator<'a> {
                 self.push(
                     Severity::Error,
                     "condition.predicate_type",
-                    "each persistent predicate must be a mapping with exactly one of `at`, `owns`, `knows`, `flag`, `completed`, or `time`".to_string(),
+                    "each persistent predicate must be a mapping with exactly one of `at`, `owns`, `knows`, `flag`, `completed`, `player`, or `time`".to_string(),
                     path,
                     Some(predicate_pointer),
                     None,
@@ -7069,12 +7321,25 @@ impl<'a> Validator<'a> {
                 }
                 continue;
             }
+            if kind == "player" && !self.is_format_3_6_or_later() {
+                self.push(
+                    Severity::Error,
+                    "condition.player_format_incompatible",
+                    "the `player` persistent-condition predicate requires story format 3.6.0 or later".to_string(),
+                    path,
+                    Some(operand_pointer),
+                    None,
+                    Some(subject.to_string()),
+                );
+                continue;
+            }
             let expected: &[Kind] = match kind {
                 "at" => &[Kind::Setting],
                 "owns" => &[Kind::Entity],
                 "knows" => &[Kind::Fact, Kind::Deduction],
                 "flag" => &[Kind::Flag],
                 "completed" => &[Kind::Trigger],
+                "player" => &[Kind::Persona, Kind::Player],
                 _ => {
                     self.push(
                         Severity::Error,
@@ -9114,6 +9379,8 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
         Kind::Flag,
         Kind::Command,
         Kind::Trigger,
+        Kind::Persona,
+        Kind::Player,
     ];
     const DEDUCTIONS: &[Kind] = &[Kind::Deduction];
     const TRIGGER_GATES: &[Kind] = &[Kind::Character, Kind::Entity, Kind::Flag];

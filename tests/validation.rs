@@ -1186,6 +1186,236 @@ fn command_costs_reject_command_move_override() {
     );
 }
 
+fn format_3_6_players_story() -> String {
+    include_str!("fixtures/format-3.6-players-story.yaml").to_string()
+}
+
+#[test]
+fn players_description_and_personas_validate_end_to_end() {
+    let report = report(format_3_6_players_story());
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert!(report.diagnostics.is_empty(), "{:#?}", report.diagnostics);
+    assert_eq!(report.format_version.as_deref(), Some("3.6.0"));
+}
+
+#[test]
+fn players_description_and_personas_require_format_3_6() {
+    let source = format_3_6_players_story().replacen(
+        "format_version: \"3.6.0\"",
+        "format_version: \"3.5.0\"",
+        1,
+    );
+    let report = report(source);
+    let diagnostic = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "case.players_personas_format_incompatible")
+        .expect("versioned personas diagnostic");
+    assert_eq!(diagnostic.pointer.as_deref(), Some("/case/players"));
+    assert!(diagnostic.message.contains("3.6.0"));
+}
+
+#[test]
+fn player_condition_predicate_requires_format_3_6() {
+    let source = format_3_6_players_story()
+        .replacen("format_version: \"3.6.0\"", "format_version: \"3.5.0\"", 1)
+        // Drop the case-level fields that are already versioned-gated so
+        // this test isolates the `when.all` predicate gating.
+        .replacen(
+            "    description: One of you is secretly the detective; the rest play witnesses.\n    personas:\n      - id: persona.detective\n        name: The Detective\n        description: Leads the investigation and asks the questions.\n        narrator_guidance: Address this player directly when revealing deductions.\n      - id: persona.witness\n        name: A Witness\n        description: Has firsthand knowledge of the night's events.\n",
+            "",
+            1,
+        );
+    let report = report(source);
+    let diagnostic = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "condition.player_format_incompatible")
+        .expect("versioned player-predicate diagnostic");
+    assert!(diagnostic.message.contains("3.6.0"));
+}
+
+#[test]
+fn duplicate_persona_ids_are_rejected() {
+    let source = format_3_6_players_story().replace(
+        "      - id: persona.witness\n        name: A Witness\n        description: Has firsthand knowledge of the night's events.\n",
+        "      - id: persona.detective\n        name: Also The Detective\n",
+    );
+    let report = report(source);
+    let diagnostic = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.code == "id.duplicate"
+                && diagnostic.subject_id.as_deref() == Some("persona.detective")
+        })
+        .expect("duplicate persona id diagnostic");
+    assert_eq!(
+        diagnostic.pointer.as_deref(),
+        Some("/case/players/personas/1/id")
+    );
+}
+
+#[test]
+fn empty_persona_name_is_rejected() {
+    let source =
+        format_3_6_players_story().replace("        name: The Detective\n", "        name: \"\"\n");
+    let report = report(source);
+    let diagnostic = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "case.players_persona_name")
+        .expect("empty persona name diagnostic");
+    assert_eq!(
+        diagnostic.pointer.as_deref(),
+        Some("/case/players/personas/0/name")
+    );
+}
+
+#[test]
+fn personas_cannot_exceed_players_max() {
+    let source = format_3_6_players_story().replace("    max: 4\n", "    max: 1\n");
+    let report = report(source);
+    let diagnostic = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "case.players_personas_max")
+        .expect("personas over max diagnostic");
+    assert_eq!(
+        diagnostic.pointer.as_deref(),
+        Some("/case/players/personas")
+    );
+    assert!(diagnostic.message.contains("max"));
+}
+
+#[test]
+fn persona_id_colliding_with_another_namespace_is_rejected() {
+    let source = format_3_6_players_story().replace(
+        "  - id: character.victim\n    description: The victim at the center of the mystery.\n",
+        "  - id: persona.detective\n    description: The victim at the center of the mystery.\n",
+    );
+    let report = report(source);
+    assert!(report
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "id.duplicate"
+            && diagnostic.subject_id.as_deref() == Some("persona.detective")));
+}
+
+#[test]
+fn trigger_when_can_reference_a_declared_persona() {
+    let source = format_3_6_players_story();
+    let report = report(source);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+}
+
+#[test]
+fn trigger_when_rejects_undeclared_persona() {
+    let source = format_3_6_players_story().replace(
+        "player: persona.detective\n    effects:",
+        "player: persona.undeclared\n    effects:",
+    );
+    let report = report(source);
+    let diagnostic = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.code == "reference.unknown"
+                && diagnostic.subject_id.as_deref() == Some("persona.undeclared")
+        })
+        .expect("undeclared persona reference diagnostic");
+    assert!(diagnostic
+        .pointer
+        .as_deref()
+        .unwrap()
+        .contains("/triggers/"));
+}
+
+#[test]
+fn trigger_when_rejects_out_of_range_player_slot() {
+    let source = format_3_6_players_story().replace(
+        "player: persona.detective\n    effects:",
+        "player: player.9\n    effects:",
+    );
+    let report = report(source);
+    let diagnostic = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.code == "reference.unknown"
+                && diagnostic.subject_id.as_deref() == Some("player.9")
+        })
+        .expect("out-of-range player slot diagnostic");
+    assert!(diagnostic
+        .pointer
+        .as_deref()
+        .unwrap()
+        .contains("/triggers/"));
+}
+
+#[test]
+fn trigger_when_accepts_in_range_player_slot() {
+    let source = format_3_6_players_story().replace(
+        "player: persona.detective\n    effects:",
+        "player: player.2\n    effects:",
+    );
+    let report = report(source);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+}
+
+#[test]
+fn persona_gated_fact_does_not_block_playability_when_solution_does_not_need_it() {
+    // The story's `win.solve_case` end state does not require the
+    // persona-gated `fact.detective_hunch`. A supported path to it exists
+    // (found by the deterministic search), so the analyzer must never
+    // report it as unwinnable (`NotProved`); consistent with every other
+    // globally-unsupported predicate, the presence of the persona
+    // condition elsewhere in the story is allowed to make the analyzer
+    // cautious (`Inconclusive`) but must not flip an otherwise-reachable
+    // path to a hard failure.
+    let report = report(format_3_6_players_story());
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    let analysis = report.playability.expect("format 3 playability report");
+    let policy = &analysis.notebook_policies[0];
+    let win = policy
+        .terminal_paths
+        .iter()
+        .find(|path| path.id == "win.solve_case")
+        .expect("win state terminal path");
+    assert_ne!(
+        win.status,
+        narrator_validator::PlayabilityStatus::NotProved,
+        "{win:#?}"
+    );
+}
+
+#[test]
+fn persona_gated_fact_required_by_solution_reports_a_clear_playability_diagnostic() {
+    let source = format_3_6_players_story().replace(
+        "end_states:\n  - id: win.solve_case\n    name: The whole truth\n    outcome: won\n    resolution: full\n    text: You answer every question and explain the complete case.\n",
+        "end_states:\n  - id: win.solve_case\n    name: The whole truth\n    outcome: won\n    resolution: full\n    text: You answer every question and explain the complete case.\n  - id: end.detective_insight\n    name: The detective's private insight\n    outcome: won\n    resolution: partial\n    requires: [fact.detective_hunch]\n    minimum_points: 0\n    text: The detective alone puts it together.\n",
+    );
+    let report = report(source);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    let analysis = report.playability.expect("format 3 playability report");
+    let policy = &analysis.notebook_policies[0];
+    let detective_only = policy
+        .terminal_paths
+        .iter()
+        .find(|path| path.id == "end.detective_insight")
+        .expect("persona-gated end state terminal path");
+    assert_ne!(
+        detective_only.status,
+        narrator_validator::PlayabilityStatus::Proved,
+        "a persona-gated fact must not be provably reachable by the default, persona-less playthrough: {detective_only:#?}"
+    );
+    let blocker = detective_only
+        .blocker
+        .as_ref()
+        .expect("unreachable persona-gated end state carries a blocker");
+    assert_eq!(blocker.code, "playability.unsupported_player_condition");
+}
+
 #[test]
 fn format_3_3_authored_questions_are_private_exact_card_sets() {
     let report = report(format_3_3_question_story());
