@@ -25,6 +25,18 @@ runs:
   steps:
     - name: Install Rust 1.80
       uses: dtolnay/rust-toolchain@1.80.0
+    - name: Cache cargo registry and build artifacts
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          ${{ github.action_path }}/target
+        key: >-
+          narrator-validator-cargo-${{ runner.os }}-1.80.0-${{
+          hashFiles(format('{0}/Cargo.lock', github.action_path)) }}
+        restore-keys: |
+          narrator-validator-cargo-${{ runner.os }}-1.80.0-
     - name: Build and run validator
       shell: bash
       run: |
