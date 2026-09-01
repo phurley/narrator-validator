@@ -2598,6 +2598,40 @@ fn repository_requires_a_generic_or_legacy_terminal_configuration() {
 }
 
 #[test]
+fn format_3_7_steps_without_end_states_gets_a_steps_specific_terminal_message() {
+    // A story authoring only `solution.steps`, with no `end_states` and no
+    // legacy `win_state`/`questions`, cannot resolve to any outcome:
+    // Format 3.7 removed `solution.win_state`, and graded endings are
+    // defined entirely by `end_states[].requires` over step-outcome flags
+    // (docs/story-format-3.7.md, "Graded endings replace `win_state`").
+    // This is correctly rejected, but the message should name the actual
+    // fix (`end_states` keyed on step-outcome flags) rather than the
+    // generic legacy-era wording.
+    let source = format_3_7_step_story().replace(
+        "end_states:\n  - id: end.full_solution\n    name: Solved the case\n    outcome: won\n    resolution: full\n    requires: [flag.culprit_named, flag.weapon_location_and_method_named]\n    text: You answer every question correctly.\n  - id: end.partial_solution\n    name: Named the culprit\n    outcome: won\n    resolution: partial\n    requires: [flag.culprit_named]\n    text: You name the culprit but never nail down how or where.\n",
+        "",
+    );
+    let report = report(source);
+    let diagnostic = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "end_states.missing_terminal_configuration")
+        .expect("missing terminal configuration diagnostic");
+    assert_eq!(diagnostic.pointer.as_deref(), Some("/end_states"));
+    assert!(
+        diagnostic.message.contains("solution.steps"),
+        "expected the message to name `solution.steps` as the reason a plain \
+         `end_states`-block message is insufficient: {}",
+        diagnostic.message
+    );
+    assert!(
+        diagnostic.message.contains("end_states"),
+        "expected the message to point authors at `end_states`: {}",
+        diagnostic.message
+    );
+}
+
+#[test]
 fn win_states_must_use_the_canonical_root_filename() {
     let source = SourceFile {
         path: "goals.yaml".to_string(),

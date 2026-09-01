@@ -3994,6 +3994,15 @@ impl<'a> Validator<'a> {
         });
         if end_states.is_empty() && win_states.is_empty() && !has_solution {
             let canonical_end_states = self.is_format_3_4_or_later();
+            let has_solution_steps = self.parsed.iter().any(|file| {
+                file.value
+                    .as_mapping()
+                    .and_then(|root| root.get(Value::String("solution".to_string())))
+                    .and_then(Value::as_mapping)
+                    .and_then(|solution| solution.get(Value::String("steps".to_string())))
+                    .and_then(Value::as_sequence)
+                    .is_some_and(|steps| !steps.is_empty())
+            });
             self.push(
                 Severity::Error,
                 if canonical_end_states {
@@ -4001,7 +4010,9 @@ impl<'a> Validator<'a> {
                 } else {
                     "win_states.missing_terminal_configuration"
                 },
-                if canonical_end_states {
+                if has_solution_steps {
+                    "`solution.steps` alone cannot resolve an outcome; define at least one `end_states` entry whose `requires` references the flags your step `on_success`/`on_failure` effects set".to_string()
+                } else if canonical_end_states {
                     "define at least one generic end state or a valid `solution` block".to_string()
                 } else {
                     "define at least one generic win state or a valid `solution` block".to_string()
