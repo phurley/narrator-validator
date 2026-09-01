@@ -1152,13 +1152,16 @@ impl Model {
                     || requirement.starts_with("entity.")
                     || requirement.starts_with("character.")
                     || requirement.starts_with("event.")
+                    || requirement.starts_with("answer.")
                 {
                     // The testimony's own `requires` uses these as topic
                     // candidates (`command.question`'s `topic` parameter
                     // accepts character/setting/event/entity/deduction
-                    // types); bind them the same way a route or parameter
-                    // pattern binds a subject so `action_available` applies
-                    // its existing reachability/knowledge check.
+                    // types, and `answer.*` per Format 3.7's
+                    // question-topic-eligible knowledge subjects); bind them
+                    // the same way a route or parameter pattern binds a
+                    // subject so `action_available` applies its existing
+                    // reachability/knowledge check.
                     topics.push(requirement.clone());
                 } else {
                     fact.when.push(Predicate::Never);
@@ -1225,6 +1228,123 @@ impl Model {
             .sort_by(|a, b| (&a.path, &a.pointer, &a.code).cmp(&(&b.path, &b.pointer, &b.code)));
         self.precompute_elapsed_equivalence_horizon();
         self.precompute_patterns();
+        self.build_subject_witnesses();
+    }
+
+    /// Build `subject_witnesses`: for every card subject ID (including
+    /// `answer.*`), the facts/deductions that establish knowledge of it.
+    /// Mirrors #79's "known via facts/deductions that reference them"
+    /// semantics uniformly across card kinds.
+    fn build_subject_witnesses(&mut self) {
+        let mut witnesses = BTreeMap::<String, BTreeSet<String>>::new();
+        for fact in self.facts.values() {
+            let mut subjects = fact.about.clone();
+            if let Some(owner) = &fact.item.owner {
+                subjects.push(owner.clone());
+            }
+            if let Ok(parsed) = crate::parse_reference_text(&fact.statement) {
+                for segment in &parsed.segments {
+                    if let crate::ReferenceTextSegment::Reference { expression } = segment {
+                        subjects.push(expression.target_id.clone());
+                    }
+                }
+            }
+            subjects.sort();
+            subjects.dedup();
+            for subject in subjects {
+                witnesses
+                    .entry(subject)
+                    .or_default()
+                    .insert(fact.item.id.clone());
+            }
+        }
+        for deduction in self.deductions.values() {
+            let mut subjects = Vec::new();
+            if let Ok(parsed) = crate::parse_reference_text(&deduction.conclusion) {
+                for segment in &parsed.segments {
+                    if let crate::ReferenceTextSegment::Reference { expression } = segment {
+                        subjects.push(expression.target_id.clone());
+                    }
+                }
+            }
+            subjects.sort();
+            subjects.dedup();
+            for subject in subjects {
+                witnesses
+                    .entry(subject)
+                    .or_default()
+                    .insert(deduction.item.id.clone());
+            }
+        }
+        self.subject_witnesses = witnesses;
+    }
+
+    /// True if `subject` (a card ID, including `answer.*`) can be
+    /// established as known in `state`.
+    ///
+    /// `answer.*` subjects are the simple case: they have no world-state
+    /// channel, so knowability is purely derived from the facts/deductions
+    /// that reference them (`subject_witnesses`).
+    ///
+    /// Entity/character/setting subjects are handled by owner-witness plus
+    /// location credit where the model tracks a physical position for the
+    /// subject at all (`subject_locations`, populated from an authored
+    /// `initial.location`/`initial.container`): being co-located with the
+    /// subject, or holding an explicit witness, establishes it. Most
+    /// characters (and every setting, which is never itself a
+    /// `subject_locations` key) have no authored physical position in this
+    /// static model at all; those are treated as ambient background
+    /// knowledge -- the named cast and the map are known from the outset,
+    /// the same as before this ticket, when the legacy path never gated
+    /// entity/character/setting subject knowledge in the first place.
+    fn subject_known(&self, state: &State, subject: &str) -> bool {
+        if subject.starts_with("answer.") {
+            return self
+                .subject_witnesses
+                .get(subject)
+                .is_some_and(|witnesses| witnesses.iter().any(|witness| has(state, witness)));
+        }
+        if state.location == subject {
+            return true;
+        }
+        if let Some(location) = self.subject_locations.get(subject) {
+            return location == &state.location
+                || self
+                    .subject_witnesses
+                    .get(subject)
+                    .is_some_and(|witnesses| witnesses.iter().any(|witness| has(state, witness)));
+        }
+        true
+    }
+
+    /// True if a row's knowledge gate is currently satisfied.
+    fn row_satisfied(&self, row: &SolveRow, state: &State) -> bool {
+        match row {
+            SolveRow::NOfM { n, pool } => {
+                pool.iter()
+                    .filter(|subject| self.subject_known(state, subject))
+                    .count()
+                    >= *n
+            }
+            SolveRow::Ordered { cards } => cards
+                .iter()
+                .all(|subject| self.subject_known(state, subject)),
+        }
+    }
+
+    /// True if `subject` could ever be established as known by *some*
+    /// play-through, independent of the current state -- the static tier
+    /// used to detect a hard-unlearnable answer (`subject_witnesses` has no
+    /// entry at all, so no fact or deduction in the entire catalog
+    /// references it).
+    fn subject_learnable(&self, subject: &str) -> bool {
+        if subject.starts_with("answer.") {
+            return self
+                .subject_witnesses
+                .get(subject)
+                .is_some_and(|witnesses| !witnesses.is_empty());
+        }
+        true
     }
 
     fn precompute_elapsed_equivalence_horizon(&mut self) {
@@ -1449,6 +1569,12 @@ impl Model {
         let mut bounded = false;
         let solution_equivalent = self.solution_equivalent_deductions();
         let mut answerable: Option<(u32, Vec<String>)> = None;
+        // For each Format 3.7 step, the fewest actions in which some
+        // reached state has *committed* it (`state.next_step > index`),
+        // i.e. some play-through actually took the `solve_step` action for
+        // it, not merely that its row cards are individually reachable
+        // (see the ticket's conjunctive/simultaneous/sequenced note).
+        let mut step_progress = vec![None::<u32>; self.solve_steps.len()];
         let unsupported_policy = if !auto_facts
             && !self.facts.is_empty()
             && !self.commands.contains_key("command.claim")
@@ -1474,6 +1600,11 @@ impl Model {
                 break;
             }
             explored += 1;
+            for (index, progress) in step_progress.iter_mut().enumerate() {
+                if progress.is_none() && (node.state.next_step as usize) > index {
+                    *progress = Some(node.actions);
+                }
+            }
             let established_solution_notes = node
                 .state
                 .deductions
@@ -1627,7 +1758,8 @@ impl Model {
         if has_id_in_initial_or_catalog(self, requirement) {
             return true;
         }
-        self.commands
+        if self
+            .commands
             .values()
             .flat_map(|command| &command.effects)
             .chain(self.triggers.values().flat_map(|trigger| &trigger.effects))
@@ -1637,6 +1769,17 @@ impl Model {
                 }
                 Effect::AdvanceTime(_) => false,
             })
+        {
+            return true;
+        }
+        // Format 3.7's `solution.steps[].on_success`/`on_failure` are the
+        // only producer of their flags: without this, every graded ending
+        // that requires a step-outcome flag would be falsely `NotProved`
+        // for any story on this path.
+        self.solve_steps.iter().any(|step| {
+            step.on_success.set_flags.iter().any(|flag| flag == requirement)
+                || step.on_failure.set_flags.iter().any(|flag| flag == requirement)
+        })
     }
 
     fn actions(
@@ -1724,6 +1867,50 @@ impl Model {
                 });
             }
         }
+        if !self.solve_steps.is_empty()
+            && self.commands.contains_key("command.solve")
+            && !self.unsupported_commands.contains("command.solve")
+        {
+            if let Some(step) = self.solve_steps.get(state.next_step as usize) {
+                if step.rows.iter().all(|row| self.row_satisfied(row, state)) {
+                    actions.push(CandidateAction {
+                        kind: "solve_step",
+                        id: format!("command.solve {}", step.item.id),
+                        pattern: ActionPattern {
+                            command: "command.solve".to_string(),
+                            bindings: BTreeMap::new(),
+                        },
+                        from: None,
+                        to: None,
+                        minutes: step.time_cost,
+                    });
+                }
+                // Attempt/restart semantics are only modeled for the
+                // (rare) case where an end state can only be reached
+                // through an `on_failure` effect: a prover's play-through
+                // never needs to actually fail, so this action exists
+                // solely to reach that flag, not to simulate every wrong
+                // answer.
+                let has_failure_effects =
+                    !step.on_failure.set_flags.is_empty() || step.on_failure.points != 0;
+                let attempts_available = self
+                    .max_attempts
+                    .map_or(true, |max| state.attempts_used < max);
+                if has_failure_effects && attempts_available {
+                    actions.push(CandidateAction {
+                        kind: "solve_step_fail",
+                        id: format!("command.solve {} fail", step.item.id),
+                        pattern: ActionPattern {
+                            command: "command.solve".to_string(),
+                            bindings: BTreeMap::new(),
+                        },
+                        from: None,
+                        to: None,
+                        minutes: step.time_cost,
+                    });
+                }
+            }
+        }
         if !auto_facts && self.commands.contains_key("command.claim") {
             for fact_id in &state.available_facts {
                 actions.push(CandidateAction {
@@ -1794,6 +1981,8 @@ impl Model {
                         .map_or(true, |requirements| {
                             requirements.iter().all(|id| has(state, id))
                         })
+            } else if id.starts_with("answer.") {
+                self.subject_known(state, id)
             } else {
                 true
             }
@@ -1901,6 +2090,35 @@ impl Model {
         if action.kind == "route" {
             state.location = action.to.clone().unwrap_or_else(|| state.location.clone());
             state.elapsed = state.elapsed.saturating_add(action.minutes);
+        }
+        if action.kind == "solve_step" || action.kind == "solve_step_fail" {
+            if let Some(step) = self.solve_steps.get(state.next_step as usize) {
+                state.elapsed = state.elapsed.saturating_add(step.time_cost);
+                let outcome = if action.kind == "solve_step" {
+                    &step.on_success
+                } else {
+                    &step.on_failure
+                };
+                for flag in &outcome.set_flags {
+                    state.flags.insert(flag.clone());
+                    unlocks.insert(flag.clone());
+                }
+                if outcome.points >= 0 {
+                    state.score = state.score.saturating_add(outcome.points as u64);
+                } else {
+                    state.score = state.score.saturating_sub(outcome.points.unsigned_abs());
+                }
+                if action.kind == "solve_step" {
+                    state.next_step = state.next_step.saturating_add(1);
+                    if state.next_step as usize >= self.solve_steps.len() {
+                        state.solution_solved = true;
+                        unlocks.insert("solution.correct".to_string());
+                    }
+                } else {
+                    state.next_step = 0;
+                    state.attempts_used = state.attempts_used.saturating_add(1);
+                }
+            }
         }
         if let Some(command) = self.commands.get(&action.pattern.command) {
             for effect in &command.effects {
@@ -2125,6 +2343,25 @@ impl Model {
                 .or_else(|| fact.on.as_ref().map(|on| on.command.clone()))
         } else if let Some(trigger) = self.triggers.get(id) {
             trigger.on.as_ref().map(|on| on.command.clone())
+        } else if let Some(step) = self.solve_steps.iter().find(|step| {
+            step.on_success.set_flags.iter().any(|flag| flag == id)
+                || step.on_failure.set_flags.iter().any(|flag| flag == id)
+        }) {
+            // A step-outcome flag: descend into the step itself, then the
+            // first row card that isn't known in any reached state.
+            let mut chain = vec![id.to_string(), step.item.id.clone()];
+            if let Some(subject) = step.rows.iter().find_map(|row| {
+                let subjects: Vec<&String> = match row {
+                    SolveRow::NOfM { pool, .. } => pool.iter().collect(),
+                    SolveRow::Ordered { cards } => cards.iter().collect(),
+                };
+                subjects
+                    .into_iter()
+                    .find(|subject| !states.iter().any(|state| self.subject_known(state, subject)))
+            }) {
+                chain.push(subject.clone());
+            }
+            return chain;
         } else {
             None
         };
