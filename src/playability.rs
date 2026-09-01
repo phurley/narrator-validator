@@ -159,6 +159,16 @@ struct FactRule {
     opening: bool,
 }
 
+/// A gate synthesized from a character's `testimony[].reveals` entry: the
+/// fact is only available once `command.question` has been asked of the
+/// testimony's owning character, subject to whatever else the testimony's
+/// own `requires` implies.
+#[derive(Clone)]
+struct TestimonyGate {
+    owner: String,
+    requires: Vec<String>,
+}
+
 #[derive(Clone)]
 struct DeductionRule {
     item: LocatedItem,
@@ -254,6 +264,7 @@ struct Model {
     solution_answer_rows: Vec<BTreeSet<String>>,
     precomputed_patterns: Vec<ActionPattern>,
     elapsed_equivalence_horizon: u32,
+    testimony_gates: BTreeMap<String, TestimonyGate>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -447,6 +458,7 @@ impl Model {
             model.read_ends(file, "end_states", sequence(root, "end_states"), false);
             model.read_ends(file, "win_states", sequence(root, "win_states"), true);
         }
+        model.apply_testimony_gates();
         if model.entries.is_empty() {
             if let Some(first) = model.routes.first() {
                 model.entries.push(first.from.clone());
@@ -552,6 +564,23 @@ impl Model {
                     if let Some(presence) = map(owner, "presence") {
                         self.subject_requirements
                             .insert(owner_id.clone(), strings(field(presence, "requires")));
+                    }
+                    if let Some(testimony) = field(owner, "testimony").and_then(Value::as_sequence)
+                    {
+                        for entry in testimony {
+                            let Some(entry) = entry.as_mapping() else {
+                                continue;
+                            };
+                            let requires = strings(field(entry, "requires"));
+                            for reveal in strings(field(entry, "reveals")) {
+                                self.testimony_gates.entry(reveal).or_insert_with(|| {
+                                    TestimonyGate {
+                                        owner: owner_id.clone(),
+                                        requires: requires.clone(),
+                                    }
+                                });
+                            }
+                        }
                     }
                 } else if section == "entities" {
                     if let Some(container) =
@@ -969,6 +998,74 @@ impl Model {
             pointer: pointer.to_string(),
             range: locate_pointer(file, pointer),
         });
+    }
+
+    /// Rewrite facts that are revealed exclusively through a character
+    /// testimony's `reveals:` entry so they gate on the `command.question`
+    /// action that actually reveals them, instead of being free at action 0.
+    /// This mirrors the game-engine reducer, which excludes
+    /// `story.testimony_reveals` facts from opening availability.
+    fn apply_testimony_gates(&mut self) {
+        let gates = std::mem::take(&mut self.testimony_gates);
+        for (fact_id, gate) in gates {
+            let Some(fact) = self.facts.get_mut(&fact_id) else {
+                continue;
+            };
+            // A fact with its own authored `on`/`when` is already correctly
+            // gated; don't override an explicit condition with a synthetic
+            // one.
+            if fact.on.is_some() {
+                continue;
+            }
+            fact.opening = false;
+            let mut bindings = BTreeMap::new();
+            bindings.insert("character".to_string(), vec![gate.owner.clone()]);
+            let mut topics = Vec::new();
+            for requirement in &gate.requires {
+                if requirement == "command.question" || requirement == &gate.owner {
+                    continue;
+                }
+                if requirement.starts_with("fact.")
+                    || requirement.starts_with("deduction.")
+                    || requirement.starts_with("flag.")
+                    || requirement.starts_with("trigger.")
+                {
+                    fact.when.push(Predicate::Has(requirement.clone()));
+                } else if requirement.starts_with("setting.")
+                    || requirement.starts_with("entity.")
+                    || requirement.starts_with("character.")
+                    || requirement.starts_with("event.")
+                {
+                    // The testimony's own `requires` uses these as topic
+                    // candidates (`command.question`'s `topic` parameter
+                    // accepts character/setting/event/entity/deduction
+                    // types); bind them the same way a route or parameter
+                    // pattern binds a subject so `action_available` applies
+                    // its existing reachability/knowledge check.
+                    topics.push(requirement.clone());
+                } else {
+                    fact.when.push(Predicate::Never);
+                    self.unsupported.push(Unsupported {
+                        code: "playability.unsupported_testimony_requirement".to_string(),
+                        message: format!(
+                            "testimony requirement `{requirement}` is outside the static playability subset"
+                        ),
+                        path: fact.item.path.clone(),
+                        pointer: fact.item.pointer.clone(),
+                        range: fact.item.range,
+                    });
+                }
+            }
+            if !topics.is_empty() {
+                topics.sort();
+                topics.dedup();
+                bindings.insert("topic".to_string(), topics);
+            }
+            fact.on = Some(ActionPattern {
+                command: "command.question".to_string(),
+                bindings,
+            });
+        }
     }
 
     fn normalize(&mut self) {

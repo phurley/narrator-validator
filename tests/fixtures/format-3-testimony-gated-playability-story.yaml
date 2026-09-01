@@ -1,0 +1,58 @@
+case:
+  id: case.testimony_playability
+  format_version: "3.4.0"
+  players: { min: 1, max: 1 }
+  initial_time: "21:00"
+  entry_settings: [setting.foyer]
+  exit_settings: [setting.foyer]
+settings:
+  - id: setting.foyer
+    type: room
+    name: Foyer
+    description: The entry foyer.
+routes: []
+entities: []
+events: []
+flags: []
+characters:
+  - id: character.culprit
+    description: A suspect with a carefully guarded secret.
+    portrayal:
+      demeanor: Controlled and professionally helpful.
+    initial:
+      location: setting.foyer
+    testimony:
+      - id: testimony.culprit_opening_account
+        text: The culprit gives a player-safe opening account.
+        requires: [command.question, character.culprit]
+        reveals: [fact.knife_is_present]
+    facts:
+      - id: fact.knife_is_present
+        statement: The knife is present.
+deductions:
+  - id: deduction.solution
+    conclusion: The knife implicates the culprit.
+    inputs: [fact.knife_is_present]
+    truth: true
+end_states:
+  - id: end.proved
+    name: Reachable proof
+    outcome: won
+    resolution: full
+    requires: [deduction.solution]
+    text: The testimony-gated fact proves the case.
+commands:
+  - id: command.question
+    name: Question
+    description: Ask a character about a known person, place, event, object, or deduction.
+    parameters:
+      - name: character
+        description: The character being questioned.
+        types: [character]
+        min: 1
+        max: 1
+cards:
+  - tag_id: 0
+    subject: setting.foyer
+  - tag_id: 1
+    subject: character.culprit

@@ -147,7 +147,13 @@ fn author_save_performance_fixture_reports_all_policy_work_without_hitting_state
             .iter()
             .map(|policy| policy.explored_states)
             .collect::<Vec<_>>(),
-        [32, 40, 1_408, 1_664]
+        // The two manual-notebook policies (auto_facts: false) shrank 4x
+        // once testimony-revealed facts stopped being free at action 0
+        // (narrator-validator#74): those facts now require the
+        // corresponding `command.question` action before they can be
+        // claimed, which prunes states that were previously reachable by
+        // claiming them immediately.
+        [32, 40, 352, 416]
     );
     assert!(policies.iter().all(|policy| !policy.bounded));
 }
@@ -1108,6 +1114,59 @@ fn format_3_4_end_state_story() -> String {
 
 fn format_3_4_ruleset_5_solution_prerequisite_story() -> String {
     include_str!("fixtures/format-3.4-ruleset-5-solution-prerequisite-story.yaml").to_string()
+}
+
+fn format_3_testimony_gated_playability_story() -> String {
+    include_str!("fixtures/format-3-testimony-gated-playability-story.yaml").to_string()
+}
+
+#[test]
+fn fact_revealed_only_by_testimony_requires_the_question_action_not_free_at_action_zero() {
+    // `fact.knife_is_present` has no `on`/`when` of its own; it is revealed
+    // exclusively by `character.culprit`'s testimony. The playability model
+    // must not treat it as available at action 0 -- the deduction (and the
+    // end state that depends on it) can only be proved after actually
+    // questioning the culprit.
+    let report = report(format_3_testimony_gated_playability_story());
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    let analysis = report.playability.expect("format 3 playability report");
+    let policy = analysis
+        .notebook_policies
+        .iter()
+        .find(|policy| policy.auto_facts && policy.auto_deductions)
+        .expect("default auto-facts/auto-deductions notebook policy");
+    let proved = policy
+        .terminal_paths
+        .iter()
+        .find(|path| path.id == "end.proved")
+        .expect("terminal path for the testimony-gated deduction");
+    assert_eq!(
+        proved.status,
+        narrator_validator::PlayabilityStatus::Proved,
+        "{proved:#?}"
+    );
+    let bound = proved
+        .lower_bound
+        .as_ref()
+        .expect("proved path carries a lower bound");
+    assert!(
+        bound.action_count >= 1,
+        "the fact-revealing question must be a required action, not free: {bound:#?}"
+    );
+    assert!(
+        bound
+            .ordered_steps
+            .iter()
+            .any(|step| step.action.starts_with("command.question")),
+        "the proof must include a `command.question` step against the culprit: {bound:#?}"
+    );
+    assert!(
+        bound
+            .ordered_steps
+            .iter()
+            .any(|step| step.unlocks.contains(&"fact.knife_is_present".to_string())),
+        "the fact must be unlocked by an action, not present at action 0: {bound:#?}"
+    );
 }
 
 fn format_3_5_command_costs_story() -> String {
