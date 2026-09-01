@@ -223,9 +223,16 @@ export interface RulesetCommand {
   effects?: Array<Record<string, unknown>>
 }
 
+export interface RulesetAnswerCard {
+  id: string
+  tag_id: number
+  name: string
+  description?: string
+}
+
 export interface StandardMysteryRuleset {
   id: 'ruleset.standard_mystery'
-  version: '1.0.0' | '2.0.0' | '3.0.0' | '4.0.0' | '5.0.0'
+  version: '1.0.0' | '2.0.0' | '3.0.0' | '4.0.0' | '5.0.0' | '6.0.0' | '7.0.0'
   commands: RulesetCommand[]
   command_capabilities: Array<{
     command_id: string
@@ -240,6 +247,12 @@ export interface StandardMysteryRuleset {
       | 'multiple_players_with_unshared_facts'
       | 'always'
   }>
+  /**
+   * The ruleset-owned answer-deck catalog (Story Format 3.7's `answer.*`
+   * subjects). Present only for rulesets that define one -- currently
+   * ruleset.standard_mystery@7.0.0's 29 cards, tag_ids 2084-2112.
+   */
+  answers?: RulesetAnswerCard[]
 }
 
 export interface SolutionContractMetadata {

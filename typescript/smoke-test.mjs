@@ -29,9 +29,35 @@ assert.match(VALIDATOR_SOURCE_COMMIT, /^[0-9a-f]{40}$/)
 
 assert.deepEqual(
   STANDARD_MYSTERY_RULESETS.map((ruleset) => ruleset.version),
-  ['1.0.0', '2.0.0', '3.0.0', '4.0.0', '5.0.0'],
+  ['1.0.0', '2.0.0', '3.0.0', '4.0.0', '5.0.0', '6.0.0', '7.0.0'],
 )
-assert.equal(STANDARD_MYSTERY_RULESET.version, '5.0.0')
+assert.equal(STANDARD_MYSTERY_RULESET.version, '7.0.0')
+
+// Only ruleset.standard_mystery@7.0.0 defines an answer-deck catalog
+// (Story Format 3.7); earlier versions carry no `answers` field at all.
+for (const ruleset of STANDARD_MYSTERY_RULESETS.slice(0, -1)) {
+  assert.equal(ruleset.answers, undefined)
+}
+assert.equal(STANDARD_MYSTERY_RULESET.answers.length, 29)
+assert.deepEqual(STANDARD_MYSTERY_RULESET.answers[0], {
+  id: 'answer.motive.greed',
+  tag_id: 2112,
+  name: 'Greed',
+  description:
+    'Done for money, property, a payout, an inheritance, or the value of the thing itself.',
+})
+assert.deepEqual(STANDARD_MYSTERY_RULESET.answers[28], {
+  id: 'answer.method.not_killed',
+  tag_id: 2084,
+  name: 'Not killed by anyone',
+  description:
+    'Illness, a failing heart, or a death nothing external caused — including the case where nobody died at all.',
+})
+assert.ok(
+  STANDARD_MYSTERY_RULESET.answers.every(
+    (card) => card.tag_id >= 2084 && card.tag_id <= 2112,
+  ),
+)
 assert.ok(
   STANDARD_MYSTERY_RULESET.commands.some(
     (command) => command.id === 'command.claim',
