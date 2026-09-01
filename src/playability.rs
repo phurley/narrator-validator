@@ -481,7 +481,8 @@ impl Model {
                             }
                             action
                         });
-                    model.max_attempts = u64_field(solution, "max_attempts").map(|value| value as u32);
+                    model.max_attempts =
+                        u64_field(solution, "max_attempts").map(|value| value as u32);
                     model.read_solution_steps(file, solution);
                 }
                 if let Some(ruleset) = map(case, "ruleset") {
@@ -1882,8 +1883,7 @@ impl Model {
             }
         } else {
             SolutionAnswerability {
-                status: if self.unsupported.is_empty() && unsupported_policy.is_none() && !bounded
-                {
+                status: if self.unsupported.is_empty() && unsupported_policy.is_none() && !bounded {
                     PlayabilityStatus::NotProved
                 } else {
                     PlayabilityStatus::Inconclusive
@@ -1926,8 +1926,15 @@ impl Model {
         // that requires a step-outcome flag would be falsely `NotProved`
         // for any story on this path.
         self.solve_steps.iter().any(|step| {
-            step.on_success.set_flags.iter().any(|flag| flag == requirement)
-                || step.on_failure.set_flags.iter().any(|flag| flag == requirement)
+            step.on_success
+                .set_flags
+                .iter()
+                .any(|flag| flag == requirement)
+                || step
+                    .on_failure
+                    .set_flags
+                    .iter()
+                    .any(|flag| flag == requirement)
         })
     }
 
@@ -2410,13 +2417,23 @@ impl Model {
         requirement: &str,
     ) -> Option<PlayabilityBlocker> {
         let step = self.solve_steps.iter().find(|step| {
-            step.on_success.set_flags.iter().any(|flag| flag == requirement)
-                || step.on_failure.set_flags.iter().any(|flag| flag == requirement)
+            step.on_success
+                .set_flags
+                .iter()
+                .any(|flag| flag == requirement)
+                || step
+                    .on_failure
+                    .set_flags
+                    .iter()
+                    .any(|flag| flag == requirement)
         })?;
         for (row_index, row) in step.rows.iter().enumerate() {
             let missing = match row {
                 SolveRow::NOfM { n, pool } => {
-                    let learnable = pool.iter().filter(|subject| self.subject_learnable(subject)).count();
+                    let learnable = pool
+                        .iter()
+                        .filter(|subject| self.subject_learnable(subject))
+                        .count();
                     (learnable < *n)
                         .then(|| {
                             pool.iter()
@@ -2557,9 +2574,11 @@ impl Model {
                     SolveRow::NOfM { pool, .. } => pool.iter().collect(),
                     SolveRow::Ordered { cards } => cards.iter().collect(),
                 };
-                subjects
-                    .into_iter()
-                    .find(|subject| !states.iter().any(|state| self.subject_known(state, subject)))
+                subjects.into_iter().find(|subject| {
+                    !states
+                        .iter()
+                        .any(|state| self.subject_known(state, subject))
+                })
             }) {
                 chain.push(subject.clone());
             }
@@ -2788,7 +2807,9 @@ fn read_solve_step_outcome(step: &Mapping, key: &str) -> StepOutcome {
             }
         }
     }
-    let points = field(outcome, "points").and_then(Value::as_i64).unwrap_or(0);
+    let points = field(outcome, "points")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
     StepOutcome { set_flags, points }
 }
 

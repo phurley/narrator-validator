@@ -282,7 +282,11 @@ fn two_failure_story(max_attempts: u32) -> String {
 #[test]
 fn on_failure_flag_combination_is_reachable_within_max_attempts_but_not_past_it() {
     let reachable_report = report(two_failure_story(2));
-    assert!(reachable_report.valid, "{:#?}", reachable_report.diagnostics);
+    assert!(
+        reachable_report.valid,
+        "{:#?}",
+        reachable_report.diagnostics
+    );
     let policy = default_policy(&reachable_report);
     let end = policy
         .terminal_paths
@@ -292,7 +296,11 @@ fn on_failure_flag_combination_is_reachable_within_max_attempts_but_not_past_it(
     assert_eq!(end.status, PlayabilityStatus::Proved, "{end:#?}");
 
     let unreachable_report = report(two_failure_story(1));
-    assert!(unreachable_report.valid, "{:#?}", unreachable_report.diagnostics);
+    assert!(
+        unreachable_report.valid,
+        "{:#?}",
+        unreachable_report.diagnostics
+    );
     let policy = default_policy(&unreachable_report);
     let end = policy
         .terminal_paths
