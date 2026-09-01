@@ -8,11 +8,12 @@ use crate::{
     parse_reference_text, reference_kind, resolve_ruleset, scanner_control_role_for_tag_id,
     Diagnostic, DisclosureClass, Position, ReferenceProvenance, ReferenceTextSegment,
     RelatedLocation, ResolvedReferenceText, RulesetReference, Severity, SourceFile, SourceRange,
-    ValidationReport, CONSUMER_FIELDS, MAX_SOLUTION_ANSWER_CARDS, MAX_SOLUTION_QUESTIONS,
-    MIN_SOLUTION_ANSWER_CARDS, MIN_SOLUTION_QUESTIONS, REFERENCE_TEXT_FEATURE,
-    STANDARD_MYSTERY_RULESET_ID, STANDARD_MYSTERY_RULESET_VERSION_2,
-    STANDARD_MYSTERY_RULESET_VERSION_3, STANDARD_MYSTERY_RULESET_VERSION_4,
-    STANDARD_MYSTERY_RULESET_VERSION_5, STANDARD_MYSTERY_RULESET_VERSION_6, STORY_FORMAT_VERSION,
+    ValidationReport, ANSWER_DECK_TAG_ID_MAX, ANSWER_DECK_TAG_ID_MIN, CONSUMER_FIELDS,
+    MAX_SOLUTION_ANSWER_CARDS, MAX_SOLUTION_QUESTIONS, MIN_SOLUTION_ANSWER_CARDS,
+    MIN_SOLUTION_QUESTIONS, REFERENCE_TEXT_FEATURE, STANDARD_MYSTERY_RULESET_ID,
+    STANDARD_MYSTERY_RULESET_VERSION_2, STANDARD_MYSTERY_RULESET_VERSION_3,
+    STANDARD_MYSTERY_RULESET_VERSION_4, STANDARD_MYSTERY_RULESET_VERSION_5,
+    STANDARD_MYSTERY_RULESET_VERSION_6, STANDARD_MYSTERY_RULESET_VERSION_7, STORY_FORMAT_VERSION,
     SUPPORTED_FEATURES, VALIDATOR_VERSION,
 };
 
@@ -99,6 +100,15 @@ enum Kind {
     /// validator registers one per valid seat number so player-slot
     /// references reuse the standard reference-resolution machinery.
     Player,
+    /// A `step.<snake_case>` entry in `solution.steps` (Format 3.7). Not
+    /// referenced elsewhere in the story; registered so step IDs share the
+    /// standard `id.invalid`/`id.wrong_prefix`/`id.duplicate` machinery.
+    SolutionStep,
+    /// An `answer.<deck>.<card>` subject supplied by the resolved ruleset's
+    /// answer-deck catalog (Format 3.7, `ruleset.standard_mystery@7.0.0`),
+    /// merged into a story's definitions the same way `Kind::Command` is.
+    /// Never authored by the story itself.
+    Answer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -206,6 +216,8 @@ impl Kind {
             Self::CommandCost => "cost",
             Self::Persona => "persona",
             Self::Player => "player",
+            Self::SolutionStep => "step",
+            Self::Answer => "answer",
         }
     }
 
@@ -316,6 +328,10 @@ struct Validator<'a> {
     supported_features: BTreeSet<String>,
     feature_compatible: bool,
     reference_text: Vec<ResolvedReferenceText>,
+    /// `answer.*` ID -> its ruleset-assigned `tag_id`, populated by
+    /// `merge_ruleset_answers`. Empty unless the resolved ruleset publishes
+    /// an answer-deck catalog (`ruleset.standard_mystery@7.0.0`).
+    answer_tag_ids: BTreeMap<String, i64>,
 }
 
 /// Validate a complete, immutable repository snapshot.
@@ -349,6 +365,7 @@ pub fn validate_with_supported_features(
         supported_features: supported_features.iter().cloned().collect(),
         feature_compatible: true,
         reference_text: Vec::new(),
+        answer_tag_ids: BTreeMap::new(),
     };
     validator.run();
     validator.diagnostics.sort_by(|left, right| {
@@ -422,6 +439,7 @@ pub fn validate_without_playability_with_features(
         supported_features: supported_features.iter().cloned().collect(),
         feature_compatible: true,
         reference_text: Vec::new(),
+        answer_tag_ids: BTreeMap::new(),
     };
     validator.run();
     validator.diagnostics.sort_by(|left, right| {
@@ -499,6 +517,19 @@ impl<'a> Validator<'a> {
             .is_some_and(|version| version.major == 3 && version.minor >= 6)
     }
 
+    fn is_format_3_7_or_later(&self) -> bool {
+        self.format_version
+            .as_ref()
+            .is_some_and(|version| version.major == 3 && version.minor >= 7)
+    }
+
+    fn uses_step_solution_ruleset(&self) -> bool {
+        self.ruleset.as_ref().is_some_and(|ruleset| {
+            ruleset.id == STANDARD_MYSTERY_RULESET_ID
+                && ruleset.version == STANDARD_MYSTERY_RULESET_VERSION_7
+        })
+    }
+
     fn uses_question_solution_ruleset(&self) -> bool {
         self.ruleset.as_ref().is_some_and(|ruleset| {
             ruleset.id == STANDARD_MYSTERY_RULESET_ID
@@ -547,6 +578,7 @@ impl<'a> Validator<'a> {
         let local_commands = self.items("commands", Kind::Command, true);
         self.validate_command_migration(&local_commands);
         let commands = self.merge_ruleset_commands(local_commands);
+        let answers = self.merge_ruleset_answers();
         let command_costs = self.items("command_costs", Kind::CommandCost, true);
         let triggers = self.items("triggers", Kind::Trigger, true);
         let win_states = self.items("win_states", Kind::WinState, true);
@@ -602,6 +634,7 @@ impl<'a> Validator<'a> {
                 &testimonies,
                 &win_states,
                 &end_states,
+                &answers,
             );
         }
 
@@ -1751,6 +1784,22 @@ impl<'a> Validator<'a> {
             );
             return;
         }
+        if reference.id == STANDARD_MYSTERY_RULESET_ID
+            && reference.version == STANDARD_MYSTERY_RULESET_VERSION_7
+            && !self.is_format_3_7_or_later()
+        {
+            self.push(
+                Severity::Error,
+                "ruleset.format_incompatible",
+                "ruleset.standard_mystery@7.0.0 declares the Format 3.7 multi-step `solution.steps` Solve contract and the answer-deck catalog; set `case.format_version` to \"3.7.0\" or select an earlier ruleset version"
+                    .to_string(),
+                &case.path,
+                Some(format!("{pointer}/version")),
+                None,
+                Some(case.id.clone()),
+            );
+            return;
+        }
         match resolve_ruleset(&reference) {
             Ok(_) => self.ruleset = Some(reference),
             Err(error) => self.push(
@@ -1824,6 +1873,64 @@ impl<'a> Validator<'a> {
             });
         }
         merged.extend(local_commands);
+        merged
+    }
+
+    /// Merge the resolved ruleset's answer-deck catalog (Format 3.7,
+    /// `answer.*` subjects) into `self.definitions`, mirroring
+    /// `merge_ruleset_commands`'s pattern for `command.*`. A story never
+    /// authors an `answer.*` ID itself, so there is no local/ruleset
+    /// conflict case to guard against. Also records each card's
+    /// ruleset-assigned `tag_id` in `self.answer_tag_ids` for
+    /// `validate_deck`'s `deck.answer_tag_id_mismatch` check.
+    fn merge_ruleset_answers(&mut self) -> Vec<Item> {
+        let Some(reference) = self.ruleset.as_ref() else {
+            return Vec::new();
+        };
+        let resolved = resolve_ruleset(reference).expect("validated ruleset remains resolvable");
+        let Some(answers_yaml) = resolved.answers_yaml else {
+            return Vec::new();
+        };
+        let document: Value =
+            serde_yaml::from_str(answers_yaml).expect("built-in ruleset YAML is valid");
+        let answers = document["answers"]
+            .as_sequence()
+            .expect("built-in ruleset answers are a sequence");
+        let source_name = format!("{}@{}", reference.id, reference.version);
+        let mut merged = Vec::with_capacity(answers.len());
+
+        for (index, value) in answers.iter().enumerate() {
+            let mapping = value
+                .as_mapping()
+                .expect("built-in ruleset answers are mappings")
+                .clone();
+            let id = string_field(&mapping, "id")
+                .expect("built-in ruleset answer has an id")
+                .to_string();
+            let tag_id = mapping
+                .get(Value::String("tag_id".to_string()))
+                .and_then(Value::as_i64)
+                .expect("built-in ruleset answer has a tag_id");
+            let pointer = format!("/answers/{index}");
+            self.definitions.insert(
+                id.clone(),
+                Definition {
+                    kind: Kind::Answer,
+                    path: source_name.clone(),
+                    pointer: pointer.clone(),
+                    range: None,
+                },
+            );
+            self.answer_tag_ids.insert(id.clone(), tag_id);
+            merged.push(Item {
+                kind: Kind::Answer,
+                id,
+                path: source_name.clone(),
+                source: answers_yaml.to_string(),
+                pointer,
+                mapping,
+            });
+        }
         merged
     }
 
@@ -2629,7 +2736,28 @@ impl<'a> Validator<'a> {
             })
             .collect::<Vec<_>>();
         for (path, source, solution) in solutions {
-            let allowed = if self.is_format_3_3_or_later() {
+            let allowed = if self.is_format_3_7_or_later() {
+                &[
+                    "steps",
+                    "max_attempts",
+                    "session_timeout_minutes",
+                    "narrator_guidance",
+                    "author_notes",
+                    // Format 3.3-3.6 fields, kept on the allow-list so an
+                    // authored legacy contract surfaces exactly one clear
+                    // `solution.legacy_contract` error (see
+                    // `validate_solution`) instead of also spamming
+                    // `solution.unknown_field` for every legacy key.
+                    "win_state",
+                    "questions",
+                    "victim",
+                    "culprit",
+                    "weapon",
+                    "location",
+                    "time",
+                    "deduction",
+                ][..]
+            } else if self.is_format_3_3_or_later() {
                 &[
                     "win_state",
                     "questions",
@@ -2720,6 +2848,18 @@ impl<'a> Validator<'a> {
                 None,
             );
         }
+        if self.uses_step_solution_ruleset() && solutions.is_empty() {
+            self.push(
+                Severity::Error,
+                "solution.missing_step_contract",
+                "ruleset.standard_mystery@7.0.0 requires a `solution` block with `steps`"
+                    .to_string(),
+                "case.yaml",
+                Some("/solution".to_string()),
+                None,
+                None,
+            );
+        }
         for (path, source, solution) in solutions {
             let legacy_fields = [
                 "victim",
@@ -2734,6 +2874,26 @@ impl<'a> Validator<'a> {
                 .any(|field| solution.contains_key(Value::String((*field).to_string())));
             let has_questions = solution.contains_key(Value::String("questions".to_string()));
             let has_win_state = solution.contains_key(Value::String("win_state".to_string()));
+
+            if self.is_format_3_7_or_later() {
+                if has_legacy || has_questions || has_win_state {
+                    self.push(
+                        Severity::Error,
+                        "solution.legacy_contract",
+                        "Format 3.7 replaces `solution.questions`/`solution.win_state` (and the earlier culprit/weapon/location/deduction fields) with `solution.steps`; migrate the complete block instead of mixing contracts"
+                            .to_string(),
+                        &path,
+                        Some("/solution".to_string()),
+                        None,
+                        None,
+                    );
+                    if !solution.contains_key(Value::String("steps".to_string())) {
+                        continue;
+                    }
+                }
+                self.validate_step_solution(&path, &source, &solution);
+                continue;
+            }
 
             if self.is_format_3_3_or_later() {
                 if has_legacy {
@@ -2798,6 +2958,737 @@ impl<'a> Validator<'a> {
                 ),
                 None => {}
             }
+        }
+    }
+
+    /// Story Format 3.7's `solution.steps` contract
+    /// (`docs/story-format-3.7.md`). Runtime-evaluated conditions
+    /// (`solution.step_unexpected_card`, judging an actual submitted grid)
+    /// are out of scope for the validator; this checks only static
+    /// well-formedness.
+    fn validate_step_solution(&mut self, path: &str, source: &str, solution: &Mapping) {
+        if !self.uses_step_solution_ruleset() {
+            self.push(
+                Severity::Error,
+                "solution.ruleset_incompatible",
+                "authored solve steps require `case.ruleset` ruleset.standard_mystery@7.0.0"
+                    .to_string(),
+                path,
+                Some("/solution".to_string()),
+                None,
+                None,
+            );
+        }
+
+        if let Some(max_attempts) = solution.get(Value::String("max_attempts".to_string())) {
+            if !max_attempts.as_i64().is_some_and(|value| value >= 1) {
+                self.push(
+                    Severity::Error,
+                    "solution.max_attempts_invalid",
+                    "solution `max_attempts` must be a whole number of 1 or more; omit it for unlimited attempts"
+                        .to_string(),
+                    path,
+                    Some("/solution/max_attempts".to_string()),
+                    None,
+                    None,
+                );
+            }
+        }
+        if let Some(session_timeout) =
+            solution.get(Value::String("session_timeout_minutes".to_string()))
+        {
+            if !session_timeout.as_i64().is_some_and(|value| value >= 1) {
+                self.push(
+                    Severity::Error,
+                    "solution.session_timeout_minutes_invalid",
+                    "solution `session_timeout_minutes` must be a whole number of 1 or more"
+                        .to_string(),
+                    path,
+                    Some("/solution/session_timeout_minutes".to_string()),
+                    None,
+                    None,
+                );
+            }
+        }
+
+        let steps_pointer = "/solution/steps".to_string();
+        let Some(steps) = solution
+            .get(Value::String("steps".to_string()))
+            .and_then(Value::as_sequence)
+        else {
+            self.push(
+                Severity::Error,
+                "solution.steps_type",
+                "solution `steps` must contain one or more step mappings".to_string(),
+                path,
+                Some(steps_pointer),
+                None,
+                None,
+            );
+            return;
+        };
+        if steps.is_empty() {
+            self.push(
+                Severity::Error,
+                "solution.steps_count",
+                "solution `steps` must contain at least one step".to_string(),
+                path,
+                Some(steps_pointer),
+                None,
+                None,
+            );
+        }
+
+        let deck_subjects = self.deck_subjects();
+        for (index, step) in steps.iter().enumerate() {
+            let pointer = format!("/solution/steps/{index}");
+            let Some(step) = step.as_mapping() else {
+                self.push(
+                    Severity::Error,
+                    "solution.step_type",
+                    "each solution step must be a mapping".to_string(),
+                    path,
+                    Some(pointer),
+                    None,
+                    None,
+                );
+                continue;
+            };
+            self.validate_solution_step(path, source, step, &pointer, &deck_subjects);
+        }
+    }
+
+    fn validate_solution_step(
+        &mut self,
+        path: &str,
+        source: &str,
+        step: &Mapping,
+        pointer: &str,
+        deck_subjects: &BTreeSet<String>,
+    ) {
+        const ALLOWED_FIELDS: &[&str] = &[
+            "id",
+            "prompt",
+            "time_cost_minutes",
+            "rows",
+            "on_success",
+            "on_failure",
+        ];
+        for key in step.keys() {
+            let Some(key) = key.as_str() else {
+                continue;
+            };
+            if !ALLOWED_FIELDS.contains(&key) {
+                self.push(
+                    Severity::Error,
+                    "solution.step_unknown_field",
+                    format!("`{key}` is not a supported solution step field"),
+                    path,
+                    Some(format!("{pointer}/{}", escape_pointer(key))),
+                    locate_scalar(source, key),
+                    None,
+                );
+            }
+        }
+
+        let id_pointer = format!("{pointer}/id");
+        match string_field(step, "id").map(str::to_string) {
+            Some(id) => {
+                let range = locate_id(source, &id);
+                if !valid_id(&id) {
+                    self.push(
+                        Severity::Error,
+                        "id.invalid",
+                        format!(
+                            "`{id}` must contain a lowercase kind prefix, a dot, and a lowercase snake-case name"
+                        ),
+                        path,
+                        Some(id_pointer.clone()),
+                        range,
+                        Some(id.clone()),
+                    );
+                } else if id_prefix(&id) != Some(Kind::SolutionStep.prefix()) {
+                    self.push(
+                        Severity::Error,
+                        "id.wrong_prefix",
+                        format!("solution step ID `{id}` must start with `step.`"),
+                        path,
+                        Some(id_pointer.clone()),
+                        range,
+                        Some(id.clone()),
+                    );
+                }
+                if let Some(first) = self.definitions.get(&id).cloned() {
+                    self.diagnostics.push(Diagnostic {
+                        severity: Severity::Error,
+                        code: "id.duplicate".to_string(),
+                        message: format!("ID `{id}` is defined more than once"),
+                        path: path.to_string(),
+                        pointer: Some(id_pointer),
+                        range,
+                        subject_id: Some(id.clone()),
+                        related: vec![RelatedLocation {
+                            message: "first defined here".to_string(),
+                            path: first.path,
+                            pointer: Some(format!("{}/id", first.pointer)),
+                            range: first.range,
+                        }],
+                    });
+                } else {
+                    self.definitions.insert(
+                        id.clone(),
+                        Definition {
+                            kind: Kind::SolutionStep,
+                            path: path.to_string(),
+                            pointer: pointer.to_string(),
+                            range,
+                        },
+                    );
+                }
+            }
+            None => {
+                self.push(
+                    Severity::Error,
+                    "id.missing",
+                    "solution step is missing a string `id`".to_string(),
+                    path,
+                    Some(id_pointer),
+                    None,
+                    None,
+                );
+            }
+        }
+
+        if !string_field(step, "prompt").is_some_and(|prompt| !prompt.trim().is_empty()) {
+            self.push(
+                Severity::Error,
+                "solution.step_prompt",
+                "solution step `prompt` must be a non-empty string".to_string(),
+                path,
+                Some(format!("{pointer}/prompt")),
+                None,
+                None,
+            );
+        }
+
+        match integer_field(step, "time_cost_minutes") {
+            Some(value) if value >= 0 => {}
+            _ => self.push(
+                Severity::Error,
+                "solution.step_time_cost_invalid",
+                "solution step `time_cost_minutes` must be a non-negative whole number"
+                    .to_string(),
+                path,
+                Some(format!("{pointer}/time_cost_minutes")),
+                None,
+                None,
+            ),
+        }
+
+        self.validate_solution_step_rows(path, source, step, pointer, deck_subjects);
+
+        for outcome in ["on_success", "on_failure"] {
+            let Some(value) = step.get(Value::String(outcome.to_string())) else {
+                continue;
+            };
+            let outcome_pointer = format!("{pointer}/{outcome}");
+            let Some(outcome_mapping) = value.as_mapping() else {
+                self.push(
+                    Severity::Error,
+                    "solution.step_outcome_type",
+                    format!("solution step `{outcome}` must be a mapping"),
+                    path,
+                    Some(outcome_pointer),
+                    None,
+                    None,
+                );
+                continue;
+            };
+            self.validate_solution_step_outcome(path, source, outcome_mapping, &outcome_pointer);
+        }
+    }
+
+    fn validate_solution_step_rows(
+        &mut self,
+        path: &str,
+        source: &str,
+        step: &Mapping,
+        pointer: &str,
+        deck_subjects: &BTreeSet<String>,
+    ) {
+        let rows_pointer = format!("{pointer}/rows");
+        let Some(rows) = step
+            .get(Value::String("rows".to_string()))
+            .and_then(Value::as_sequence)
+        else {
+            self.push(
+                Severity::Error,
+                "solution.step_rows_type",
+                "solution step `rows` must contain one to five row mappings".to_string(),
+                path,
+                Some(rows_pointer),
+                None,
+                None,
+            );
+            return;
+        };
+        if !(1..=5).contains(&rows.len()) {
+            self.push(
+                Severity::Error,
+                "solution.step_rows_count",
+                "solution step `rows` must contain one to five rows".to_string(),
+                path,
+                Some(rows_pointer.clone()),
+                None,
+                None,
+            );
+        }
+
+        // card ID -> the pointer where it was first placed in this step.
+        // Format 3.7 scopes card uniqueness to the step (unlike Format 3.3's
+        // whole-solution rule): the same card may repeat in a later step.
+        let mut step_cards = BTreeMap::<String, String>::new();
+        for (row_index, row) in rows.iter().enumerate() {
+            let row_pointer = format!("{rows_pointer}/{row_index}");
+            let Some(row) = row.as_mapping() else {
+                self.push(
+                    Severity::Error,
+                    "solution.row_type",
+                    "each solve row must be a mapping".to_string(),
+                    path,
+                    Some(row_pointer),
+                    None,
+                    None,
+                );
+                continue;
+            };
+            match string_field(row, "match") {
+                Some("n_of_m") => self.validate_solution_row_n_of_m(
+                    path,
+                    source,
+                    row,
+                    &row_pointer,
+                    deck_subjects,
+                    &mut step_cards,
+                ),
+                Some("ordered") => self.validate_solution_row_ordered(
+                    path,
+                    source,
+                    row,
+                    &row_pointer,
+                    deck_subjects,
+                    &mut step_cards,
+                ),
+                _ => self.push(
+                    Severity::Error,
+                    "solution.row_match_invalid",
+                    "row `match` must be `n_of_m` or `ordered`".to_string(),
+                    path,
+                    Some(format!("{row_pointer}/match")),
+                    None,
+                    None,
+                ),
+            }
+        }
+    }
+
+    fn validate_solution_row_n_of_m(
+        &mut self,
+        path: &str,
+        source: &str,
+        row: &Mapping,
+        row_pointer: &str,
+        deck_subjects: &BTreeSet<String>,
+        step_cards: &mut BTreeMap<String, String>,
+    ) {
+        for key in row.keys() {
+            let Some(key) = key.as_str() else {
+                continue;
+            };
+            if !["match", "n", "cards"].contains(&key) {
+                self.push(
+                    Severity::Error,
+                    "solution.row_unknown_field",
+                    format!("`{key}` is not valid for an `n_of_m` row"),
+                    path,
+                    Some(format!("{row_pointer}/{}", escape_pointer(key))),
+                    locate_scalar(source, key),
+                    None,
+                );
+            }
+        }
+        let cards = self.validate_solution_row_cards(
+            path,
+            source,
+            row,
+            row_pointer,
+            deck_subjects,
+            step_cards,
+        );
+        let m = cards.len();
+        match integer_field(row, "n") {
+            Some(n) if n >= 1 && m > 0 && (n as usize) <= m => {}
+            Some(n) => self.push(
+                Severity::Error,
+                "solution.row_n_invalid",
+                format!(
+                    "row `n` ({n}) must be a whole number from 1 through the row's card count ({m})"
+                ),
+                path,
+                Some(format!("{row_pointer}/n")),
+                None,
+                None,
+            ),
+            None => self.push(
+                Severity::Error,
+                "solution.row_n_invalid",
+                "an `n_of_m` row requires `n`, a whole number from 1 through the row's card count"
+                    .to_string(),
+                path,
+                Some(format!("{row_pointer}/n")),
+                None,
+                None,
+            ),
+        }
+    }
+
+    fn validate_solution_row_ordered(
+        &mut self,
+        path: &str,
+        source: &str,
+        row: &Mapping,
+        row_pointer: &str,
+        deck_subjects: &BTreeSet<String>,
+        step_cards: &mut BTreeMap<String, String>,
+    ) {
+        for key in row.keys() {
+            let Some(key) = key.as_str() else {
+                continue;
+            };
+            if !["match", "cards", "n"].contains(&key) {
+                self.push(
+                    Severity::Error,
+                    "solution.row_unknown_field",
+                    format!("`{key}` is not valid for an `ordered` row"),
+                    path,
+                    Some(format!("{row_pointer}/{}", escape_pointer(key))),
+                    locate_scalar(source, key),
+                    None,
+                );
+            }
+        }
+        if row.contains_key(Value::String("n".to_string())) {
+            self.push(
+                Severity::Error,
+                "solution.row_ordered_has_n",
+                "an `ordered` row does not take `n`; every listed card is required, in sequence"
+                    .to_string(),
+                path,
+                Some(format!("{row_pointer}/n")),
+                None,
+                None,
+            );
+        }
+        self.validate_solution_row_cards(path, source, row, row_pointer, deck_subjects, step_cards);
+    }
+
+    /// Validate a row's `cards` list (bounds, resolution, deck binding) and
+    /// track step-scoped duplicates. Returns the raw authored card IDs.
+    fn validate_solution_row_cards(
+        &mut self,
+        path: &str,
+        source: &str,
+        row: &Mapping,
+        row_pointer: &str,
+        deck_subjects: &BTreeSet<String>,
+        step_cards: &mut BTreeMap<String, String>,
+    ) -> Vec<String> {
+        let cards_pointer = format!("{row_pointer}/cards");
+        let Some(cards) = row
+            .get(Value::String("cards".to_string()))
+            .and_then(Value::as_sequence)
+        else {
+            self.push(
+                Severity::Error,
+                "solution.row_cards_type",
+                "row `cards` must contain one to five physical-card IDs".to_string(),
+                path,
+                Some(cards_pointer),
+                None,
+                None,
+            );
+            return Vec::new();
+        };
+        if !(MIN_SOLUTION_ANSWER_CARDS..=MAX_SOLUTION_ANSWER_CARDS).contains(&cards.len()) {
+            self.push(
+                Severity::Error,
+                "solution.row_cards_count",
+                "row `cards` must contain one to five IDs".to_string(),
+                path,
+                Some(cards_pointer.clone()),
+                None,
+                None,
+            );
+        }
+
+        let mut resolved = Vec::new();
+        let mut row_seen = BTreeSet::new();
+        for (card_index, card) in cards.iter().enumerate() {
+            let card_pointer = format!("{cards_pointer}/{card_index}");
+            let Some(card_id) = card.as_str().filter(|id| !id.trim().is_empty()) else {
+                self.push(
+                    Severity::Error,
+                    "solution.row_card_id",
+                    "each row card must be a non-empty canonical ID".to_string(),
+                    path,
+                    Some(card_pointer),
+                    None,
+                    None,
+                );
+                continue;
+            };
+            resolved.push(card_id.to_string());
+            let card_range = locate_scalar(source, card_id);
+            let duplicate = !row_seen.insert(card_id.to_string())
+                || step_cards.contains_key(card_id);
+            if duplicate {
+                self.push(
+                    Severity::Error,
+                    "solution.step_card_duplicate",
+                    format!(
+                        "physical card `{card_id}` is placed more than once within this step"
+                    ),
+                    path,
+                    Some(card_pointer.clone()),
+                    card_range,
+                    Some(card_id.to_string()),
+                );
+            } else {
+                step_cards.insert(card_id.to_string(), card_pointer.clone());
+            }
+            match self.definitions.get(card_id) {
+                Some(definition)
+                    if matches!(
+                        definition.kind,
+                        Kind::Setting | Kind::Character | Kind::Entity | Kind::Answer
+                    ) =>
+                {
+                    if !deck_subjects.contains(card_id) {
+                        self.push(
+                            Severity::Error,
+                            "solution.row_card_not_in_deck",
+                            format!(
+                                "solve card `{card_id}` must have a physical card in `deck.yaml`"
+                            ),
+                            path,
+                            Some(card_pointer),
+                            card_range,
+                            Some(card_id.to_string()),
+                        );
+                    }
+                }
+                Some(definition) => self.push(
+                    Severity::Error,
+                    "solution.row_card_type",
+                    format!(
+                        "solve card `{card_id}` must identify a setting, character, entity, or answer physical card, not a {}",
+                        definition.kind.name()
+                    ),
+                    path,
+                    Some(card_pointer),
+                    card_range,
+                    Some(card_id.to_string()),
+                ),
+                None => self.push(
+                    Severity::Error,
+                    "solution.row_card_unknown",
+                    format!("solve card `{card_id}` is not defined"),
+                    path,
+                    Some(card_pointer),
+                    card_range,
+                    Some(card_id.to_string()),
+                ),
+            }
+        }
+        resolved
+    }
+
+    fn validate_solution_step_outcome(
+        &mut self,
+        path: &str,
+        source: &str,
+        outcome: &Mapping,
+        pointer: &str,
+    ) {
+        for key in outcome.keys() {
+            let Some(key) = key.as_str() else {
+                continue;
+            };
+            if !["effects", "notes", "points"].contains(&key) {
+                self.push(
+                    Severity::Error,
+                    "solution.step_outcome_unknown_field",
+                    format!("`{key}` is not a supported solution step outcome field"),
+                    path,
+                    Some(format!("{pointer}/{}", escape_pointer(key))),
+                    locate_scalar(source, key),
+                    None,
+                );
+            }
+        }
+
+        if let Some(effects) = outcome.get(Value::String("effects".to_string())) {
+            let effects_pointer = format!("{pointer}/effects");
+            let Some(effects) = effects.as_sequence() else {
+                self.push(
+                    Severity::Error,
+                    "solution.step_effects_type",
+                    "solution step outcome `effects` must be a sequence".to_string(),
+                    path,
+                    Some(effects_pointer),
+                    None,
+                    None,
+                );
+                return;
+            };
+            for (index, effect) in effects.iter().enumerate() {
+                let effect_pointer = format!("{effects_pointer}/{index}");
+                let Some(effect) = effect.as_mapping() else {
+                    self.push(
+                        Severity::Error,
+                        "solution.step_effect_type",
+                        "solution step outcome effects must be mappings".to_string(),
+                        path,
+                        Some(effect_pointer),
+                        None,
+                        None,
+                    );
+                    continue;
+                };
+                self.validate_solution_step_effect(path, source, effect, &effect_pointer);
+            }
+        }
+
+        if let Some(notes) = outcome.get(Value::String("notes".to_string())) {
+            if notes.as_str().is_none() {
+                self.push(
+                    Severity::Error,
+                    "solution.step_outcome_notes_type",
+                    "solution step outcome `notes` must be a string".to_string(),
+                    path,
+                    Some(format!("{pointer}/notes")),
+                    None,
+                    None,
+                );
+            }
+        }
+
+        if let Some(points) = outcome.get(Value::String("points".to_string())) {
+            if points.as_i64().is_none() {
+                self.push(
+                    Severity::Error,
+                    "solution.step_outcome_points_type",
+                    "solution step outcome `points` must be a signed whole number".to_string(),
+                    path,
+                    Some(format!("{pointer}/points")),
+                    None,
+                    None,
+                );
+            }
+        }
+    }
+
+    fn validate_solution_step_effect(
+        &mut self,
+        path: &str,
+        source: &str,
+        effect: &Mapping,
+        pointer: &str,
+    ) {
+        let operation = string_field(effect, "operation");
+        if operation != Some("set_flag") {
+            self.push(
+                Severity::Error,
+                "solution.step_effect_operation_unsupported",
+                match operation {
+                    Some(operation) => format!(
+                        "solution step outcome effects support only `operation: set_flag`, not `{operation}`"
+                    ),
+                    None => "solution step outcome effect `operation` must be `set_flag`"
+                        .to_string(),
+                },
+                path,
+                Some(format!("{pointer}/operation")),
+                None,
+                None,
+            );
+            return;
+        }
+        for key in effect.keys() {
+            let Some(key) = key.as_str() else {
+                continue;
+            };
+            if !["operation", "flag", "value"].contains(&key) {
+                self.push(
+                    Severity::Error,
+                    "solution.step_effect_unknown_field",
+                    format!("`{key}` is not valid for a solution step `set_flag` effect"),
+                    path,
+                    Some(format!("{pointer}/{}", escape_pointer(key))),
+                    locate_scalar(source, key),
+                    None,
+                );
+            }
+        }
+        match string_field(effect, "flag") {
+            Some(id) => match self.definitions.get(id) {
+                Some(definition) if definition.kind == Kind::Flag => {}
+                Some(definition) => self.push(
+                    Severity::Error,
+                    "solution.step_effect_flag_type",
+                    format!(
+                        "solution step effect `flag` `{id}` must identify a flag, not a {}",
+                        definition.kind.name()
+                    ),
+                    path,
+                    Some(format!("{pointer}/flag")),
+                    locate_scalar(source, id),
+                    Some(id.to_string()),
+                ),
+                None => self.push(
+                    Severity::Error,
+                    "solution.step_effect_flag_unknown",
+                    format!("solution step effect `flag` `{id}` is not defined"),
+                    path,
+                    Some(format!("{pointer}/flag")),
+                    locate_scalar(source, id),
+                    Some(id.to_string()),
+                ),
+            },
+            None => self.push(
+                Severity::Error,
+                "solution.step_effect_flag_missing",
+                "solution step effect `flag` must be a non-empty ID".to_string(),
+                path,
+                Some(format!("{pointer}/flag")),
+                None,
+                None,
+            ),
+        }
+        if effect
+            .get(Value::String("value".to_string()))
+            .and_then(Value::as_bool)
+            .is_none()
+        {
+            self.push(
+                Severity::Error,
+                "solution.step_effect_value_invalid",
+                "solution step effect `value` must be true or false".to_string(),
+                path,
+                Some(format!("{pointer}/value")),
+                None,
+                None,
+            );
         }
     }
 
@@ -3752,11 +4643,12 @@ impl<'a> Validator<'a> {
 
                 let subject_pointer = format!("{pointer}/subject");
                 let subject = string_field(card, "subject").map(str::to_string);
+                let mut subject_kind: Option<Kind> = None;
                 if subject.is_none() {
                     self.push(
                         Severity::Error,
                         "deck.subject_invalid",
-                        "deck `subject` must be a canonical setting, character, entity, or command ID".to_string(),
+                        "deck `subject` must be a canonical setting, character, entity, command, or answer ID".to_string(),
                         &path,
                         Some(subject_pointer.clone()),
                         None,
@@ -3776,20 +4668,68 @@ impl<'a> Validator<'a> {
                         Some(definition)
                             if !matches!(
                                 definition.kind,
-                                Kind::Setting | Kind::Character | Kind::Entity | Kind::Command
+                                Kind::Setting
+                                    | Kind::Character
+                                    | Kind::Entity
+                                    | Kind::Command
+                                    | Kind::Answer
                             ) =>
                         {
                             self.push(
                                 Severity::Error,
                                 "deck.subject_unsupported",
-                                format!("{} `{subject}` cannot be bound to a physical card; use a setting, character, entity, or command", definition.kind.name()),
+                                format!("{} `{subject}` cannot be bound to a physical card; use a setting, character, entity, command, or answer", definition.kind.name()),
                                 &path,
                                 Some(subject_pointer.clone()),
                                 locate_scalar(&source, subject),
                                 Some(subject.clone()),
                             );
                         }
-                        Some(_) => {}
+                        Some(definition) => subject_kind = Some(definition.kind),
+                    }
+                }
+
+                if let Some(tag_id) = tag_id {
+                    match subject_kind {
+                        Some(Kind::Answer) => {
+                            let expected = self.answer_tag_ids.get(subject.as_deref().unwrap_or(""));
+                            if expected != Some(&tag_id) {
+                                let message = match expected {
+                                    Some(expected) => format!(
+                                        "answer deck subject `{}` is ruleset-assigned tag_id {expected}, not {tag_id}",
+                                        subject.as_deref().unwrap_or("")
+                                    ),
+                                    None => "answer deck subject has no ruleset-assigned tag_id"
+                                        .to_string(),
+                                };
+                                self.push(
+                                    Severity::Error,
+                                    "deck.answer_tag_id_mismatch",
+                                    message,
+                                    &path,
+                                    Some(tag_pointer.clone()),
+                                    None,
+                                    subject.clone(),
+                                );
+                            }
+                        }
+                        Some(Kind::Setting | Kind::Character | Kind::Entity | Kind::Command)
+                            if (ANSWER_DECK_TAG_ID_MIN..=ANSWER_DECK_TAG_ID_MAX)
+                                .contains(&tag_id) =>
+                        {
+                            self.push(
+                                Severity::Error,
+                                "deck.tag_id_reserved_ruleset_answer_deck",
+                                format!(
+                                    "tagStandard41h12 ID {tag_id} is reserved for ruleset-owned answer decks ({ANSWER_DECK_TAG_ID_MIN}-{ANSWER_DECK_TAG_ID_MAX}) and cannot be bound to a setting, character, entity, or command subject"
+                                ),
+                                &path,
+                                Some(tag_pointer.clone()),
+                                None,
+                                subject.clone(),
+                            );
+                        }
+                        _ => {}
                     }
                 }
 
@@ -8177,6 +9117,7 @@ impl<'a> Validator<'a> {
         testimonies: &[Item],
         win_states: &[Item],
         end_states: &[Item],
+        answers: &[Item],
     ) {
         let mut definitions = BTreeMap::new();
         for items in [
@@ -8193,6 +9134,7 @@ impl<'a> Validator<'a> {
             testimonies,
             win_states,
             end_states,
+            answers,
         ] {
             for item in items {
                 if reference_kind(item.kind.name()).is_some() {
@@ -8269,6 +9211,36 @@ impl<'a> Validator<'a> {
                             authored: text.to_string(),
                             disclosure,
                         });
+                    }
+                }
+            }
+            if let Some(steps) = solution
+                .get(Value::String("steps".to_string()))
+                .and_then(Value::as_sequence)
+            {
+                for (index, step) in steps.iter().enumerate() {
+                    let Some(step) = step.as_mapping() else {
+                        continue;
+                    };
+                    for field in CONSUMER_FIELDS
+                        .iter()
+                        .filter(|field| field.kind == "solution_step")
+                    {
+                        if let Some(text) =
+                            mapping_path(step, field.path).and_then(Value::as_str)
+                        {
+                            consumers.push(TextConsumer {
+                                owner_id: None,
+                                path: file.path.to_string(),
+                                source: file.source.to_string(),
+                                pointer: format!(
+                                    "/solution/steps/{index}/{}",
+                                    field.path.replace('.', "/")
+                                ),
+                                authored: text.to_string(),
+                                disclosure: field.disclosure,
+                            });
+                        }
                     }
                 }
             }

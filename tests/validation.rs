@@ -1902,7 +1902,7 @@ fn rejects_unknown_and_incompatible_rulesets_with_version_guidance() {
         .expect("incompatible ruleset diagnostic");
     assert!(diagnostic
         .message
-        .contains("1.0.0, 2.0.0, 3.0.0, 4.0.0, 5.0.0, or 6.0.0"));
+        .contains("1.0.0, 2.0.0, 3.0.0, 4.0.0, 5.0.0, 6.0.0, or 7.0.0"));
 }
 
 #[test]

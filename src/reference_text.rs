@@ -324,6 +324,21 @@ pub const CONSUMER_FIELDS: &[ConsumerField] = &[
         path: "prompt",
         disclosure: PUBLIC,
     },
+    ConsumerField {
+        kind: "solution_step",
+        path: "prompt",
+        disclosure: PUBLIC,
+    },
+    ConsumerField {
+        kind: "solution_step",
+        path: "on_success.notes",
+        disclosure: PRIVATE,
+    },
+    ConsumerField {
+        kind: "solution_step",
+        path: "on_failure.notes",
+        disclosure: PRIVATE,
+    },
 ];
 
 const CASE_PATHS: &[ReferencePath] = &[
@@ -498,6 +513,11 @@ pub const REFERENCE_KINDS: &[ReferenceKind] = &[
         kind: "end",
         default_path: Some("name"),
         paths: WIN_PATHS,
+    },
+    ReferenceKind {
+        kind: "answer",
+        default_path: Some("name"),
+        paths: ORDINARY_PATHS,
     },
 ];
 
