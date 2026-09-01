@@ -417,3 +417,60 @@ fn a_later_step_with_no_witness_stays_not_proved_even_though_the_first_step_chec
         .expect("end.solved terminal path");
     assert_eq!(end.status, PlayabilityStatus::NotProved, "{end:#?}");
 }
+
+/// Regression for narrator-validator#85: a graded "botched it" ending
+/// (island_retreat's `end.mistaken_accusation` shape) that only becomes
+/// reachable when the *final* solve step is deliberately failed -- after
+/// every earlier step already succeeded -- must be found. The runtime
+/// concludes a solve session either by succeeding the last step or by
+/// failing any step (`solve_step_fail` resets `next_step` to 0), and only
+/// the success path was previously chained through
+/// `step_nodes[solve_steps.len()]`; the failure path needs its own
+/// checkpoint (see `step_fail_nodes` in `search`).
+#[test]
+fn end_reachable_only_by_failing_the_final_step_after_earlier_steps_succeed() {
+    let story = base_story()
+        .replace(
+            "solution:\n  max_attempts: 2\n  steps:\n    - id: step.name_motive\n      prompt: What was the motive?\n      time_cost_minutes: 0\n      rows:\n        - match: n_of_m\n          n: 1\n          cards: [answer.motive.jealousy]\n      on_success:\n        effects:\n          - operation: set_flag\n            flag: flag.motive_named\n            value: true\n      on_failure:\n        points: -1",
+            "solution:\n  max_attempts: 2\n  steps:\n    - id: step.name_motive\n      prompt: What was the motive?\n      time_cost_minutes: 0\n      rows:\n        - match: n_of_m\n          n: 1\n          cards: [answer.motive.jealousy]\n      on_success:\n        effects:\n          - operation: set_flag\n            flag: flag.motive_named\n            value: true\n      on_failure:\n        points: -1\n    - id: step.name_method\n      prompt: How did it happen?\n      time_cost_minutes: 0\n      rows:\n        - match: n_of_m\n          n: 1\n          cards: [answer.method.stabbed]\n      on_success:\n        effects:\n          - operation: set_flag\n            flag: flag.method_named\n            value: true\n      on_failure:\n        effects:\n          - operation: set_flag\n            flag: flag.accusation_botched\n            value: true\n        points: -1",
+        )
+        .replace(
+            "end_states:\n  - id: end.solved\n    name: Solved\n    outcome: won\n    resolution: full\n    requires: [flag.motive_named]\n    text: You name the motive.",
+            "end_states:\n  - id: end.solved\n    name: Solved\n    outcome: won\n    resolution: full\n    requires: [flag.motive_named, flag.method_named]\n    text: You name the motive and the method.\n  - id: end.botched\n    name: Botched\n    outcome: won\n    resolution: partial\n    requires: [flag.motive_named, flag.accusation_botched]\n    text: You named the motive, then botched naming the method.",
+        )
+        .replace(
+            "  - tag_id: 2111\n    subject: answer.motive.jealousy",
+            "  - tag_id: 2111\n    subject: answer.motive.jealousy\n  - tag_id: 2093\n    subject: answer.method.stabbed",
+        )
+        .replace(
+            "    initial_state: false",
+            "    initial_state: false\n  - id: flag.method_named\n    name: Method named\n    description: Whether the method has been named.\n    initial_state: false\n  - id: flag.accusation_botched\n    name: Accusation botched\n    description: Whether the accusation was botched.\n    initial_state: false",
+        )
+        .replace(
+            "  - id: setting.foyer\n    type: room\n    description: The entry foyer.\n    parent: setting.world",
+            "  - id: setting.foyer\n    type: room\n    description: The entry foyer.\n    parent: setting.world\n    facts:\n      - id: fact.motive_hint\n        statement: A jealous rage seems to explain everything.\n        about: [answer.motive.jealousy]\n      - id: fact.method_hint\n        statement: A blade was found at the scene.\n        about: [answer.method.stabbed]",
+        );
+    let report = report(story);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    let policy = default_policy(&report);
+
+    let solved = policy
+        .terminal_paths
+        .iter()
+        .find(|end| end.id == "end.solved")
+        .expect("end.solved terminal path");
+    assert_eq!(solved.status, PlayabilityStatus::Proved, "{solved:#?}");
+
+    let botched = policy
+        .terminal_paths
+        .iter()
+        .find(|end| end.id == "end.botched")
+        .expect("end.botched terminal path");
+    assert_eq!(
+        botched.status,
+        PlayabilityStatus::Proved,
+        "end.botched is only reachable by succeeding step.name_motive and \
+         then failing step.name_method -- the runtime's other way to \
+         conclude a solve session -- and the search must find it: {botched:#?}"
+    );
+}

@@ -1733,6 +1733,24 @@ impl Model {
         // reachable graph from the story's beginning for each one -- see
         // the chaining block below.
         let mut step_nodes = vec![None::<Node>; self.solve_steps.len() + 1];
+        // A Format 3.7 solve session can also conclude by *failing* a step
+        // (see `solve_step_fail`'s `next_step = 0` reset in `apply_action`),
+        // which is how a graded "botched it" ending like island_retreat's
+        // `end.mistaken_accusation` becomes reachable. That reset collides
+        // on `next_step == 0` with the story's very first, pre-any-action
+        // state, which `step_nodes[0]` already records -- so a
+        // failure-concluded state is never captured there. Derived (not
+        // recorded opportunistically like `step_nodes`) after both search
+        // phases below, from each step's own `step_nodes[index]` readiness
+        // checkpoint -- see the derivation loop after the per-step
+        // chaining block for why a passive main-loop tracker can't do this
+        // reliably.
+        let step_fail_action_ids = self
+            .solve_steps
+            .iter()
+            .map(|step| format!("command.solve {} fail", step.item.id))
+            .collect::<Vec<_>>();
+        let mut step_fail_nodes = vec![None::<Node>; self.solve_steps.len()];
         let unsupported_policy = if !auto_facts
             && !self.facts.is_empty()
             && !self.commands.contains_key("command.claim")
@@ -1870,19 +1888,94 @@ impl Model {
                 carry = Some(found);
             }
         }
+        // Derive `step_fail_nodes`: for each step whose `on_failure` can
+        // actually produce a witness-worth effect (mirrors `actions()`'s
+        // own `has_failure_effects` gate -- a penalty-only failure can
+        // never be the *sole* route to a proof, so skip it rather than
+        // waste a leg), a single cheap `search_from` starting at that
+        // step's own readiness checkpoint (`step_nodes[index]`, populated
+        // by the main search above or the chaining block just above) with
+        // a one-hop goal: "the most recent action was this step's
+        // `solve_step_fail`". Deriving it this way -- rather than
+        // recording it opportunistically while draining the main queue --
+        // is necessary because the main search can pop a step's readiness
+        // checkpoint without ever popping its fail-successor before
+        // hitting `MAX_EXPLORED_STATES` (the successor is pushed, not
+        // popped), and because `step_nodes[index]` itself may only exist
+        // thanks to the chaining block above, in which case the main
+        // search never visited that state at all.
+        if bounded && !self.solve_steps.is_empty() {
+            for (index, step) in self.solve_steps.iter().enumerate() {
+                let has_failure_effects =
+                    !step.on_failure.set_flags.is_empty() || step.on_failure.points > 0;
+                if !has_failure_effects {
+                    continue;
+                }
+                let Some(seed) = step_nodes[index].clone() else {
+                    continue;
+                };
+                let fail_id = &step_fail_action_ids[index];
+                if let Some(found) =
+                    self.search_from(seed, auto_facts, auto_deductions, |candidate| {
+                        candidate
+                            .steps
+                            .last()
+                            .is_some_and(|last| &last.action == fail_id)
+                    })
+                {
+                    step_fail_nodes[index] = Some(found);
+                }
+            }
+        }
+        // An end that's still unresolved after the step-chaining above might
+        // conclude the solve session a different way than the one checkpoint
+        // originally tried here: `step_nodes[solve_steps.len()]` only ever
+        // captures a session concluded by *succeeding* the final step, but
+        // `solve_step_fail` on any step (see its `next_step = 0` reset in
+        // `apply_action`) concludes it too, and island_retreat's
+        // `end.mistaken_accusation` requires exactly that "botched it"
+        // path. `step_fail_nodes` (tracked above) are the seeds for that
+        // case, one per step. Every seed here is a genuine
+        // `MAX_EXPLORED_STATES`-bounded leg from a real playthrough
+        // witness, so trying more of them can only turn an `Inconclusive`
+        // into a `Proved`, never manufacture a false one -- and capping
+        // this at the success checkpoint plus one per-step failure
+        // checkpoint (rather than every intermediate step-readiness
+        // checkpoint tried previously) bounds the added cost to at most
+        // `solve_steps.len() + 1` extra legs per unresolved end.
         if bounded {
-            if let Some(seed) = step_nodes[self.solve_steps.len()].clone() {
-                for end in &self.ends {
-                    if proofs.contains_key(&end.item.id) {
-                        continue;
-                    }
-                    if let Some(found) =
-                        self.search_from(seed.clone(), auto_facts, auto_deductions, |candidate| {
-                            candidate.actions > 0 && self.end_satisfied(end, &candidate.state)
+            for end in &self.ends {
+                if proofs.contains_key(&end.item.id) {
+                    continue;
+                }
+                let seeds = std::iter::once(step_nodes[self.solve_steps.len()].clone())
+                    .chain(step_fail_nodes.iter().cloned())
+                    .flatten();
+                for seed in seeds {
+                    let Some(found) =
+                        self.search_from(seed, auto_facts, auto_deductions, |candidate| {
+                            // `concluded_via_failure`'s `next_step == 0` can
+                            // re-enter a solve attempt (the model doesn't
+                            // forbid retrying after a reset while attempts
+                            // remain), so a later node reached from that seed
+                            // can be genuinely mid-sequence again. Mirror the
+                            // main search's `solve_session_concluded` gate so
+                            // such an intermediate coincidence -- flags that
+                            // happen to satisfy `end` before the runtime
+                            // would actually let the game conclude -- is
+                            // never accepted as a witness.
+                            let solve_session_concluded = self.solve_steps.is_empty()
+                                || candidate.state.next_step == 0
+                                || candidate.state.next_step as usize >= self.solve_steps.len();
+                            candidate.actions > 0
+                                && solve_session_concluded
+                                && self.end_satisfied(end, &candidate.state)
                         })
-                    {
-                        proofs.insert(end.item.id.clone(), found);
-                    }
+                    else {
+                        continue;
+                    };
+                    proofs.insert(end.item.id.clone(), found);
+                    break;
                 }
             }
         }
