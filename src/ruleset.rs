@@ -11,8 +11,17 @@ pub const STANDARD_MYSTERY_RULESET_VERSION_3: &str = "3.0.0";
 pub const STANDARD_MYSTERY_RULESET_VERSION_4: &str = "4.0.0";
 pub const STANDARD_MYSTERY_RULESET_VERSION_5: &str = "5.0.0";
 pub const STANDARD_MYSTERY_RULESET_VERSION_6: &str = "6.0.0";
+pub const STANDARD_MYSTERY_RULESET_VERSION_7: &str = "7.0.0";
 /// Latest standard mystery ruleset authored by this validator release.
-pub const STANDARD_MYSTERY_RULESET_VERSION: &str = STANDARD_MYSTERY_RULESET_VERSION_6;
+pub const STANDARD_MYSTERY_RULESET_VERSION: &str = STANDARD_MYSTERY_RULESET_VERSION_7;
+
+/// tagStandard41h12 IDs 2000 through 2112 inclusive, immediately below the
+/// scanner-control reservation at 2113/2114, are permanently reserved for
+/// ruleset-owned answer decks (Story Format 3.7). Ruleset 7.0.0's 29 cards
+/// occupy 2084-2112; 2000-2083 remain unassigned headroom for future
+/// ruleset-owned decks.
+pub const ANSWER_DECK_TAG_ID_MIN: i64 = 2000;
+pub const ANSWER_DECK_TAG_ID_MAX: i64 = 2112;
 
 /// A story's exact ruleset selection. Released versions are append-only: an
 /// existing `(id, version)` pair must never be changed in place.
@@ -31,6 +40,11 @@ pub struct ResolvedRuleset {
     /// by game-instance policy. Consumers can filter by these capabilities
     /// without copying the ruleset's command definitions.
     pub command_capabilities: &'static [RulesetCommandCapability],
+    /// The ruleset-owned answer-deck catalog (Story Format 3.7's `answer.*`
+    /// subjects), merged into a story's definitions the same way
+    /// `commands_yaml` is. `None` for rulesets published before answer decks
+    /// existed.
+    pub answers_yaml: Option<&'static str>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -42,10 +56,10 @@ pub struct RulesetCommandCapability {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RulesetError {
-    #[error("unknown ruleset `{id}`; supported rulesets: ruleset.standard_mystery@1.0.0, @2.0.0, @3.0.0, @4.0.0, @5.0.0, and @6.0.0")]
+    #[error("unknown ruleset `{id}`; supported rulesets: ruleset.standard_mystery@1.0.0, @2.0.0, @3.0.0, @4.0.0, @5.0.0, @6.0.0, and @7.0.0")]
     Unknown { id: String },
     #[error(
-        "ruleset `{id}` does not support version `{version}`; use version 1.0.0, 2.0.0, 3.0.0, 4.0.0, 5.0.0, or 6.0.0"
+        "ruleset `{id}` does not support version `{version}`; use version 1.0.0, 2.0.0, 3.0.0, 4.0.0, 5.0.0, 6.0.0, or 7.0.0"
     )]
     IncompatibleVersion { id: String, version: String },
 }
@@ -56,30 +70,45 @@ pub fn resolve_ruleset(reference: &RulesetReference) -> Result<ResolvedRuleset, 
             id: reference.id.clone(),
         });
     }
-    let (commands_yaml, command_capabilities) = match reference.version.as_str() {
+    let (commands_yaml, command_capabilities, answers_yaml) = match reference.version.as_str() {
         STANDARD_MYSTERY_RULESET_VERSION_1 => (
             STANDARD_MYSTERY_COMMANDS_1_0_YAML,
             LEGACY_NOTEBOOK_COMMAND_CAPABILITIES,
+            None,
         ),
         STANDARD_MYSTERY_RULESET_VERSION_2 => (
             STANDARD_MYSTERY_COMMANDS_2_0_YAML,
             LEGACY_NOTEBOOK_COMMAND_CAPABILITIES,
+            None,
         ),
         STANDARD_MYSTERY_RULESET_VERSION_3 => (
             standard_mystery_commands_3_0_yaml(),
             LEGACY_NOTEBOOK_COMMAND_CAPABILITIES,
+            None,
         ),
         STANDARD_MYSTERY_RULESET_VERSION_4 => (
             standard_mystery_commands_4_0_yaml(),
             NOTEBOOK_COMMAND_CAPABILITIES,
+            None,
         ),
         STANDARD_MYSTERY_RULESET_VERSION_5 => (
             standard_mystery_commands_5_0_yaml(),
             RECONCILIATION_COMMAND_CAPABILITIES,
+            None,
         ),
         STANDARD_MYSTERY_RULESET_VERSION_6 => (
             STANDARD_MYSTERY_COMMANDS_6_0_YAML,
             RECONCILIATION_COMMAND_CAPABILITIES,
+            None,
+        ),
+        STANDARD_MYSTERY_RULESET_VERSION_7 => (
+            // command.solve stays byte-for-byte parameterless: the multi-step
+            // solve session is backend-owned state, not a re-asserted
+            // command parameter. The 6.0.0 command catalog carries over
+            // unchanged.
+            STANDARD_MYSTERY_COMMANDS_6_0_YAML,
+            RECONCILIATION_COMMAND_CAPABILITIES,
+            Some(STANDARD_MYSTERY_ANSWERS_7_0_YAML),
         ),
         _ => {
             return Err(RulesetError::IncompatibleVersion {
@@ -92,6 +121,7 @@ pub fn resolve_ruleset(reference: &RulesetReference) -> Result<ResolvedRuleset, 
         reference: reference.clone(),
         commands_yaml,
         command_capabilities,
+        answers_yaml,
     })
 }
 
@@ -647,6 +677,158 @@ const STANDARD_MYSTERY_COMMANDS_6_0_YAML: &str = r#"commands:
     default_cost_minutes: 0
 "#;
 
+// This is the immutable 7.0.0 answer-deck catalog: 29 cards (10 motive, 8
+// time, 11 method), verbatim from docs/answer-deck-vocabulary.md, the
+// authoritative source. `tag_id`s are assigned descending from 2112 and
+// occupy 2084-2112 of the reserved 2000-2112 range; append-only and
+// immutable once shipped, exactly like a commands catalog.
+const STANDARD_MYSTERY_ANSWERS_7_0_YAML: &str = r#"answers:
+  - id: answer.motive.greed
+    tag_id: 2112
+    name: Greed
+    description: Done for money, property, a payout, an inheritance, or the value of the thing itself.
+
+  - id: answer.motive.jealousy
+    tag_id: 2111
+    name: Jealousy
+    description: Done because a rival had what the culprit wanted — a person, a place, a reputation, a prize.
+
+  - id: answer.motive.revenge
+    tag_id: 2110
+    name: Revenge
+    description: Done to settle a past wrong, real or only believed.
+
+  - id: answer.motive.fear_of_exposure
+    tag_id: 2109
+    name: Fear of exposure
+    description: Done to keep a secret buried — to silence a witness, destroy a record, or stop an investigation.
+
+  - id: answer.motive.self_preservation
+    tag_id: 2108
+    name: Self-preservation
+    description: Done to escape immediate danger to the culprit's own body; self-defence, panic in a struggle, a way out of a trap.
+
+  - id: answer.motive.fear_for_another
+    tag_id: 2107
+    name: Fear for someone else
+    description: Done to shield another person from harm, blame, or loss — a child, a partner, an accomplice.
+
+  - id: answer.motive.love
+    tag_id: 2106
+    name: Love
+    description: Done out of attachment to a person; to win them, keep them, or refuse to let them go.
+
+  - id: answer.motive.ambition
+    tag_id: 2105
+    name: Ambition
+    description: Done for position, standing, credit, or a legacy rather than for money.
+
+  - id: answer.motive.desperation
+    tag_id: 2104
+    name: Desperation
+    description: Done by someone cornered — debt, illness, eviction, a deadline — seeking relief rather than gain.
+
+  - id: answer.motive.loyalty
+    tag_id: 2103
+    name: Loyalty
+    description: Done on behalf of a person, family, employer, or cause the culprit felt bound to, including acting on orders.
+
+  - id: answer.time.dawn
+    tag_id: 2102
+    name: At dawn
+    description: First light until the sun is up.
+
+  - id: answer.time.morning
+    tag_id: 2101
+    name: In the morning
+    description: Sunrise until late morning.
+
+  - id: answer.time.midday
+    tag_id: 2100
+    name: Around midday
+    description: Late morning until early afternoon, across the midday meal.
+
+  - id: answer.time.afternoon
+    tag_id: 2099
+    name: In the afternoon
+    description: Early afternoon until the light starts to go.
+
+  - id: answer.time.evening
+    tag_id: 2098
+    name: In the evening
+    description: Sunset through the early part of the night.
+
+  - id: answer.time.night
+    tag_id: 2097
+    name: At night
+    description: Full dark, but still before midnight.
+
+  - id: answer.time.after_midnight
+    tag_id: 2096
+    name: After midnight
+    description: Midnight until the small hours.
+
+  - id: answer.time.before_dawn
+    tag_id: 2095
+    name: Before dawn
+    description: The small hours until first light.
+
+  - id: answer.method.struck
+    tag_id: 2094
+    name: Struck with something
+    description: Blunt force — a weapon, a tool, an ordinary heavy object.
+
+  - id: answer.method.stabbed
+    tag_id: 2093
+    name: Stabbed or cut
+    description: A blade, a point, or broken glass.
+
+  - id: answer.method.shot
+    tag_id: 2092
+    name: Shot
+    description: A firearm or other projectile.
+
+  - id: answer.method.poisoned
+    tag_id: 2091
+    name: Poisoned or drugged
+    description: A substance given, hidden in food or drink, or substituted — whether meant to kill or only to incapacitate.
+
+  - id: answer.method.strangled
+    tag_id: 2090
+    name: Strangled or smothered
+    description: Air cut off by hands, a ligature, or an obstruction.
+
+  - id: answer.method.drowned
+    tag_id: 2089
+    name: Drowned
+    description: Held under, or unable to get out of the water.
+
+  - id: answer.method.fell
+    tag_id: 2088
+    name: Killed by a fall
+    description: A fall from height, down stairs, or onto something hard — pushed, dropped, or lost footing.
+
+  - id: answer.method.fire
+    tag_id: 2087
+    name: Burned in a fire
+    description: Fire, smoke, or an explosion.
+
+  - id: answer.method.crushed
+    tag_id: 2086
+    name: Crushed or run down
+    description: A vehicle, machinery, or a collapsing structure or load.
+
+  - id: answer.method.neglect
+    tag_id: 2085
+    name: Left without help
+    description: Medicine withheld, an injury left untreated, an alarm ignored, someone abandoned somewhere they could not survive.
+
+  - id: answer.method.not_killed
+    tag_id: 2084
+    name: Not killed by anyone
+    description: Illness, a failing heart, or a death nothing external caused — including the case where nobody died at all.
+"#;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1048,14 +1230,14 @@ mod tests {
     }
 
     #[test]
-    fn unknown_version_error_names_6_0_0() {
+    fn unknown_version_error_names_7_0_0() {
         let error = resolve_ruleset(&RulesetReference {
             id: STANDARD_MYSTERY_RULESET_ID.to_string(),
-            version: "7.0.0".to_string(),
+            version: "8.0.0".to_string(),
         })
         .expect_err("unpublished version must error");
         assert!(matches!(error, RulesetError::IncompatibleVersion { .. }));
-        assert!(error.to_string().contains("6.0.0"));
+        assert!(error.to_string().contains("7.0.0"));
 
         let unknown_id_error = resolve_ruleset(&RulesetReference {
             id: "ruleset.unknown".to_string(),
@@ -1063,15 +1245,80 @@ mod tests {
         })
         .expect_err("unknown ruleset id must error");
         assert!(matches!(unknown_id_error, RulesetError::Unknown { .. }));
-        assert!(unknown_id_error.to_string().contains("6.0.0"));
+        assert!(unknown_id_error.to_string().contains("7.0.0"));
     }
 
     #[test]
-    fn ruleset_version_constant_points_at_6_0_0() {
-        assert_eq!(STANDARD_MYSTERY_RULESET_VERSION, "6.0.0");
+    fn ruleset_version_constant_points_at_7_0_0() {
+        assert_eq!(STANDARD_MYSTERY_RULESET_VERSION, "7.0.0");
         assert_eq!(
             STANDARD_MYSTERY_RULESET_VERSION,
-            STANDARD_MYSTERY_RULESET_VERSION_6
+            STANDARD_MYSTERY_RULESET_VERSION_7
         );
+    }
+
+    #[test]
+    fn standard_catalog_7_0_carries_over_6_0_commands_and_adds_the_answer_deck() {
+        let version_6 = resolve_ruleset(&RulesetReference {
+            id: STANDARD_MYSTERY_RULESET_ID.to_string(),
+            version: STANDARD_MYSTERY_RULESET_VERSION_6.to_string(),
+        })
+        .expect("standard ruleset 6.0");
+        let resolved = resolve_ruleset(&RulesetReference {
+            id: STANDARD_MYSTERY_RULESET_ID.to_string(),
+            version: STANDARD_MYSTERY_RULESET_VERSION_7.to_string(),
+        })
+        .expect("standard ruleset 7.0");
+
+        assert_eq!(resolved.commands_yaml, version_6.commands_yaml);
+        assert_eq!(resolved.command_capabilities, version_6.command_capabilities);
+
+        let answers_yaml = resolved.answers_yaml.expect("7.0.0 declares answer decks");
+        assert!(version_6.answers_yaml.is_none());
+
+        let document: serde_yaml::Value =
+            serde_yaml::from_str(answers_yaml).expect("answer catalog YAML");
+        let answers = document["answers"].as_sequence().expect("answers");
+        assert_eq!(answers.len(), 29);
+
+        let motive = answers
+            .iter()
+            .filter(|answer| {
+                answer["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("answer.motive."))
+            })
+            .count();
+        let time = answers
+            .iter()
+            .filter(|answer| {
+                answer["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("answer.time."))
+            })
+            .count();
+        let method = answers
+            .iter()
+            .filter(|answer| {
+                answer["id"]
+                    .as_str()
+                    .is_some_and(|id| id.starts_with("answer.method."))
+            })
+            .count();
+        assert_eq!((motive, time, method), (10, 8, 11));
+
+        let mut seen_tags = std::collections::BTreeSet::new();
+        for answer in answers {
+            let tag_id = answer["tag_id"].as_i64().expect("tag_id");
+            assert!((ANSWER_DECK_TAG_ID_MIN..=ANSWER_DECK_TAG_ID_MAX).contains(&tag_id));
+            assert!(seen_tags.insert(tag_id), "duplicate tag_id {tag_id}");
+            assert!(answer["name"].as_str().is_some_and(|name| !name.is_empty()));
+            assert!(answer["description"]
+                .as_str()
+                .is_some_and(|description| !description.is_empty()));
+        }
+        assert_eq!(seen_tags.len(), 29);
+        assert_eq!(*seen_tags.iter().min().unwrap(), 2084);
+        assert_eq!(*seen_tags.iter().max().unwrap(), 2112);
     }
 }

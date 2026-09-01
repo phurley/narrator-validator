@@ -33,10 +33,11 @@ pub use reference_text::{
 };
 pub use ruleset::{
     resolve_ruleset, ResolvedRuleset, RulesetCommandCapability, RulesetError, RulesetReference,
-    STANDARD_MYSTERY_RULESET_ID, STANDARD_MYSTERY_RULESET_VERSION,
-    STANDARD_MYSTERY_RULESET_VERSION_1, STANDARD_MYSTERY_RULESET_VERSION_2,
-    STANDARD_MYSTERY_RULESET_VERSION_3, STANDARD_MYSTERY_RULESET_VERSION_4,
-    STANDARD_MYSTERY_RULESET_VERSION_5, STANDARD_MYSTERY_RULESET_VERSION_6,
+    ANSWER_DECK_TAG_ID_MAX, ANSWER_DECK_TAG_ID_MIN, STANDARD_MYSTERY_RULESET_ID,
+    STANDARD_MYSTERY_RULESET_VERSION, STANDARD_MYSTERY_RULESET_VERSION_1,
+    STANDARD_MYSTERY_RULESET_VERSION_2, STANDARD_MYSTERY_RULESET_VERSION_3,
+    STANDARD_MYSTERY_RULESET_VERSION_4, STANDARD_MYSTERY_RULESET_VERSION_5,
+    STANDARD_MYSTERY_RULESET_VERSION_6, STANDARD_MYSTERY_RULESET_VERSION_7,
 };
 pub use scanner_control::{
     reserved_scanner_control_tags, scanner_control_dart_source, scanner_control_manifest_json,
@@ -55,7 +56,7 @@ pub use validator::{
 
 pub const VALIDATOR_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Latest story format authored by this release.
-pub const STORY_FORMAT_VERSION: &str = "3.6.0";
+pub const STORY_FORMAT_VERSION: &str = "3.7.0";
 /// Semantic-version range this release can structurally validate. Format 3.2+
 /// features still require successful `case.features` negotiation, while the
 /// Format 3.3 Solve contract is selected by its exact ruleset version.
