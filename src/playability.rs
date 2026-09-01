@@ -1514,6 +1514,34 @@ impl Model {
         }
     }
 
+    /// True once every question this search could ever answer with
+    /// `Proved` has already been answered that way, so continuing to pop
+    /// the queue can only spend budget re-deriving states that no
+    /// unresolved question still needs. The queue is a min-heap on
+    /// `(actions, elapsed)` (see `QueueNode`/`queue_key`), so the first
+    /// time any end or solve step is proved is already its minimal-action
+    /// witness; nothing popped later could improve on it. This must NOT
+    /// short-circuit a genuine `NotProved`/`Inconclusive` outcome -- those
+    /// still require draining the queue (or hitting a bound) so the
+    /// `bounded`/`reached_states` diagnostics stay accurate, which is why
+    /// every branch here requires the corresponding question to already be
+    /// `Proved`, never merely "no longer worth pursuing".
+    fn search_fully_settled(
+        &self,
+        proofs: &BTreeMap<String, Node>,
+        step_progress: &[Option<u32>],
+        answerable: &Option<(u32, Vec<String>)>,
+    ) -> bool {
+        if !self.ends.iter().all(|end| proofs.contains_key(&end.item.id)) {
+            return false;
+        }
+        if self.solve_steps.is_empty() {
+            answerable.is_some()
+        } else {
+            step_progress.iter().all(Option::is_some)
+        }
+    }
+
     fn search(&self, auto_facts: bool, auto_deductions: bool) -> NotebookPolicyAnalysis {
         let mut queue = BinaryHeap::new();
         // A canonical state can be reached with fewer actions but more elapsed
@@ -1637,12 +1665,18 @@ impl Model {
                     .find(|end| self.end_satisfied(end, &node.state))
                 {
                     proofs.entry(end.item.id.clone()).or_insert(node);
+                    if self.search_fully_settled(&proofs, &step_progress, &answerable) {
+                        break;
+                    }
                     continue;
                 }
             }
             if node.actions >= MAX_ACTIONS || node.state.elapsed >= MAX_ELAPSED_MINUTES {
                 bounded = true;
                 continue;
+            }
+            if self.search_fully_settled(&proofs, &step_progress, &answerable) {
+                break;
             }
             for action in self.actions(&node.state, auto_facts, auto_deductions) {
                 let mut next = node.clone();
