@@ -605,14 +605,34 @@ pub fn parse_reference_text(source: &str) -> Result<ParsedReferenceText, Referen
                 end,
             });
         }
-        segments.push(ReferenceTextSegment::Reference {
-            expression: ReferenceExpression {
-                authored: authored.to_string(),
-                target_id: format!("{}.{}", components[0], components[1]),
-                property_path: components[2..]
+        // `answer.*` IDs are three components by design
+        // (`answer.<category>.<value>`, e.g. `answer.motive.jealousy`): the
+        // whole three-part string is the target ID, and answer cards have
+        // no addressable property path. Every other kind is `kind.id` with
+        // any remaining components forming a trailing property path.
+        let (target_id, property_path) = if components[0] == "answer" {
+            if components.len() != 3 {
+                return Err(ReferenceParseError::Invalid {
+                    authored: authored.to_string(),
+                    start,
+                    end,
+                });
+            }
+            (authored.to_string(), Vec::new())
+        } else {
+            (
+                format!("{}.{}", components[0], components[1]),
+                components[2..]
                     .iter()
                     .map(|part| (*part).to_string())
                     .collect(),
+            )
+        };
+        segments.push(ReferenceTextSegment::Reference {
+            expression: ReferenceExpression {
+                authored: authored.to_string(),
+                target_id,
+                property_path,
                 start,
                 end,
             },
@@ -681,6 +701,49 @@ mod tests {
             parse_reference_text("character.echo]]"),
             Err(ReferenceParseError::UnexpectedClose { .. })
         ));
+    }
+
+    #[test]
+    fn parser_treats_three_component_answer_ids_as_the_full_target() {
+        for authored in [
+            "answer.motive.jealousy",
+            "answer.time.evening",
+            "answer.method.struck",
+        ] {
+            let source = format!("[[{authored}]]");
+            let parsed = parse_reference_text(&source).unwrap();
+            let ReferenceTextSegment::Reference { expression } = &parsed.segments[0] else {
+                panic!("expected reference segment for {authored}");
+            };
+            assert_eq!(expression.target_id, authored);
+            assert!(expression.property_path.is_empty());
+        }
+    }
+
+    #[test]
+    fn parser_rejects_two_component_answer_id_without_a_value() {
+        assert!(matches!(
+            parse_reference_text("[[answer.motive]]"),
+            Err(ReferenceParseError::Invalid { .. })
+        ));
+    }
+
+    #[test]
+    fn parser_rejects_four_component_answer_id() {
+        assert!(matches!(
+            parse_reference_text("[[answer.motive.jealousy.extra]]"),
+            Err(ReferenceParseError::Invalid { .. })
+        ));
+    }
+
+    #[test]
+    fn parser_still_splits_non_answer_kind_into_id_and_property_path() {
+        let parsed = parse_reference_text("[[deduction.foo.conclusion]]").unwrap();
+        let ReferenceTextSegment::Reference { expression } = &parsed.segments[0] else {
+            panic!("expected reference segment");
+        };
+        assert_eq!(expression.target_id, "deduction.foo");
+        assert_eq!(expression.property_path, vec!["conclusion".to_string()]);
     }
 
     #[test]
