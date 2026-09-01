@@ -72,6 +72,10 @@ settings:
     type: room
     description: The study where the mystery occurred.
     parent: setting.world
+    facts:
+      - id: fact.wound_pattern
+        statement: The wound pattern narrows the weapon and method used in the study.
+        about: [answer.method.stabbed, answer.method.struck]
 routes:
   - id: route.foyer_study
     from: setting.foyer

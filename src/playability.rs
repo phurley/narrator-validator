@@ -1618,7 +1618,18 @@ impl Model {
             {
                 answerable = Some((node.actions, established_solution_notes));
             }
-            if node.actions > 0 {
+            // While a Format 3.7 solve session is mid-sequence (some but not
+            // all steps committed), the runtime hasn't concluded the
+            // session yet, so authored end states -- even ones whose
+            // `requires` an earlier step's flags already satisfy -- cannot
+            // yet terminate the game. This is what lets a later step reach
+            // a fuller graded ending instead of the search stopping dead at
+            // the first, less-complete one an intermediate flag happens to
+            // satisfy.
+            let solve_session_concluded = self.solve_steps.is_empty()
+                || node.state.next_step == 0
+                || node.state.next_step as usize >= self.solve_steps.len();
+            if node.actions > 0 && solve_session_concluded {
                 if let Some(end) = self
                     .ends
                     .iter()
@@ -1696,20 +1707,127 @@ impl Model {
                 queue.push(QueueNode(next));
             }
         }
+        let step_answerability = self
+            .solve_steps
+            .iter()
+            .enumerate()
+            .map(|(index, step)| {
+                if let Some(action_count) = step_progress[index] {
+                    return StepAnswerability {
+                        id: step.item.id.clone(),
+                        status: PlayabilityStatus::Proved,
+                        action_count: Some(action_count),
+                        blocker: None,
+                    };
+                }
+                let hard_missing = step.rows.iter().enumerate().find_map(|(row_index, row)| {
+                    match row {
+                        SolveRow::NOfM { n, pool } => {
+                            let learnable = pool.iter().filter(|s| self.subject_learnable(s)).count();
+                            (learnable < *n).then(|| {
+                                let card_index = pool
+                                    .iter()
+                                    .position(|s| !self.subject_learnable(s))
+                                    .unwrap_or(0);
+                                (row_index, card_index, pool[card_index].clone())
+                            })
+                        }
+                        SolveRow::Ordered { cards } => cards
+                            .iter()
+                            .position(|s| !self.subject_learnable(s))
+                            .map(|card_index| (row_index, card_index, cards[card_index].clone())),
+                    }
+                });
+                if let Some((row_index, card_index, subject)) = hard_missing {
+                    return StepAnswerability {
+                        id: step.item.id.clone(),
+                        status: PlayabilityStatus::NotProved,
+                        action_count: None,
+                        blocker: Some(PlayabilityBlocker {
+                            code: "playability.unlearnable_answer".to_string(),
+                            message: format!(
+                                "no fact or deduction in the story ever establishes `{subject}`, which `{}` requires",
+                                step.item.id
+                            ),
+                            path: step.item.path.clone(),
+                            pointer: format!(
+                                "{}/rows/{row_index}/cards/{card_index}",
+                                step.item.pointer
+                            ),
+                            range: None,
+                            chain: vec![step.item.id.clone(), subject],
+                        }),
+                    };
+                }
+                let inconclusive =
+                    bounded || !self.unsupported.is_empty() || unsupported_policy.is_some();
+                StepAnswerability {
+                    id: step.item.id.clone(),
+                    status: if inconclusive {
+                        PlayabilityStatus::Inconclusive
+                    } else {
+                        PlayabilityStatus::NotProved
+                    },
+                    action_count: None,
+                    blocker: if let Some(reason) = self.unsupported.first() {
+                        Some(PlayabilityBlocker {
+                            code: reason.code.clone(),
+                            message: reason.message.clone(),
+                            path: reason.path.clone(),
+                            pointer: reason.pointer.clone(),
+                            range: reason.range,
+                            chain: vec![step.item.id.clone()],
+                        })
+                    } else if let Some((code, message)) = unsupported_policy {
+                        Some(PlayabilityBlocker {
+                            code: code.to_string(),
+                            message: message.to_string(),
+                            path: step.item.path.clone(),
+                            pointer: step.item.pointer.clone(),
+                            range: step.item.range,
+                            chain: vec![step.item.id.clone()],
+                        })
+                    } else if bounded {
+                        Some(PlayabilityBlocker {
+                            code: "playability.search_bound".to_string(),
+                            message: format!(
+                                "analysis reached its deterministic bound of {MAX_EXPLORED_STATES} states, {MAX_ACTIONS} actions, or {MAX_ELAPSED_MINUTES} elapsed minutes"
+                            ),
+                            path: step.item.path.clone(),
+                            pointer: step.item.pointer.clone(),
+                            range: step.item.range,
+                            chain: vec![step.item.id.clone()],
+                        })
+                    } else {
+                        None
+                    },
+                }
+            })
+            .collect::<Vec<_>>();
         let terminal_paths = self.ends.iter().map(|end| {
             if let Some(reason) = self.unsupported.first().filter(|_| proofs.contains_key(&end.item.id)) {
                 TerminalPathAnalysis { id: end.item.id.clone(), outcome: end.outcome.clone(), status: PlayabilityStatus::Inconclusive, path: end.item.path.clone(), pointer: end.item.pointer.clone(), range: end.item.range, lower_bound: None, blocker: Some(PlayabilityBlocker { code: reason.code.clone(), message: format!("a supported path was found, but `{}` may change its result; the path is not reported as proved", reason.message), path: reason.path.clone(), pointer: reason.pointer.clone(), range: reason.range, chain: vec![end.item.id.clone()] }) }
             } else if let Some(node) = proofs.get(&end.item.id) {
                 TerminalPathAnalysis { id: end.item.id.clone(), outcome: end.outcome.clone(), status: PlayabilityStatus::Proved, path: end.item.path.clone(), pointer: end.item.pointer.clone(), range: end.item.range, lower_bound: Some(PlayabilityLowerBound { entry_setting: node.state.entry.clone(), action_count: node.actions, route_action_count: node.route_actions, elapsed_minutes: node.state.elapsed, wait_minutes: node.wait_minutes, required_waits: self.triggers.values().filter(|trigger| trigger.after > 0 && node.state.completed.contains(&trigger.item.id)).map(|trigger| PlayabilityRequiredWait { trigger: trigger.item.id.clone(), delay_minutes: trigger.after }).collect(), ordered_steps: node.steps.clone(), pivotal_unlocks: node.unlocks.iter().cloned().collect() }), blocker: None }
             } else {
+                let unlearnable = end
+                    .requirements
+                    .iter()
+                    .find_map(|requirement| self.unlearnable_answer_blocker(end, requirement));
                 let hard_missing = end
                     .requirements
                     .iter()
                     .any(|requirement| !self.has_possible_producer(requirement));
                 let unsupported = self.unsupported.first();
-                let inconclusive = !hard_missing
+                // The static "hard unlearnable" tier survives unsupported
+                // constructs and the search bound, same as today's
+                // hard-missing-producer tier.
+                let inconclusive = unlearnable.is_none()
+                    && !hard_missing
                     && (bounded || unsupported.is_some() || unsupported_policy.is_some() || end.solution_condition);
-                let blocker = if hard_missing {
+                let blocker = if let Some(blocker) = unlearnable {
+                    blocker
+                } else if hard_missing {
                     self.blocker(end, &reached_states)
                 } else if let Some(reason) = unsupported {
                     PlayabilityBlocker { code: reason.code.clone(), message: reason.message.clone(), path: reason.path.clone(), pointer: reason.pointer.clone(), range: reason.range, chain: vec![end.item.id.clone()] }
@@ -1725,32 +1843,63 @@ impl Model {
                 TerminalPathAnalysis { id: end.item.id.clone(), outcome: end.outcome.clone(), status: if inconclusive { PlayabilityStatus::Inconclusive } else { PlayabilityStatus::NotProved }, path: end.item.path.clone(), pointer: end.item.pointer.clone(), range: end.item.range, lower_bound: None, blocker: Some(blocker) }
             }
         }).collect();
+        let solution_answerability = if !self.solve_steps.is_empty() {
+            // Format 3.7: aggregate the per-step results so existing
+            // consumers of the legacy single-commit field don't see a
+            // misleading permanent `NotProved` on a step-based story.
+            // Proved iff every step is Proved; `action_count` is the final
+            // step's, matching "how many actions to answer everything".
+            if step_answerability
+                .iter()
+                .all(|step| step.status == PlayabilityStatus::Proved)
+            {
+                SolutionAnswerability {
+                    status: PlayabilityStatus::Proved,
+                    action_count: step_answerability.last().and_then(|step| step.action_count),
+                    solution_equivalent_deductions: Vec::new(),
+                }
+            } else if step_answerability
+                .iter()
+                .any(|step| step.status == PlayabilityStatus::NotProved)
+            {
+                SolutionAnswerability {
+                    status: PlayabilityStatus::NotProved,
+                    action_count: None,
+                    solution_equivalent_deductions: Vec::new(),
+                }
+            } else {
+                SolutionAnswerability {
+                    status: PlayabilityStatus::Inconclusive,
+                    action_count: None,
+                    solution_equivalent_deductions: Vec::new(),
+                }
+            }
+        } else if let Some((action_count, deductions)) = answerable {
+            SolutionAnswerability {
+                status: PlayabilityStatus::Proved,
+                action_count: Some(action_count),
+                solution_equivalent_deductions: deductions,
+            }
+        } else {
+            SolutionAnswerability {
+                status: if self.unsupported.is_empty() && unsupported_policy.is_none() && !bounded
+                {
+                    PlayabilityStatus::NotProved
+                } else {
+                    PlayabilityStatus::Inconclusive
+                },
+                action_count: None,
+                solution_equivalent_deductions: Vec::new(),
+            }
+        };
         NotebookPolicyAnalysis {
             auto_facts,
             auto_deductions,
             explored_states: explored,
             bounded,
             terminal_paths,
-            solution_answerability: if let Some((action_count, deductions)) = answerable {
-                SolutionAnswerability {
-                    status: PlayabilityStatus::Proved,
-                    action_count: Some(action_count),
-                    solution_equivalent_deductions: deductions,
-                }
-            } else {
-                SolutionAnswerability {
-                    status: if self.unsupported.is_empty()
-                        && unsupported_policy.is_none()
-                        && !bounded
-                    {
-                        PlayabilityStatus::NotProved
-                    } else {
-                        PlayabilityStatus::Inconclusive
-                    },
-                    action_count: None,
-                    solution_equivalent_deductions: Vec::new(),
-                }
-            },
+            solution_answerability,
+            step_answerability,
         }
     }
 
@@ -2248,6 +2397,59 @@ impl Model {
             && end.at_or_after.map_or(true, |threshold| {
                 self.initial_minutes.saturating_add(state.elapsed) >= threshold
             })
+    }
+
+    /// If `requirement` traces to a Format 3.7 step-outcome flag whose step
+    /// demands a card subject with zero possible witnesses anywhere in the
+    /// catalog, the static "hard unlearnable" tier: report
+    /// `playability.unlearnable_answer` pointing at the offending row card
+    /// instead of the generic `playability.missing_requirement`.
+    fn unlearnable_answer_blocker(
+        &self,
+        end: &EndRule,
+        requirement: &str,
+    ) -> Option<PlayabilityBlocker> {
+        let step = self.solve_steps.iter().find(|step| {
+            step.on_success.set_flags.iter().any(|flag| flag == requirement)
+                || step.on_failure.set_flags.iter().any(|flag| flag == requirement)
+        })?;
+        for (row_index, row) in step.rows.iter().enumerate() {
+            let missing = match row {
+                SolveRow::NOfM { n, pool } => {
+                    let learnable = pool.iter().filter(|subject| self.subject_learnable(subject)).count();
+                    (learnable < *n)
+                        .then(|| {
+                            pool.iter()
+                                .position(|subject| !self.subject_learnable(subject))
+                                .map(|card_index| (card_index, pool[card_index].clone()))
+                        })
+                        .flatten()
+                }
+                SolveRow::Ordered { cards } => cards
+                    .iter()
+                    .position(|subject| !self.subject_learnable(subject))
+                    .map(|card_index| (card_index, cards[card_index].clone())),
+            };
+            if let Some((card_index, subject)) = missing {
+                return Some(PlayabilityBlocker {
+                    code: "playability.unlearnable_answer".to_string(),
+                    message: format!(
+                        "no fact or deduction in the story ever establishes `{subject}`, which `{}` requires",
+                        step.item.id
+                    ),
+                    path: step.item.path.clone(),
+                    pointer: format!("{}/rows/{row_index}/cards/{card_index}", step.item.pointer),
+                    range: None,
+                    chain: vec![
+                        end.item.id.clone(),
+                        requirement.to_string(),
+                        step.item.id.clone(),
+                        subject,
+                    ],
+                });
+            }
+        }
+        None
     }
 
     fn blocker(&self, end: &EndRule, states: &[State]) -> PlayabilityBlocker {
