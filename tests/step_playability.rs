@@ -352,3 +352,68 @@ fn unrelated_unsupported_construct_demotes_an_otherwise_unreachable_step_answer_
         .expect("end.solved terminal path");
     assert_eq!(end.status, PlayabilityStatus::Inconclusive, "{end:#?}");
 }
+
+/// Regression for the checkpointed per-step search (narrator-validator#83):
+/// a second step whose answer genuinely has no witness anywhere in the
+/// story must stay `NotProved` even though the first step -- the
+/// checkpoint the second step's search would be seeded from -- is
+/// witnessed and proved. A chaining bug that treated "seeded from a proved
+/// checkpoint" as license to relax the goal check, or that let a search
+/// leg report success without actually reaching a satisfying state, would
+/// show up here as a false `Proved` on step two.
+#[test]
+fn a_later_step_with_no_witness_stays_not_proved_even_though_the_first_step_checkpoints() {
+    let story = base_story()
+        .replace(
+            "solution:\n  max_attempts: 2\n  steps:\n    - id: step.name_motive\n      prompt: What was the motive?\n      time_cost_minutes: 0\n      rows:\n        - match: n_of_m\n          n: 1\n          cards: [answer.motive.jealousy]\n      on_success:\n        effects:\n          - operation: set_flag\n            flag: flag.motive_named\n            value: true\n      on_failure:\n        points: -1",
+            "solution:\n  max_attempts: 2\n  steps:\n    - id: step.name_motive\n      prompt: What was the motive?\n      time_cost_minutes: 0\n      rows:\n        - match: n_of_m\n          n: 1\n          cards: [answer.motive.jealousy]\n      on_success:\n        effects:\n          - operation: set_flag\n            flag: flag.motive_named\n            value: true\n    - id: step.name_time\n      prompt: When did it happen?\n      time_cost_minutes: 0\n      rows:\n        - match: n_of_m\n          n: 1\n          cards: [answer.time.night]\n      on_success:\n        effects:\n          - operation: set_flag\n            flag: flag.time_named\n            value: true",
+        )
+        .replace(
+            "  requires: [flag.motive_named]",
+            "  requires: [flag.motive_named, flag.time_named]",
+        )
+        .replace(
+            "  - id: setting.foyer\n    type: room\n    description: The entry foyer.\n    parent: setting.world",
+            "  - id: setting.foyer\n    type: room\n    description: The entry foyer.\n    parent: setting.world\n    facts:\n      - id: fact.motive_hint\n        statement: A jealous rage seems to explain everything.\n        about: [answer.motive.jealousy]",
+        )
+        .replace(
+            "  - tag_id: 2111\n    subject: answer.motive.jealousy",
+            "  - tag_id: 2111\n    subject: answer.motive.jealousy\n  - tag_id: 2097\n    subject: answer.time.night",
+        )
+        .replace(
+            "    initial_state: false",
+            "    initial_state: false\n  - id: flag.time_named\n    name: Time named\n    description: Whether the time has been named.\n    initial_state: false",
+        );
+    // Nothing in the story ever establishes `answer.time.night` -- no fact,
+    // deduction, or entity references it -- so step.name_time is the
+    // "later step with no witness" case.
+    let report = report(story);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    let policy = default_policy(&report);
+
+    let first = policy
+        .step_answerability
+        .iter()
+        .find(|step| step.id == "step.name_motive")
+        .expect("step.name_motive answerability");
+    assert_eq!(first.status, PlayabilityStatus::Proved, "{first:#?}");
+
+    let second = policy
+        .step_answerability
+        .iter()
+        .find(|step| step.id == "step.name_time")
+        .expect("step.name_time answerability");
+    assert_eq!(
+        second.status,
+        PlayabilityStatus::NotProved,
+        "a checkpointed search seeded from step.name_motive's proof must not \
+         fabricate a proof for an unwitnessed answer: {second:#?}"
+    );
+
+    let end = policy
+        .terminal_paths
+        .iter()
+        .find(|end| end.id == "end.solved")
+        .expect("end.solved terminal path");
+    assert_eq!(end.status, PlayabilityStatus::NotProved, "{end:#?}");
+}
