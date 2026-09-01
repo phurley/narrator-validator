@@ -5988,3 +5988,154 @@ fn format_3_7_step_story_validates_clean() {
     assert_eq!(report.format_version.as_deref(), Some("3.7.0"));
     assert!(report.diagnostics.is_empty());
 }
+
+#[test]
+fn format_3_7_step_schema_rejects_every_malformed_shape_at_exact_pointers() {
+    let cases: Vec<(String, &str, &str)> = vec![
+        (
+            format_3_7_step_story().replace("id: step.name_culprit", "id: Step.NameCulprit"),
+            "id.invalid",
+            "/solution/steps/0/id",
+        ),
+        (
+            format_3_7_step_story().replace("id: step.name_culprit", "id: action.name_culprit"),
+            "id.wrong_prefix",
+            "/solution/steps/0/id",
+        ),
+        (
+            format_3_7_step_story().replace(
+                "id: step.identify_weapon_location_and_method",
+                "id: step.name_culprit",
+            ),
+            "id.duplicate",
+            "/solution/steps/1/id",
+        ),
+        (
+            format_3_7_step_story().replace(
+                "    - id: step.name_culprit",
+                "    - bogus_field: true\n      id: step.name_culprit",
+            ),
+            "solution.step_unknown_field",
+            "/solution/steps/0/bogus_field",
+        ),
+        (
+            format_3_7_step_story().replace(
+                "cards: [answer.method.stabbed, answer.method.struck]",
+                "cards: [answer.method.stabbed, entity.knife]",
+            ),
+            "solution.step_card_duplicate",
+            "/solution/steps/1/rows/1/cards/1",
+        ),
+        (
+            format_3_7_step_story().replace(
+                "        - match: ordered\n          cards: [entity.knife, setting.study]",
+                "        - match: ordered\n          n: 2\n          cards: [entity.knife, setting.study]",
+            ),
+            "solution.row_ordered_has_n",
+            "/solution/steps/1/rows/0/n",
+        ),
+        (
+            format_3_7_step_story().replace(
+                "      on_success:\n        effects:\n          - operation: set_flag\n            flag: flag.culprit_named\n            value: true",
+                "      on_success:\n        bogus: true\n        effects:\n          - operation: set_flag\n            flag: flag.culprit_named\n            value: true",
+            ),
+            "solution.step_outcome_unknown_field",
+            "/solution/steps/0/on_success/bogus",
+        ),
+        (
+            format_3_7_step_story().replace(
+                "          - operation: set_flag\n            flag: flag.culprit_named\n            value: true",
+                "          - operation: advance_time\n            minutes: 5",
+            ),
+            "solution.step_effect_operation_unsupported",
+            "/solution/steps/0/on_success/effects/0/operation",
+        ),
+        (
+            format_3_7_step_story().replace("max_attempts: 3", "max_attempts: 0"),
+            "solution.max_attempts_invalid",
+            "/solution/max_attempts",
+        ),
+        (
+            format_3_7_step_story().replace(
+                "solution:\n  max_attempts: 3",
+                "solution:\n  win_state: end.full_solution\n  max_attempts: 3",
+            ),
+            "solution.legacy_contract",
+            "/solution",
+        ),
+    ];
+    for (source, code, pointer) in cases {
+        let report = report(source);
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code && diagnostic.pointer.as_deref() == Some(pointer)
+            }),
+            "missing {code} at {pointer}: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
+fn format_3_7_answer_deck_bindings_reject_unknown_reserved_and_mismatched_tags() {
+    // `deck.subject_unknown` extends to the `answer.*` namespace.
+    let unknown = report(format_3_7_step_story().replace(
+        "subject: answer.method.struck",
+        "subject: answer.method.nonexistent",
+    ));
+    assert!(unknown.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "deck.subject_unknown"
+            && diagnostic.subject_id.as_deref() == Some("answer.method.nonexistent")
+    }));
+
+    // `deck.answer_tag_id_mismatch` when an `answer.*` card's `deck.yaml`
+    // `tag_id` doesn't match its ruleset-assigned value exactly.
+    let mismatched = report(format_3_7_step_story().replace(
+        "tag_id: 2093\n    subject: answer.method.stabbed",
+        "tag_id: 2091\n    subject: answer.method.stabbed",
+    ));
+    assert!(mismatched.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "deck.answer_tag_id_mismatch"
+            && diagnostic.subject_id.as_deref() == Some("answer.method.stabbed")
+    }));
+
+    // `deck.tag_id_reserved_ruleset_answer_deck`: a setting/character/
+    // entity/command subject cannot bind a tag inside 2000-2112.
+    let reserved = report(
+        format_3_7_step_story()
+            .replace(
+                "entities:\n  - id: entity.knife",
+                "entities:\n  - id: entity.spare\n    description: An unused spare object.\n  - id: entity.knife",
+            )
+            .replace(
+                "cards:\n  - tag_id: 0",
+                "cards:\n  - tag_id: 2050\n    subject: entity.spare\n  - tag_id: 0",
+            ),
+    );
+    assert!(reserved.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "deck.tag_id_reserved_ruleset_answer_deck"
+            && diagnostic.subject_id.as_deref() == Some("entity.spare")
+    }));
+}
+
+#[test]
+fn format_3_7_answer_subjects_are_knowledge_never_world_state() {
+    // Never a container/placement target.
+    let container = report(format_3_7_step_story().replace(
+        "initial:\n      container: setting.study",
+        "initial:\n      container: answer.method.stabbed",
+    ));
+    assert!(container.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "subject.answer_no_world_state"
+            && diagnostic.pointer.as_deref() == Some("/entities/0/initial/container")
+    }));
+
+    // Never `at`-eligible in a persistent condition.
+    let predicate = report(format_3_7_step_story().replace(
+        "entities:\n  - id: entity.knife\n    description: A knife found in the study.\n    initial:\n      container: setting.study",
+        "entities:\n  - id: entity.knife\n    description: A knife found in the study.\n    initial:\n      container: setting.study\n    facts:\n      - id: fact.spurious\n        statement: Nonsense.\n        when:\n          all:\n            - at: answer.method.stabbed",
+    ));
+    assert!(predicate.diagnostics.iter().any(|diagnostic| {
+        diagnostic.code == "subject.answer_no_world_state"
+    }));
+}
