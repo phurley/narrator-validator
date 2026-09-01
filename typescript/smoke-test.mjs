@@ -92,6 +92,7 @@ assert.deepEqual(
   {
     id: 'command.reconcile',
     name: 'Reconcile',
+    default_cost_minutes: 0,
     description: 'Compare claimed notebook facts with every joined player.',
   },
 )
