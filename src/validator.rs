@@ -7294,7 +7294,7 @@ impl<'a> Validator<'a> {
                 matches!(known.as_slice(), [shape] if shape.types == [CommandParameterType::Setting] && shape.min == 1 && shape.max == 1)
             }
             "command.solve" => {
-                if self.uses_question_solution_ruleset() {
+                if self.uses_question_solution_ruleset() || self.uses_step_solution_ruleset() {
                     known.is_empty()
                 } else {
                     matches!(known.as_slice(), [suspect, theory]
@@ -7318,6 +7318,9 @@ impl<'a> Validator<'a> {
                     "command.solve" => {
                         if self.uses_question_solution_ruleset() {
                             "question-based standard rulesets require parameterless `command.solve`; answers come from `solution.questions`"
+                                .to_string()
+                        } else if self.uses_step_solution_ruleset() {
+                            "step-based standard rulesets require parameterless `command.solve`; answers come from `solution.steps`"
                                 .to_string()
                         } else {
                             "`command.solve` must declare character then deduction parameters"

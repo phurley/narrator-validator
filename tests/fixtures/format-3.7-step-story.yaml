@@ -1,0 +1,124 @@
+
+case:
+  id: case.example
+  format_version: "3.7.0"
+  features: [reference_text_v1]
+  ruleset:
+    id: ruleset.standard_mystery
+    version: "7.0.0"
+  players:
+    min: 1
+    max: 4
+  initial_time: "21:00"
+  entry_settings: [setting.foyer]
+  exit_settings: [setting.foyer]
+solution:
+  max_attempts: 3
+  session_timeout_minutes: 30
+  steps:
+    - id: step.name_culprit
+      prompt: Who killed [[character.victim.description]]?
+      time_cost_minutes: 5
+      rows:
+        - match: n_of_m
+          n: 1
+          cards: [character.culprit]
+      on_success:
+        effects:
+          - operation: set_flag
+            flag: flag.culprit_named
+            value: true
+        points: 10
+      on_failure:
+        points: -5
+        notes: An innocent name is spoken aloud, and the real culprit relaxes.
+    - id: step.identify_weapon_location_and_method
+      prompt: Which cards identify the weapon, location, and method?
+      time_cost_minutes: 0
+      rows:
+        - match: ordered
+          cards: [entity.knife, setting.study]
+        - match: n_of_m
+          n: 1
+          cards: [answer.method.stabbed, answer.method.struck]
+      on_success:
+        effects:
+          - operation: set_flag
+            flag: flag.weapon_location_and_method_named
+            value: true
+end_states:
+  - id: end.full_solution
+    name: Solved the case
+    outcome: won
+    resolution: full
+    requires: [flag.culprit_named, flag.weapon_location_and_method_named]
+    text: You answer every question correctly.
+  - id: end.partial_solution
+    name: Named the culprit
+    outcome: won
+    resolution: partial
+    requires: [flag.culprit_named]
+    text: You name the culprit but never nail down how or where.
+settings:
+  - id: setting.world
+    type: island
+    navigable: false
+    description: The world containing the playable rooms.
+  - id: setting.foyer
+    type: room
+    description: The entry foyer.
+    parent: setting.world
+  - id: setting.study
+    type: room
+    description: The study where the mystery occurred.
+    parent: setting.world
+routes:
+  - id: route.foyer_study
+    from: setting.foyer
+    to: setting.study
+    bidirectional: true
+    travel_minutes: 1
+characters:
+  - id: character.victim
+    description: The victim at the center of the mystery.
+  - id: character.culprit
+    description: A suspect with a carefully guarded secret.
+entities:
+  - id: entity.knife
+    description: A knife found in the study.
+    initial:
+      container: setting.study
+events:
+  - id: event.murder
+    day: 0
+    time: "21:18"
+    duration_minutes: 0
+    location: setting.study
+    participants: [character.victim, character.culprit]
+deductions: []
+flags:
+  - id: flag.culprit_named
+    name: Culprit named
+    description: Whether the culprit has been correctly named.
+    initial_state: false
+  - id: flag.weapon_location_and_method_named
+    name: Weapon, location, and method named
+    description: Whether the weapon, location, and method have been correctly named.
+    initial_state: false
+cards:
+  - tag_id: 0
+    subject: setting.foyer
+  - tag_id: 1
+    subject: setting.study
+  - tag_id: 2
+    subject: character.victim
+  - tag_id: 3
+    subject: character.culprit
+  - tag_id: 4
+    subject: entity.knife
+  - tag_id: 5
+    subject: command.solve
+  - tag_id: 2093
+    subject: answer.method.stabbed
+  - tag_id: 2094
+    subject: answer.method.struck

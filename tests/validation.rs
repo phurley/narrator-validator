@@ -1120,6 +1120,10 @@ fn format_3_testimony_gated_playability_story() -> String {
     include_str!("fixtures/format-3-testimony-gated-playability-story.yaml").to_string()
 }
 
+fn format_3_7_step_story() -> String {
+    include_str!("fixtures/format-3.7-step-story.yaml").to_string()
+}
+
 #[test]
 fn fact_revealed_only_by_testimony_requires_the_question_action_not_free_at_action_zero() {
     // `fact.knife_is_present` has no `on`/`when` of its own; it is revealed
@@ -5975,4 +5979,12 @@ fn cycle_ranges_follow_the_participating_expression_not_the_first_reference() {
         range.end.column - range.start.column,
         "[[character.beta]]".len()
     );
+}
+
+#[test]
+fn format_3_7_step_story_validates_clean() {
+    let report = report(format_3_7_step_story());
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert_eq!(report.format_version.as_deref(), Some("3.7.0"));
+    assert!(report.diagnostics.is_empty());
 }
