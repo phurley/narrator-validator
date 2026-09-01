@@ -2080,9 +2080,18 @@ impl Model {
                 // through an `on_failure` effect: a prover's play-through
                 // never needs to actually fail, so this action exists
                 // solely to reach that flag, not to simulate every wrong
-                // answer.
+                // answer. A negative `points` penalty alone can never be
+                // the *only* route to a proof -- any end/step reachable
+                // after taking a penalty is also reachable (with a
+                // strictly better score) by never failing at all -- so
+                // only a genuine failure flag or a positive failure bonus
+                // makes this action worth generating. Real stories author
+                // only negative failure points on most steps, and without
+                // this narrowing the search wastes budget on a branch that
+                // resets progress, burns an attempt, and can only ever
+                // score worse than not failing.
                 let has_failure_effects =
-                    !step.on_failure.set_flags.is_empty() || step.on_failure.points != 0;
+                    !step.on_failure.set_flags.is_empty() || step.on_failure.points > 0;
                 let attempts_available = self
                     .max_attempts
                     .map_or(true, |max| state.attempts_used < max);
