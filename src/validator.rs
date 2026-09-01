@@ -3176,8 +3176,7 @@ impl<'a> Validator<'a> {
             _ => self.push(
                 Severity::Error,
                 "solution.step_time_cost_invalid",
-                "solution step `time_cost_minutes` must be a non-negative whole number"
-                    .to_string(),
+                "solution step `time_cost_minutes` must be a non-negative whole number".to_string(),
                 path,
                 Some(format!("{pointer}/time_cost_minutes")),
                 None,
@@ -3449,15 +3448,13 @@ impl<'a> Validator<'a> {
             };
             resolved.push(card_id.to_string());
             let card_range = locate_scalar(source, card_id);
-            let duplicate = !row_seen.insert(card_id.to_string())
-                || step_cards.contains_key(card_id);
+            let duplicate =
+                !row_seen.insert(card_id.to_string()) || step_cards.contains_key(card_id);
             if duplicate {
                 self.push(
                     Severity::Error,
                     "solution.step_card_duplicate",
-                    format!(
-                        "physical card `{card_id}` is placed more than once within this step"
-                    ),
+                    format!("physical card `{card_id}` is placed more than once within this step"),
                     path,
                     Some(card_pointer.clone()),
                     card_range,
@@ -4710,7 +4707,8 @@ impl<'a> Validator<'a> {
                 if let Some(tag_id) = tag_id {
                     match subject_kind {
                         Some(Kind::Answer) => {
-                            let expected = self.answer_tag_ids.get(subject.as_deref().unwrap_or(""));
+                            let expected =
+                                self.answer_tag_ids.get(subject.as_deref().unwrap_or(""));
                             if expected != Some(&tag_id) {
                                 let message = match expected {
                                     Some(expected) => format!(
@@ -9262,9 +9260,7 @@ impl<'a> Validator<'a> {
                         .iter()
                         .filter(|field| field.kind == "solution_step")
                     {
-                        if let Some(text) =
-                            mapping_path(step, field.path).and_then(Value::as_str)
-                        {
+                        if let Some(text) = mapping_path(step, field.path).and_then(Value::as_str) {
                             consumers.push(TextConsumer {
                                 owner_id: None,
                                 path: file.path.to_string(),

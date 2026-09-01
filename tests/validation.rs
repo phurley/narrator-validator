@@ -6135,7 +6135,8 @@ fn format_3_7_answer_subjects_are_knowledge_never_world_state() {
         "entities:\n  - id: entity.knife\n    description: A knife found in the study.\n    initial:\n      container: setting.study",
         "entities:\n  - id: entity.knife\n    description: A knife found in the study.\n    initial:\n      container: setting.study\n    facts:\n      - id: fact.spurious\n        statement: Nonsense.\n        when:\n          all:\n            - at: answer.method.stabbed",
     ));
-    assert!(predicate.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "subject.answer_no_world_state"
-    }));
+    assert!(predicate
+        .diagnostics
+        .iter()
+        .any(|diagnostic| { diagnostic.code == "subject.answer_no_world_state" }));
 }

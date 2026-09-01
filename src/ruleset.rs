@@ -1271,7 +1271,10 @@ mod tests {
         .expect("standard ruleset 7.0");
 
         assert_eq!(resolved.commands_yaml, version_6.commands_yaml);
-        assert_eq!(resolved.command_capabilities, version_6.command_capabilities);
+        assert_eq!(
+            resolved.command_capabilities,
+            version_6.command_capabilities
+        );
 
         let answers_yaml = resolved.answers_yaml.expect("7.0.0 declares answer decks");
         assert!(version_6.answers_yaml.is_none());
