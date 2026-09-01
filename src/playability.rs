@@ -1532,7 +1532,11 @@ impl Model {
         step_progress: &[Option<u32>],
         answerable: &Option<(u32, Vec<String>)>,
     ) -> bool {
-        if !self.ends.iter().all(|end| proofs.contains_key(&end.item.id)) {
+        if !self
+            .ends
+            .iter()
+            .all(|end| proofs.contains_key(&end.item.id))
+        {
             return false;
         }
         if self.solve_steps.is_empty() {
@@ -1540,6 +1544,122 @@ impl Model {
         } else {
             step_progress.iter().all(Option::is_some)
         }
+    }
+
+    /// Applies one candidate action to `node`, producing the successor
+    /// `Node` (or `None` if it overshoots `MAX_ELAPSED_MINUTES`). Shared by
+    /// the main search and `search_from` so both expand a state in exactly
+    /// the same way.
+    fn expand(
+        &self,
+        node: &Node,
+        action: CandidateAction,
+        auto_facts: bool,
+        auto_deductions: bool,
+    ) -> Option<Node> {
+        let mut next = node.clone();
+        next.actions += 1;
+        let before_elapsed = next.state.elapsed;
+        let before_unlocks = next.unlocks.clone();
+        let before_deductions = next.state.deductions.clone();
+        if action.kind == "route" {
+            next.route_actions += 1;
+        }
+        self.apply_action(&mut next.state, &action, &mut next.unlocks, auto_facts);
+        self.settle(
+            &mut next.state,
+            Some(&action),
+            &mut next.unlocks,
+            auto_facts,
+            auto_deductions,
+        );
+        let newly_established = next
+            .state
+            .deductions
+            .difference(&before_deductions)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        self.apply_point_awards(
+            &mut next.state,
+            &action,
+            &newly_established,
+            &mut next.unlocks,
+        );
+        if next.state.elapsed > MAX_ELAPSED_MINUTES {
+            return None;
+        }
+        let gained = next
+            .unlocks
+            .difference(&before_unlocks)
+            .cloned()
+            .collect::<Vec<_>>();
+        let elapsed = next.state.elapsed - before_elapsed;
+        if action.kind != "route" {
+            next.wait_minutes += elapsed;
+        }
+        next.steps.push(PlayabilityStep {
+            kind: action.kind.to_string(),
+            action: action.id,
+            from: action.from,
+            to: action.to,
+            elapsed_minutes: elapsed,
+            unlocks: gained,
+        });
+        Some(next)
+    }
+
+    /// A fresh, independently `MAX_EXPLORED_STATES`-bounded search for the
+    /// first (minimal-action) node reachable from `seed` satisfying `goal`.
+    /// `seed` must be a node genuinely reached by real actions (a main
+    /// search's own checkpoint, or an earlier leg's result), which is what
+    /// makes any `Some` result a genuine playthrough witness rather than a
+    /// shortcut that could manufacture a false proof.
+    fn search_from(
+        &self,
+        seed: Node,
+        auto_facts: bool,
+        auto_deductions: bool,
+        goal: impl Fn(&Node) -> bool,
+    ) -> Option<Node> {
+        if goal(&seed) {
+            return Some(seed);
+        }
+        let mut queue = BinaryHeap::new();
+        let mut best = BTreeMap::<State, Vec<(u32, u32)>>::new();
+        best.entry(self.search_state_key(&seed.state))
+            .or_default()
+            .push((seed.actions, seed.state.elapsed));
+        queue.push(QueueNode(seed));
+        let mut explored = 0usize;
+        while let Some(QueueNode(node)) = queue.pop() {
+            if explored >= MAX_EXPLORED_STATES {
+                break;
+            }
+            explored += 1;
+            if node.actions >= MAX_ACTIONS || node.state.elapsed >= MAX_ELAPSED_MINUTES {
+                continue;
+            }
+            for action in self.actions(&node.state, auto_facts, auto_deductions) {
+                let Some(next) = self.expand(&node, action, auto_facts, auto_deductions) else {
+                    continue;
+                };
+                let cost = (next.actions, next.state.elapsed);
+                let costs = best.entry(self.search_state_key(&next.state)).or_default();
+                if costs
+                    .iter()
+                    .any(|known| known.0 <= cost.0 && known.1 <= cost.1)
+                {
+                    continue;
+                }
+                costs.retain(|known| !(cost.0 <= known.0 && cost.1 <= known.1));
+                costs.push(cost);
+                if goal(&next) {
+                    return Some(next);
+                }
+                queue.push(QueueNode(next));
+            }
+        }
+        None
     }
 
     fn search(&self, auto_facts: bool, auto_deductions: bool) -> NotebookPolicyAnalysis {
@@ -1604,6 +1724,15 @@ impl Model {
         // it, not merely that its row cards are individually reachable
         // (see the ticket's conjunctive/simultaneous/sequenced note).
         let mut step_progress = vec![None::<u32>; self.solve_steps.len()];
+        // Checkpoint for each Format 3.7 step index: the first (minimal-
+        // action) reached node with `next_step == index`, i.e. genuinely
+        // ready to attempt that step. Index `solve_steps.len()` holds the
+        // checkpoint for "the whole session is concluded" (ready to check
+        // ends). Used after the main search to seed a fresh, narrower
+        // search per unresolved step instead of re-deriving the whole
+        // reachable graph from the story's beginning for each one -- see
+        // the chaining block below.
+        let mut step_nodes = vec![None::<Node>; self.solve_steps.len() + 1];
         let unsupported_policy = if !auto_facts
             && !self.facts.is_empty()
             && !self.commands.contains_key("command.claim")
@@ -1632,6 +1761,11 @@ impl Model {
             for (index, progress) in step_progress.iter_mut().enumerate() {
                 if progress.is_none() && (node.state.next_step as usize) > index {
                     *progress = Some(node.actions);
+                }
+            }
+            if let Some(checkpoint) = step_nodes.get_mut(node.state.next_step as usize) {
+                if checkpoint.is_none() {
+                    *checkpoint = Some(node.clone());
                 }
             }
             let established_solution_notes = node
@@ -1679,55 +1813,10 @@ impl Model {
                 break;
             }
             for action in self.actions(&node.state, auto_facts, auto_deductions) {
-                let mut next = node.clone();
-                next.actions += 1;
-                let before_elapsed = next.state.elapsed;
-                let before_unlocks = next.unlocks.clone();
-                let before_deductions = next.state.deductions.clone();
-                if action.kind == "route" {
-                    next.route_actions += 1;
-                }
-                self.apply_action(&mut next.state, &action, &mut next.unlocks, auto_facts);
-                self.settle(
-                    &mut next.state,
-                    Some(&action),
-                    &mut next.unlocks,
-                    auto_facts,
-                    auto_deductions,
-                );
-                let newly_established = next
-                    .state
-                    .deductions
-                    .difference(&before_deductions)
-                    .cloned()
-                    .collect::<BTreeSet<_>>();
-                self.apply_point_awards(
-                    &mut next.state,
-                    &action,
-                    &newly_established,
-                    &mut next.unlocks,
-                );
-                if next.state.elapsed > MAX_ELAPSED_MINUTES {
+                let Some(next) = self.expand(&node, action, auto_facts, auto_deductions) else {
                     bounded = true;
                     continue;
-                }
-                let gained = next
-                    .unlocks
-                    .difference(&before_unlocks)
-                    .cloned()
-                    .collect::<Vec<_>>();
-                let elapsed = next.state.elapsed - before_elapsed;
-                if action.kind != "route" {
-                    next.wait_minutes += elapsed;
-                }
-                next.steps.push(PlayabilityStep {
-                    kind: action.kind.to_string(),
-                    action: action.id,
-                    from: action.from,
-                    to: action.to,
-                    elapsed_minutes: elapsed,
-                    unlocks: gained,
-                });
+                };
                 let cost = (next.actions, next.state.elapsed);
                 let costs = best.entry(self.search_state_key(&next.state)).or_default();
                 if costs
@@ -1740,6 +1829,61 @@ impl Model {
                 costs.push(cost);
                 reached_states.push(next.state.clone());
                 queue.push(QueueNode(next));
+            }
+        }
+        // Format 3.7 multi-step Solve: the main search above shares one
+        // `MAX_EXPLORED_STATES` budget across every step and end, so a
+        // story with many mutually-irrelevant claimable facts can exhaust
+        // it long before reaching a step that's actually only a few
+        // actions past the last one it proved. Rather than re-deriving
+        // the whole reachable graph from the story's beginning again (and
+        // hitting the exact same wall), chain a fresh, independently-
+        // bounded search per unresolved step, seeded only from a
+        // checkpoint the main search (or an earlier leg of this chain)
+        // already reached through real actions. Every seed is therefore a
+        // genuine playthrough witness, so this can only turn an
+        // `Inconclusive` into a `Proved`, never manufacture a false one --
+        // and it's only attempted when `bounded` is already true, i.e. the
+        // main search's negative result was a budget truncation, not a
+        // confirmed exhaustive `NotProved`.
+        if bounded && !self.solve_steps.is_empty() {
+            let mut carry: Option<Node> = None;
+            for index in 0..self.solve_steps.len() {
+                if step_progress[index].is_some() {
+                    carry = None;
+                    continue;
+                }
+                let Some(seed) = carry.take().or_else(|| step_nodes[index].clone()) else {
+                    break;
+                };
+                let Some(found) =
+                    self.search_from(seed, auto_facts, auto_deductions, |candidate| {
+                        candidate.state.next_step as usize > index
+                    })
+                else {
+                    break;
+                };
+                step_progress[index] = Some(found.actions);
+                if step_nodes[index + 1].is_none() {
+                    step_nodes[index + 1] = Some(found.clone());
+                }
+                carry = Some(found);
+            }
+        }
+        if bounded {
+            if let Some(seed) = step_nodes[self.solve_steps.len()].clone() {
+                for end in &self.ends {
+                    if proofs.contains_key(&end.item.id) {
+                        continue;
+                    }
+                    if let Some(found) =
+                        self.search_from(seed.clone(), auto_facts, auto_deductions, |candidate| {
+                            candidate.actions > 0 && self.end_satisfied(end, &candidate.state)
+                        })
+                    {
+                        proofs.insert(end.item.id.clone(), found);
+                    }
+                }
             }
         }
         let step_answerability = self
@@ -3033,5 +3177,120 @@ mod tests {
                 .count(),
             1
         );
+    }
+
+    fn empty_node(entry: &str) -> Node {
+        Node {
+            state: State {
+                entry: entry.to_string(),
+                location: entry.to_string(),
+                elapsed: 0,
+                facts: BTreeSet::new(),
+                available_facts: BTreeSet::new(),
+                deductions: BTreeSet::new(),
+                flags: BTreeSet::new(),
+                completed: BTreeSet::new(),
+                pending: Vec::new(),
+                score: 0,
+                point_claims: BTreeMap::new(),
+                solution_solved: false,
+                next_step: 0,
+                attempts_used: 0,
+            },
+            actions: 0,
+            route_actions: 0,
+            wait_minutes: 0,
+            steps: Vec::new(),
+            unlocks: BTreeSet::new(),
+        }
+    }
+
+    #[test]
+    fn search_from_finds_a_goal_reachable_by_real_actions_from_the_seed() {
+        let mut model = Model {
+            entries: vec!["setting.a".to_string()],
+            ..Model::default()
+        };
+        model.routes.push(Route {
+            id: "route.a_b".to_string(),
+            from: "setting.a".to_string(),
+            to: "setting.b".to_string(),
+            minutes: 5,
+            bidirectional: true,
+            requirements: Vec::new(),
+        });
+        let seed = empty_node("setting.a");
+        let found = model
+            .search_from(seed, true, true, |node| node.state.location == "setting.b")
+            .expect("setting.b is one route hop away");
+        assert_eq!(found.actions, 1);
+        assert_eq!(found.state.elapsed, 5);
+    }
+
+    #[test]
+    fn search_from_returns_none_for_a_genuinely_unreachable_goal() {
+        let model = Model {
+            entries: vec!["setting.a".to_string()],
+            ..Model::default()
+        };
+        let seed = empty_node("setting.a");
+        let found = model.search_from(seed, true, true, |node| {
+            node.state.location == "setting.nowhere"
+        });
+        assert!(
+            found.is_none(),
+            "no route exists to setting.nowhere; a checkpointed sub-search must not \
+             hallucinate one"
+        );
+    }
+
+    #[test]
+    fn search_fully_settled_requires_every_end_and_step_to_already_be_proved() {
+        let mut model = Model {
+            solve_steps: vec![SolveStep {
+                item: LocatedItem {
+                    id: "step.only".to_string(),
+                    path: "case.yaml".to_string(),
+                    pointer: "/solution/steps/0".to_string(),
+                    range: None,
+                    map: Mapping::new(),
+                    owner: None,
+                },
+                rows: Vec::new(),
+                time_cost: 0,
+                on_success: StepOutcome::default(),
+                on_failure: StepOutcome::default(),
+            }],
+            ..Model::default()
+        };
+        model.ends.push(EndRule {
+            item: LocatedItem {
+                id: "end.only".to_string(),
+                path: "end_states.yaml".to_string(),
+                pointer: "/end_states/0".to_string(),
+                range: None,
+                map: Mapping::new(),
+                owner: None,
+            },
+            outcome: "won".to_string(),
+            requirements: Vec::new(),
+            minimum_points: 0,
+            at_or_after: None,
+            solution_condition: false,
+        });
+
+        let proofs = BTreeMap::<String, Node>::new();
+        let step_progress = vec![None::<u32>];
+        let answerable: Option<(u32, Vec<String>)> = None;
+        assert!(!model.search_fully_settled(&proofs, &step_progress, &answerable));
+
+        let mut proofs_with_end = BTreeMap::new();
+        proofs_with_end.insert("end.only".to_string(), empty_node("setting.a"));
+        // The end is proved but the step isn't -- still not settled.
+        assert!(!model.search_fully_settled(&proofs_with_end, &step_progress, &answerable));
+
+        let step_progress_done = vec![Some(1u32)];
+        // Now both the end and the only step are proved.
+        assert!(model.search_fully_settled(&proofs_with_end, &step_progress_done, &answerable));
     }
 }
