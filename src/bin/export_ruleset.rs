@@ -15,11 +15,17 @@ fn main() {
     let document: serde_yaml::Value =
         serde_yaml::from_str(resolved.commands_yaml).expect("standard ruleset YAML");
     let commands = document["commands"].clone();
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "id": reference.id,
         "version": reference.version,
         "commands": commands,
         "command_capabilities": resolved.command_capabilities,
     });
+    if let Some(answers_yaml) = resolved.answers_yaml {
+        let answers_document: serde_yaml::Value =
+            serde_yaml::from_str(answers_yaml).expect("answer deck YAML");
+        payload["answers"] =
+            serde_json::to_value(answers_document["answers"].clone()).expect("answer deck JSON");
+    }
     println!("{}", serde_json::to_string(&payload).expect("ruleset JSON"));
 }
