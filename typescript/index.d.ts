@@ -67,12 +67,21 @@ export interface NotebookPolicyAnalysis {
   bounded: boolean
   terminal_paths: TerminalPathAnalysis[]
   solution_answerability: SolutionAnswerability
+  step_answerability?: StepAnswerability[]
 }
 
 export interface SolutionAnswerability {
   status: PlayabilityStatus
   action_count?: number
   solution_equivalent_deductions?: string[]
+}
+
+/** Per-step answer reachability for a Format 3.7 `solution.steps` story. */
+export interface StepAnswerability {
+  id: string
+  status: PlayabilityStatus
+  action_count?: number
+  blocker?: PlayabilityBlocker
 }
 
 export interface DeductionGraphAnalysis {
