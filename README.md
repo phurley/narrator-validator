@@ -158,12 +158,22 @@ annotations. Inputs:
 ## Story format versions
 
 Every story declares a quoted semantic version at `case.format_version`.
-This validator authors format `3.6.0`. Format 3 minor and patch releases remain
+This validator authors format `3.7.0`. Format 3 minor and patch releases remain
 structurally compatible within the major format, while capabilities added by a
 minor release must be explicitly negotiated through `case.features`. The
 format-1 validation path remains for legacy repositories, while format-2
 repositories stop with focused migration
 guidance before the strict format-3 schema runs.
+
+Format 3.7 replaces the single-commit `solution.questions`/`solution.win_state`
+contract with `solution.steps`, an ordered sequence of independently-committed
+Solve steps, each with positional `n_of_m`/`ordered` rows, a time cost, and
+signed-points/flag/notes outcomes on success and failure. Graded endings are
+now expressed with ordinary `end_states.requires` conjunctions over
+step-outcome flags rather than a single selected win state. It pairs with the
+append-only standard mystery ruleset `7.0.0`, which also introduces the
+knowledge-only, no-world-state `answer.motive.*`/`answer.time.*`/
+`answer.method.*` card subjects. See [Story Format 3.7](docs/story-format-3.7.md).
 
 Format 3.6 adds an optional `case.players.description` and selectable
 `case.players.personas`, plus a `persona.`/`player.` condition-token
@@ -193,7 +203,8 @@ privacy decisions are recorded in
 [Story Format 3.3](docs/story-format-3.3.md),
 [Story Format 3.4](docs/story-format-3.4.md),
 [Story Format 3.5](docs/story-format-3.5.md),
-[Story Format 3.6](docs/story-format-3.6.md), and
+[Story Format 3.6](docs/story-format-3.6.md),
+[Story Format 3.7](docs/story-format-3.7.md), and
 [ADR 0001](docs/adr/0001-story-format-3.1-character-presence-and-command-candidates.md).
 The [ADR index](docs/adr/README.md) is the discovery point for architecture
 decisions shared by validator consumers.
@@ -234,6 +245,23 @@ satisfied state after a resolved turn is terminal, and its final score is the
 current score snapshot. See the [Format 3.4 contract](docs/story-format-3.4.md)
 for legal outcome/tier pairs, deterministic shadowing diagnostics, and the
 behavior-preserving `win_states` transition.
+
+## Format 3.7 multi-step Solve
+
+Format 3.7 replaces Format 3.3's single-commit `solution.questions` with
+`solution.steps`: each step is submitted as its own full 5×5-grid commit,
+strictly judged (`n_of_m` or `ordered` positional rows, no unexpected cards
+anywhere), with an authored time cost and signed-points/flag/notes effects on
+success and failure. A wrong step or a post-first-step blank commit restarts
+the whole solve; `solution.max_attempts` and `solution.session_timeout_minutes`
+bound retries and abandoned sessions. `solution.win_state` is removed:
+graded endings are now ordinary `end_states.requires` conjunctions over
+step-outcome flags. Ruleset `7.0.0` also adds the ruleset-owned, knowledge-only
+`answer.*` card subjects (`answer.motive.*`, `answer.time.*`,
+`answer.method.*`), bound in `deck.yaml` at a reserved tagStandard41h12 range
+(2000–2112) rather than an author-chosen tag. See the
+[Format 3.7 contract](docs/story-format-3.7.md) for the complete schema,
+legacy-mapping, and disclosure rules.
 
 ## Format 3 document and disclosure contract
 

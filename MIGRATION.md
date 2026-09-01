@@ -1,5 +1,51 @@
 # Migrating story format 2 to format 3
 
+## Moving from Format 3.6 to 3.7 multi-step Solve
+
+Update the validator, backend, authoring WASM, and story CI together, then
+set `case.format_version: "3.7.0"` and select
+`ruleset.standard_mystery@7.0.0`. Replace `solution.questions` and
+`solution.win_state` with `solution.steps`: Format 3.7 rejects the legacy
+fields outright rather than accepting a mixed contract, the same treatment
+Format 3.3 gave the culprit/weapon/location/deduction contract it replaced.
+
+Every existing single-commit solution — one command row plus up to four
+answer rows, submitted together — becomes exactly **one** `solution.steps`
+entry, in the same authored order:
+
+1. Turn each legacy `answer: [...]` (no `ordered: true`) into an `n_of_m`
+   row with `n` equal to the answer's card count — the degenerate case
+   where every listed card is required, reproducing the old "missing,
+   extra, or duplicate cards are wrong" rule exactly.
+2. Turn each legacy `ordered: true` answer into an `ordered` row with the
+   same `cards` in the same sequence.
+3. Set the step's `time_cost_minutes` to whatever `command.solve`'s
+   ruleset command-default cost already was, so authored clock behavior is
+   unchanged.
+4. Give the step an `on_success.effects` that sets one new flag (for
+   example `flag.<case>_solved`); leave `on_failure` empty so an incorrect
+   submission behaves as it always did — nothing happens, and the player
+   may retry immediately. Leave `max_attempts` and
+   `session_timeout_minutes` unset for unlimited retries, matching
+   pre-3.7 behavior.
+5. Add that new flag to the `requires` list of the end state formerly
+   named by `solution.win_state`, alongside any `requires` it may already
+   carry from the Ruleset 5 persistent-prerequisite carve-out. That
+   carve-out (a positive `minimum_points` and `requires` ban on the
+   selected win state, narrowly lifted for `requires` by Ruleset 5) is
+   removed entirely: every `end_states` entry uses the ordinary Format 3.4
+   conjunctive `requires` now, with no Solve-specific special case.
+
+See [Story Format 3.7](docs/story-format-3.7.md) for the complete row-match,
+attempts/cancel/timeout, graded-ending, and `answer.*` deck contract,
+including a full worked migration of `simple_mystery`'s three-question
+solution and a note on `quiet_kennel`'s persistent-prerequisite end state.
+
+`answer.motive.*`, `answer.time.*`, and `answer.method.*` are new
+ruleset-owned card subjects a story may optionally bind in `deck.yaml` to
+use them in facts, deductions, question topics, or new solve rows; no
+existing story is required to adopt them to migrate.
+
 ## Migrating deductions for automatic notebook policies
 
 Update validator, backend, authoring WASM, and story CI together. Current
