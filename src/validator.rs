@@ -4473,6 +4473,24 @@ impl<'a> Validator<'a> {
                         Some(reference.id),
                     ),
                     Some(definition)
+                        if definition.kind == Kind::Answer
+                            && expected.is_some_and(|kinds| !kinds.contains(&Kind::Answer))
+                            && is_world_state_reference_pointer(&reference.pointer) =>
+                    {
+                        self.push(
+                            Severity::Error,
+                            "subject.answer_no_world_state",
+                            format!(
+                                "`{}` is an `answer.*` subject; it is knowledge, never world state, and cannot be placed, owned, or otherwise positioned here",
+                                reference.id
+                            ),
+                            path,
+                            Some(reference.pointer),
+                            locate_scalar(source, &reference.id),
+                            Some(reference.id),
+                        );
+                    }
+                    Some(definition)
                         if expected.is_some_and(|kinds| !kinds.contains(&definition.kind)) =>
                     {
                         let expected = expected
@@ -8312,6 +8330,21 @@ impl<'a> Validator<'a> {
             };
             match definition {
                 Some(definition) if expected.contains(&definition.kind) => {}
+                Some(definition)
+                    if definition.kind == Kind::Answer && matches!(kind, "at" | "owns") =>
+                {
+                    self.push(
+                        Severity::Error,
+                        "subject.answer_no_world_state",
+                        format!(
+                            "`{reference}` is an `answer.*` subject; it is knowledge, never world state, and cannot be `{kind}`"
+                        ),
+                        path,
+                        Some(operand_pointer),
+                        None,
+                        Some(reference.to_string()),
+                    );
+                }
                 Some(definition) => self.push(
                     Severity::Error,
                     "reference.wrong_type",
@@ -10377,6 +10410,9 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
         Kind::Event,
         Kind::Command,
         Kind::Trigger,
+        // `answer.*` is knowledge, never world state (Format 3.7): eligible
+        // as a fact's topic, alongside every other knowledge-eligible kind.
+        Kind::Answer,
     ];
     const FACT_SOURCES: &[Kind] = &[
         Kind::Setting,
@@ -10453,6 +10489,14 @@ fn is_win_state_requirement_pointer(pointer: &str) -> bool {
                 && state_index.parse::<usize>().is_ok()
                 && requirement_index.parse::<usize>().is_ok()
     )
+}
+
+/// World-placement fields (Format 3.7's `subject.answer_no_world_state`):
+/// where an entity/character is physically located or contained, never a
+/// legal position for a knowledge-only `answer.*` subject.
+fn is_world_state_reference_pointer(pointer: &str) -> bool {
+    let field = pointer.rsplit('/').next().unwrap_or_default();
+    matches!(field, "location" | "container" | "parent" | "from" | "to")
 }
 
 fn is_entity_visibility_requirement_pointer(pointer: &str) -> bool {
