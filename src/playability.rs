@@ -13,7 +13,7 @@ use serde_yaml::{Mapping, Value};
 
 use crate::{Position, SourceFile, SourceRange};
 
-const MODEL_VERSION: u32 = 2;
+const MODEL_VERSION: u32 = 3;
 const MAX_EXPLORED_STATES: usize = 25_000;
 const MAX_ACTIONS: u32 = 96;
 const MAX_ELAPSED_MINUTES: u32 = 2 * 24 * 60;
@@ -46,6 +46,8 @@ pub struct NotebookPolicyAnalysis {
     pub bounded: bool,
     pub terminal_paths: Vec<TerminalPathAnalysis>,
     pub solution_answerability: SolutionAnswerability,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub step_answerability: Vec<StepAnswerability>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +57,19 @@ pub struct SolutionAnswerability {
     pub action_count: Option<u32>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub solution_equivalent_deductions: Vec<String>,
+}
+
+/// Per-step answer reachability for a Format 3.7 `solution.steps` story
+/// (Format 3.3-3.6's single-commit `solution_answerability` has nothing
+/// equivalent to prove per-step; this is the multi-step generalization).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StepAnswerability {
+    pub id: String,
+    pub status: PlayabilityStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub blocker: Option<PlayabilityBlocker>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,6 +172,11 @@ struct FactRule {
     on: Option<ActionPattern>,
     when: Vec<Predicate>,
     opening: bool,
+    /// Raw `about` list: subject IDs this fact establishes knowledge of.
+    about: Vec<String>,
+    /// Raw `statement` prose, scanned for `[[ref]]` roots that also count
+    /// as established subjects.
+    statement: String,
 }
 
 /// A gate synthesized from a character's `testimony[].reveals` entry: the
@@ -176,6 +196,31 @@ struct DeductionRule {
     inputs_range: Option<SourceRange>,
     dependencies: Vec<String>,
     solves: BTreeSet<String>,
+    /// Raw `conclusion` prose, scanned for `[[ref]]` roots the deduction
+    /// establishes knowledge of.
+    conclusion: String,
+}
+
+/// A Format 3.7 `solution.steps[]` entry.
+#[derive(Clone)]
+struct SolveStep {
+    item: LocatedItem,
+    time_cost: u32,
+    rows: Vec<SolveRow>,
+    on_success: StepOutcome,
+    on_failure: StepOutcome,
+}
+
+#[derive(Clone)]
+enum SolveRow {
+    NOfM { n: usize, pool: Vec<String> },
+    Ordered { cards: Vec<String> },
+}
+
+#[derive(Clone, Default)]
+struct StepOutcome {
+    set_flags: Vec<String>,
+    points: i64,
 }
 
 #[derive(Clone)]
@@ -265,6 +310,13 @@ struct Model {
     precomputed_patterns: Vec<ActionPattern>,
     elapsed_equivalence_horizon: u32,
     testimony_gates: BTreeMap<String, TestimonyGate>,
+    /// Format 3.7 `solution.steps` (parallel to the legacy
+    /// `solve_action`/`solution_target` path, which stays untouched).
+    solve_steps: Vec<SolveStep>,
+    max_attempts: Option<u32>,
+    /// Card subject ID (including `answer.*`) -> the IDs of facts/
+    /// deductions that establish knowledge of it.
+    subject_witnesses: BTreeMap<String, BTreeSet<String>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -287,6 +339,12 @@ struct State {
     score: u64,
     point_claims: BTreeMap<String, u64>,
     solution_solved: bool,
+    /// Index of the next Format 3.7 `solution.steps` entry to commit.
+    /// Unused (stays 0) for the legacy single-commit path.
+    next_step: u8,
+    /// Failed full-sequence attempts consumed so far. Only meaningful when
+    /// `Model::max_attempts` is authored.
+    attempts_used: u32,
 }
 
 #[derive(Clone)]
@@ -423,6 +481,8 @@ impl Model {
                             }
                             action
                         });
+                    model.max_attempts = u64_field(solution, "max_attempts").map(|value| value as u32);
+                    model.read_solution_steps(file, solution);
                 }
                 if let Some(ruleset) = map(case, "ruleset") {
                     if let (Some(id), Some(version)) =
@@ -634,6 +694,8 @@ impl Model {
                 let when = self.predicates(file, &item.pointer, &item.map);
                 let opening =
                     field(&item.map, "on").is_none() && field(&item.map, "when").is_none();
+                let about = strings(field(&item.map, "about"));
+                let statement = string(&item.map, "statement").unwrap_or("").to_string();
                 self.facts.insert(
                     item.id.clone(),
                     FactRule {
@@ -641,6 +703,8 @@ impl Model {
                         on,
                         when,
                         opening,
+                        about,
+                        statement,
                     },
                 );
             }
@@ -668,6 +732,7 @@ impl Model {
                 })
                 .unwrap_or_default();
             self.read_points(file, &item, "deduction");
+            let conclusion = string(&item.map, "conclusion").unwrap_or("").to_string();
             self.deductions.insert(
                 item.id.clone(),
                 DeductionRule {
@@ -676,9 +741,57 @@ impl Model {
                     inputs_range,
                     dependencies,
                     solves,
+                    conclusion,
                 },
             );
         }
+    }
+
+    /// Format 3.7's `solution.steps` -- a parallel path to the legacy
+    /// `solve_action`/`solution_target` fields above, which stay untouched.
+    fn read_solution_steps(&mut self, file: &SourceFile, solution: &Mapping) {
+        let Some(steps) = field(solution, "steps").and_then(Value::as_sequence) else {
+            return;
+        };
+        for (index, step) in steps.iter().enumerate() {
+            let Some(item) = located_at(file, step, format!("/solution/steps/{index}"), None)
+            else {
+                continue;
+            };
+            let time_cost = u64_field(&item.map, "time_cost_minutes").unwrap_or(0) as u32;
+            let rows = self.read_solve_rows(&item.map);
+            let on_success = read_solve_step_outcome(&item.map, "on_success");
+            let on_failure = read_solve_step_outcome(&item.map, "on_failure");
+            self.solve_steps.push(SolveStep {
+                item,
+                time_cost,
+                rows,
+                on_success,
+                on_failure,
+            });
+        }
+    }
+
+    fn read_solve_rows(&mut self, step: &Mapping) -> Vec<SolveRow> {
+        let mut rows = Vec::new();
+        let Some(raw_rows) = field(step, "rows").and_then(Value::as_sequence) else {
+            return rows;
+        };
+        for row in raw_rows {
+            let Some(row) = row.as_mapping() else {
+                continue;
+            };
+            let cards = strings(field(row, "cards"));
+            match string(row, "match") {
+                Some("n_of_m") => {
+                    let n = u64_field(row, "n").unwrap_or(cards.len() as u64) as usize;
+                    rows.push(SolveRow::NOfM { n, pool: cards });
+                }
+                Some("ordered") => rows.push(SolveRow::Ordered { cards }),
+                _ => {}
+            }
+        }
+        rows
     }
 
     fn read_triggers(&mut self, file: &SourceFile, values: &[Value]) {
@@ -712,6 +825,8 @@ impl Model {
                     let pointer = format!("{}/facts/{fact_index}", item.pointer);
                     if let Some(fact) = located_at(file, value, pointer, Some(item.id.clone())) {
                         facts.push(fact.id.clone());
+                        let about = strings(field(&fact.map, "about"));
+                        let statement = string(&fact.map, "statement").unwrap_or("").to_string();
                         self.facts.insert(
                             fact.id.clone(),
                             FactRule {
@@ -719,6 +834,8 @@ impl Model {
                                 on: None,
                                 when: Vec::new(),
                                 opening: false,
+                                about,
+                                statement,
                             },
                         );
                     }
@@ -1306,6 +1423,8 @@ impl Model {
                 score: 0,
                 point_claims: BTreeMap::new(),
                 solution_solved: false,
+                next_step: 0,
+                attempts_used: 0,
             };
             let mut unlocks = state.facts.union(&state.available_facts).cloned().collect();
             self.settle(&mut state, None, &mut unlocks, auto_facts, auto_deductions);
@@ -2137,6 +2256,8 @@ mod elapsed_equivalence_tests {
             score: 0,
             point_claims: BTreeMap::new(),
             solution_solved: false,
+            next_step: 0,
+            attempts_used: 0,
         }
     }
 
@@ -2153,6 +2274,8 @@ mod elapsed_equivalence_tests {
                 on: None,
                 when: vec![Predicate::TimeAfter(70)],
                 opening: false,
+                about: Vec::new(),
+                statement: String::new(),
             },
         );
         model.triggers.insert(
@@ -2205,6 +2328,29 @@ mod elapsed_equivalence_tests {
             model.search_state_key(&state(2_000, Some(2_006)))
         );
     }
+}
+
+fn read_solve_step_outcome(step: &Mapping, key: &str) -> StepOutcome {
+    let Some(outcome) = field(step, key).and_then(Value::as_mapping) else {
+        return StepOutcome::default();
+    };
+    let mut set_flags = Vec::new();
+    if let Some(effects) = field(outcome, "effects").and_then(Value::as_sequence) {
+        for effect in effects {
+            let Some(effect) = effect.as_mapping() else {
+                continue;
+            };
+            if string(effect, "operation") == Some("set_flag")
+                && bool_field(effect, "value") == Some(true)
+            {
+                if let Some(flag) = string(effect, "flag") {
+                    set_flags.push(flag.to_string());
+                }
+            }
+        }
+    }
+    let points = field(outcome, "points").and_then(Value::as_i64).unwrap_or(0);
+    StepOutcome { set_flags, points }
 }
 
 fn pattern_matches(expected: &ActionPattern, actual: &ActionPattern) -> bool {
@@ -2367,6 +2513,8 @@ mod tests {
             score: 0,
             point_claims: BTreeMap::new(),
             solution_solved: false,
+            next_step: 0,
+            attempts_used: 0,
         };
 
         assert!(model
