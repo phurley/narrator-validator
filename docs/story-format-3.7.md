@@ -269,16 +269,23 @@ catalog is merged into the story's definitions automatically (see
 implementation adds alongside it), never authored by the story itself.
 Ruleset `7.0.0` defines three generic decks:
 
-- `answer.motive.*` — coarse motive buckets (`greed`, `jealousy`,
-  `revenge`, `fear`, `desperation`, `love`, `ambition`, `secrecy`).
-- `answer.time.*` — coarse time-of-incident buckets (`early_evening`,
-  `late_evening`, `midnight`, `past_midnight`, `dawn`). `answer.time.*`
+- `answer.motive.*` — 10 coarse motive buckets (`greed`, `jealousy`,
+  `revenge`, `fear_of_exposure`, `self_preservation`, `fear_for_another`,
+  `love`, `ambition`, `desperation`, `loyalty`).
+- `answer.time.*` — 8 coarse time-of-incident buckets (`dawn`, `morning`,
+  `midday`, `afternoon`, `evening`, `night`, `after_midnight`,
+  `before_dawn`). `answer.time.*`
   cards may also answer ordinary mid-game `command.question` topics, not
   only solve rows — a player can ask a witness "was it before or after
   midnight?" the same way they ask about a character, setting, or event.
-- `answer.method.*` — coarse method buckets (`blunt_force`, `bladed`,
-  `poison`, `strangulation`, `firearm`, `fall`, `drowning`, `arson`,
-  `asphyxiation`, `exposure`).
+- `answer.method.*` — 11 coarse method buckets (`struck`, `stabbed`,
+  `shot`, `poisoned`, `strangled`, `drowned`, `fell`, `fire`, `crushed`,
+  `neglect`, `not_killed`).
+
+The complete catalog — every card's display `name`, its description, its
+assigned `tag_id`, and the sizing and coverage rationale behind each deck —
+is [Answer-deck vocabulary](answer-deck-vocabulary.md), which is the
+authoritative reference the ruleset `7.0.0` implementation is built from.
 
 Every `answer.*` ID carries a ruleset-supplied canonical display `name`
 (the same role `character.name`/`setting.name` play), so
@@ -319,7 +326,7 @@ subject to a tag in that range
 (`deck.tag_id_reserved_ruleset_answer_deck`), and an `answer.*` subject's
 `deck.yaml` entry must use exactly its ruleset-assigned `tag_id`
 (`deck.answer_tag_id_mismatch` if it names any other value). Ruleset
-7.0.0's 23 cards occupy tag IDs 2090–2112; IDs 2000–2089 remain reserved,
+7.0.0's 29 cards occupy tag IDs 2084–2112; IDs 2000–2083 remain reserved,
 unassigned headroom for future ruleset-owned answer decks, consistent with
 the existing rule that a released ruleset version's assignments are
 append-only and immutable once shipped.
@@ -327,8 +334,8 @@ append-only and immutable once shipped.
 ```yaml
 # deck.yaml
 cards:
-  - { tag_id: 2112, subject: answer.motive.jealousy }
-  - { tag_id: 2100, subject: answer.method.poison }
+  - { tag_id: 2111, subject: answer.motive.jealousy }
+  - { tag_id: 2091, subject: answer.method.poisoned }
 ```
 
 ## Legacy compatibility

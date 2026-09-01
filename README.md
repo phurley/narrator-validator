@@ -261,7 +261,9 @@ step-outcome flags. Ruleset `7.0.0` also adds the ruleset-owned, knowledge-only
 `answer.method.*`), bound in `deck.yaml` at a reserved tagStandard41h12 range
 (2000–2112) rather than an author-chosen tag. See the
 [Format 3.7 contract](docs/story-format-3.7.md) for the complete schema,
-legacy-mapping, and disclosure rules.
+legacy-mapping, and disclosure rules, and
+[Answer-deck vocabulary](docs/answer-deck-vocabulary.md) for the canonical
+card list, display names, and tag assignments of the three answer decks.
 
 ## Format 3 document and disclosure contract
 
