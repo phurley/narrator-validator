@@ -140,6 +140,16 @@ pub const CONSUMER_FIELDS: &[ConsumerField] = &[
         disclosure: PUBLIC,
     },
     ConsumerField {
+        kind: "persona",
+        path: "description",
+        disclosure: PUBLIC,
+    },
+    ConsumerField {
+        kind: "persona",
+        path: "narrator_guidance",
+        disclosure: PRIVATE,
+    },
+    ConsumerField {
         kind: "setting",
         path: "name",
         disclosure: PUBLIC,

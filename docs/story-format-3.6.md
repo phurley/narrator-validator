@@ -57,6 +57,12 @@ mapping with:
 - `narrator_guidance` (optional) — private narrator-only guidance, following
   the same disclosure boundary as character `narrator_guidance`.
 
+Both persona prose fields are reference-text consumers under
+`reference_text_v1`: `description` is baseline player-safe and
+`narrator_guidance` is private narrator-only. Their `[[...]]` expressions are
+resolved at compile time with the matching disclosure boundary, including
+unknown-ID and cycle diagnostics.
+
 `personas` must not contain more entries than `case.players.max`
 (`case.players_personas_max`); a story cannot offer more roles than it can
 seat. There is no minimum: a story may declare zero, one, or many personas
