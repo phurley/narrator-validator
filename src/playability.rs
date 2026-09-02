@@ -1290,8 +1290,11 @@ impl Model {
                 // one location `State` tracks (`state.location`), exactly
                 // like the route-move machinery does.
                 Some("move")
-                    if string(map, "setting").is_some_and(|setting| !setting.starts_with("param"))
-                        && strings(field(map, "subjects")).iter().any(|s| s == "player") =>
+                    if string(map, "setting")
+                        .is_some_and(|setting| !setting.starts_with("param"))
+                        && strings(field(map, "subjects"))
+                            .iter()
+                            .any(|s| s == "player") =>
                 {
                     if let Some(setting) = string(map, "setting") {
                         result.push(Effect::Move(setting.to_string()));
