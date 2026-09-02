@@ -381,6 +381,39 @@ fn queue_key(node: &Node) -> (u32, u32, &State) {
     (node.actions, node.state.elapsed, &node.state)
 }
 
+/// Queue wrapper used only by `search_from`'s per-step chaining legs. Orders
+/// the heap by `(h, actions, elapsed, state)` instead of `search`'s plain
+/// `(actions, elapsed, state)` -- `h` is a goal-distance estimate computed
+/// once at push time (see `Model::step_shortfall`). Deliberately a separate
+/// type from `QueueNode` / `queue_key`, which the main `search` function
+/// relies on for its early-exit "first pop is minimal" invariant and must
+/// stay untouched: `search_from`'s own soundness doesn't depend on
+/// exploration order (see the comment on `search_from` itself), so a
+/// goal-aware order is safe here without being admissible.
+#[derive(Clone)]
+struct HeuristicQueueNode(Node, u32);
+
+impl PartialEq for HeuristicQueueNode {
+    fn eq(&self, other: &Self) -> bool {
+        heuristic_queue_key(&self.0, self.1) == heuristic_queue_key(&other.0, other.1)
+    }
+}
+impl Eq for HeuristicQueueNode {}
+impl PartialOrd for HeuristicQueueNode {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+impl Ord for HeuristicQueueNode {
+    fn cmp(&self, other: &Self) -> Ordering {
+        heuristic_queue_key(&other.0, other.1).cmp(&heuristic_queue_key(&self.0, self.1))
+    }
+}
+
+fn heuristic_queue_key(node: &Node, h: u32) -> (u32, u32, u32, &State) {
+    (h, node.actions, node.state.elapsed, &node.state)
+}
+
 #[derive(Clone)]
 struct CandidateAction {
     kind: &'static str,
@@ -1333,6 +1366,44 @@ impl Model {
         }
     }
 
+    /// Goal-distance estimate for `search_from`'s per-step chaining legs:
+    /// the sum, over `solve_steps[index].rows`, of each row's shortfall --
+    /// how far that row still is from `row_satisfied`. Built from the exact
+    /// same `subject_known` calls `row_satisfied` uses, so the heuristic and
+    /// the actual goal check can never disagree about what "satisfied"
+    /// means. Not admissible (a claim can satisfy more than one row's
+    /// shortfall at once, or a deduction can cost more than one action), but
+    /// `search_from` doesn't require admissibility -- see its own doc
+    /// comment.
+    fn step_shortfall(&self, state: &State, index: usize) -> u32 {
+        let Some(step) = self.solve_steps.get(index) else {
+            return 0;
+        };
+        step.rows
+            .iter()
+            .map(|row| self.row_shortfall(row, state))
+            .sum()
+    }
+
+    /// How far `row` still is from `row_satisfied`: the count of pool
+    /// members still missing (for `NOfM`, floored at the `n` still needed)
+    /// or of cards not yet known (for `Ordered`).
+    fn row_shortfall(&self, row: &SolveRow, state: &State) -> u32 {
+        match row {
+            SolveRow::NOfM { n, pool } => {
+                let known = pool
+                    .iter()
+                    .filter(|subject| self.subject_known(state, subject))
+                    .count();
+                n.saturating_sub(known) as u32
+            }
+            SolveRow::Ordered { cards } => cards
+                .iter()
+                .filter(|subject| !self.subject_known(state, subject))
+                .count() as u32,
+        }
+    }
+
     /// True if `subject` could ever be established as known by *some*
     /// play-through, independent of the current state -- the static tier
     /// used to detect a hard-unlearnable answer (`subject_witnesses` has no
@@ -1619,6 +1690,7 @@ impl Model {
         seed: Node,
         auto_facts: bool,
         auto_deductions: bool,
+        heuristic: impl Fn(&Node) -> u32,
         goal: impl Fn(&Node) -> bool,
     ) -> Option<Node> {
         if goal(&seed) {
@@ -1629,9 +1701,10 @@ impl Model {
         best.entry(self.search_state_key(&seed.state))
             .or_default()
             .push((seed.actions, seed.state.elapsed));
-        queue.push(QueueNode(seed));
+        let seed_h = heuristic(&seed);
+        queue.push(HeuristicQueueNode(seed, seed_h));
         let mut explored = 0usize;
-        while let Some(QueueNode(node)) = queue.pop() {
+        while let Some(HeuristicQueueNode(node, _)) = queue.pop() {
             if explored >= MAX_EXPLORED_STATES {
                 break;
             }
@@ -1656,7 +1729,8 @@ impl Model {
                 if goal(&next) {
                     return Some(next);
                 }
-                queue.push(QueueNode(next));
+                let next_h = heuristic(&next);
+                queue.push(HeuristicQueueNode(next, next_h));
             }
         }
         None
@@ -1874,11 +1948,13 @@ impl Model {
                 let Some(seed) = carry.take().or_else(|| step_nodes[index].clone()) else {
                     break;
                 };
-                let Some(found) =
-                    self.search_from(seed, auto_facts, auto_deductions, |candidate| {
-                        candidate.state.next_step as usize > index
-                    })
-                else {
+                let Some(found) = self.search_from(
+                    seed,
+                    auto_facts,
+                    auto_deductions,
+                    |node| self.step_shortfall(&node.state, index),
+                    |candidate| candidate.state.next_step as usize > index,
+                ) else {
                     break;
                 };
                 step_progress[index] = Some(found.actions);
@@ -1915,14 +1991,18 @@ impl Model {
                     continue;
                 };
                 let fail_id = &step_fail_action_ids[index];
-                if let Some(found) =
-                    self.search_from(seed, auto_facts, auto_deductions, |candidate| {
+                if let Some(found) = self.search_from(
+                    seed,
+                    auto_facts,
+                    auto_deductions,
+                    |_node| 0,
+                    |candidate| {
                         candidate
                             .steps
                             .last()
                             .is_some_and(|last| &last.action == fail_id)
-                    })
-                {
+                    },
+                ) {
                     step_fail_nodes[index] = Some(found);
                 }
             }
@@ -1952,8 +2032,12 @@ impl Model {
                     .chain(step_fail_nodes.iter().cloned())
                     .flatten();
                 for seed in seeds {
-                    let Some(found) =
-                        self.search_from(seed, auto_facts, auto_deductions, |candidate| {
+                    let Some(found) = self.search_from(
+                        seed,
+                        auto_facts,
+                        auto_deductions,
+                        |_node| 0,
+                        |candidate| {
                             // `concluded_via_failure`'s `next_step == 0` can
                             // re-enter a solve attempt (the model doesn't
                             // forbid retrying after a reset while attempts
@@ -1970,8 +2054,8 @@ impl Model {
                             candidate.actions > 0
                                 && solve_session_concluded
                                 && self.end_satisfied(end, &candidate.state)
-                        })
-                    else {
+                        },
+                    ) else {
                         continue;
                     };
                     proofs.insert(end.item.id.clone(), found);
@@ -3314,7 +3398,13 @@ mod tests {
         });
         let seed = empty_node("setting.a");
         let found = model
-            .search_from(seed, true, true, |node| node.state.location == "setting.b")
+            .search_from(
+                seed,
+                true,
+                true,
+                |_node| 0,
+                |node| node.state.location == "setting.b",
+            )
             .expect("setting.b is one route hop away");
         assert_eq!(found.actions, 1);
         assert_eq!(found.state.elapsed, 5);
@@ -3327,9 +3417,13 @@ mod tests {
             ..Model::default()
         };
         let seed = empty_node("setting.a");
-        let found = model.search_from(seed, true, true, |node| {
-            node.state.location == "setting.nowhere"
-        });
+        let found = model.search_from(
+            seed,
+            true,
+            true,
+            |_node| 0,
+            |node| node.state.location == "setting.nowhere",
+        );
         assert!(
             found.is_none(),
             "no route exists to setting.nowhere; a checkpointed sub-search must not \
