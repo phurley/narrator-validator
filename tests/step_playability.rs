@@ -353,6 +353,47 @@ fn unrelated_unsupported_construct_demotes_an_otherwise_unreachable_step_answer_
     assert_eq!(end.status, PlayabilityStatus::Inconclusive, "{end:#?}");
 }
 
+/// Regression for narrator-validator#88: an unsupported construct that
+/// exists somewhere in the story but that the witness never touches must
+/// not demote an otherwise-genuine Proved result. `entity.diary`'s nested
+/// container is entirely unrelated to `step.name_motive`/`end.solved`'s
+/// witness (a plain fact learnable from the outset) -- the nested-
+/// container note is never on that witness's path, so it must stay
+/// Proved, exactly as it would if `entity.diary` didn't exist at all.
+#[test]
+fn irrelevant_unsupported_construct_does_not_demote_a_genuine_witness() {
+    let story = base_story()
+        .replace(
+            "  - id: setting.foyer\n    type: room\n    description: The entry foyer.\n    parent: setting.world",
+            "  - id: setting.foyer\n    type: room\n    description: The entry foyer.\n    parent: setting.world\n    facts:\n      - id: fact.motive_hint\n        statement: A jealous rage seems to explain everything.\n        about: [answer.motive.jealousy]",
+        )
+        .replace(
+            "entities: []",
+            "entities:\n  - id: entity.study_desk\n    description: A heavy study desk.\n  - id: entity.diary\n    description: A locked diary.\n    initial:\n      container: entity.study_desk",
+        );
+    let report = report(story);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    let policy = default_policy(&report);
+
+    let step = policy
+        .step_answerability
+        .iter()
+        .find(|step| step.id == "step.name_motive")
+        .expect("step.name_motive answerability");
+    assert_eq!(
+        step.status,
+        PlayabilityStatus::Proved,
+        "an unrelated unsupported nested container must not demote a genuine witness: {step:#?}"
+    );
+
+    let end = policy
+        .terminal_paths
+        .iter()
+        .find(|end| end.id == "end.solved")
+        .expect("end.solved terminal path");
+    assert_eq!(end.status, PlayabilityStatus::Proved, "{end:#?}");
+}
+
 /// Regression for the checkpointed per-step search (narrator-validator#83):
 /// a second step whose answer genuinely has no witness anywhere in the
 /// story must stay `NotProved` even though the first step -- the
