@@ -5772,6 +5772,106 @@ fn reference_text_resolves_multihop_nested_facts_and_testimony() {
 }
 
 #[test]
+fn reference_text_resolves_case_players_description() {
+    let source = format_3_6_players_story().replace(
+        "description: One of you is secretly the detective; the rest play witnesses.",
+        "description: \"One of you must find [[character.victim.description]]\"",
+    );
+    let players_report = report(source);
+    assert!(players_report.valid, "{:#?}", players_report.diagnostics);
+    let description = players_report
+        .reference_text
+        .iter()
+        .find(|field| field.pointer == "/case/players/description")
+        .expect("players.description was resolved");
+    assert_eq!(
+        description.resolved,
+        "One of you must find The victim at the center of the mystery."
+    );
+    assert_eq!(description.provenance.len(), 1);
+    assert_eq!(
+        description.provenance[0].expression.target_id,
+        "character.victim"
+    );
+    assert_eq!(description.provenance[0].resolved_path, "description");
+}
+
+#[test]
+fn reference_text_reports_unknown_id_in_case_players_description() {
+    let source = format_3_6_players_story().replace(
+        "description: One of you is secretly the detective; the rest play witnesses.",
+        "description: \"One of you must find [[character.unknown]]\"",
+    );
+    let diagnostic = report(source)
+        .diagnostics
+        .into_iter()
+        .find(|diagnostic| diagnostic.code == "reference_text.unknown_id")
+        .expect("unknown-id diagnostic for players.description");
+    assert_eq!(
+        diagnostic.pointer.as_deref(),
+        Some("/case/players/description")
+    );
+}
+
+#[test]
+fn reference_text_reports_disclosure_violation_in_case_players_description() {
+    let source = format_3_6_players_story()
+        .replace(
+            "  - id: character.victim\n    description: The victim at the center of the mystery.\n",
+            "  - id: character.victim\n    description: The victim at the center of the mystery.\n    narrator_guidance:\n      secret: The victim knew the culprit.\n",
+        )
+        .replace(
+            "description: One of you is secretly the detective; the rest play witnesses.",
+            "description: \"[[character.victim.narrator_guidance.secret]]\"",
+        );
+    let diagnostic = report(source)
+        .diagnostics
+        .into_iter()
+        .find(|diagnostic| diagnostic.code == "reference_text.disclosure")
+        .expect("disclosure diagnostic for players.description");
+    assert_eq!(
+        diagnostic.pointer.as_deref(),
+        Some("/case/players/description")
+    );
+}
+
+#[test]
+fn reference_text_reports_cycle_reached_from_case_players_description() {
+    let source = format_3_6_players_story()
+        .replace(
+            "  - id: character.victim\n    description: The victim at the center of the mystery.\n",
+            "  - id: character.victim\n    description: '[[character.culprit.description]]'\n",
+        )
+        .replace(
+            "  - id: character.culprit\n    description: A suspect with a carefully guarded secret.\n",
+            "  - id: character.culprit\n    description: '[[character.victim.description]]'\n",
+        )
+        .replace(
+            "description: One of you is secretly the detective; the rest play witnesses.",
+            "description: \"[[character.victim.description]]\"",
+        );
+    let cycle_report = report(source);
+    assert!(
+        cycle_report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "reference_text.cycle"),
+        "expected a cycle diagnostic: {:#?}",
+        cycle_report.diagnostics
+    );
+    // players.description consumes a reference into the cyclic pair, so its
+    // resolution must fail rather than silently succeed with partial text.
+    assert!(
+        !cycle_report
+            .reference_text
+            .iter()
+            .any(|field| field.pointer == "/case/players/description"),
+        "players.description should not resolve when its reference is cyclic: {:#?}",
+        cycle_report.reference_text
+    );
+}
+
+#[test]
 fn reference_text_reports_unknown_missing_non_string_empty_and_malformed_targets() {
     let cases = [
         ("[[character.unknown]]", "reference_text.unknown_id"),

@@ -32,6 +32,13 @@ them under an earlier format produces a versioned-feature diagnostic naming
 fields, `condition.player_format_incompatible` for the new persistent
 predicate) rather than a generic unknown-field error.
 
+`case.players.description` is a baseline player-safe reference-text consumer
+(registered in `CONSUMER_FIELDS` as `case:players.description`), exactly like
+`case.title`, `case.premise`, and `case.opening`: authored `[[...]]`
+expressions in it are resolved at compile time under `reference_text_v1` and
+receive the same unknown-id, disclosure, and cycle diagnostics as any other
+case narrative field.
+
 ## `case.players.personas`
 
 `personas` is an optional, non-empty sequence nested in `case.yaml` under

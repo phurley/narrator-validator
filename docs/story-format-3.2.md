@@ -69,7 +69,8 @@ machine-readable registry. `reference_text_metadata_json()` and the browser
 | `testimony` | `text` | `text` |
 | `win` | `name` | `name`, `text` |
 
-Reference-aware consumers are case `title`, `premise`, and `opening`; setting,
+Reference-aware consumers are case `title`, `premise`, `opening`, and
+`players.description`; setting,
 character, entity, command, trigger, and flag narrative fields; event `summary`;
 fact prose; deduction `conclusion`; character portrayal and testimony text;
 command parameter descriptions; narrative command/trigger effect text; win
