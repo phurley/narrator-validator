@@ -2390,46 +2390,33 @@ impl Model {
             && self.end_satisfied(end, &candidate.state)
     }
 
-    /// Like `search_from`, but resolves every still-unresolved end in
-    /// `ends` from one `seed`, instead of one fixed goal at a time.
+    /// Resolves every still-unresolved end in `ends` from one `seed`, one
+    /// end at a time, in `ends` order -- functionally identical to a
+    /// dedicated `search_from` call per end (each gets its own fresh
+    /// priority queue and dominance map, so one end's exploration can never
+    /// starve another's), just consolidated into one function so the
+    /// call site doesn't need its own per-end loop.
     ///
-    /// Each end gets its own independent best-first priority queue --
-    /// exactly the ordering a dedicated `search_from` call for that end
-    /// alone would use -- run in ROUND-ROBIN lockstep (one pop per
-    /// still-active end per round) so no single end's queue can starve
-    /// another's turn. A single shared `min(shortfall)` priority, and a
-    /// single shared queue fanning out per-end priorities into one combined
-    /// pop order, were both tried and reverted during narrator-validator#99's
-    /// development: either way, letting different ends' priority *values*
-    /// compete directly for the front of one frontier lets a permanently
-    /// unreachable end -- one gated behind a `Predicate::Never` unsupported
-    /// construct still reports a small, never-quite-zero shortfall that
-    /// looks perpetually "almost there" -- dominate essentially every pop
-    /// and starve a genuinely reachable end's own convergence;
-    /// wrong_floor's `end.elias_moves_sam` regressed from Proved to
-    /// Inconclusive under both. Round-robin turn-taking never compares one
-    /// end's priority number against another's, so it can't be misled that
-    /// way, and it reproduces a dedicated `search_from`'s exact behavior
-    /// whenever only one end remains (the common case).
-    ///
-    /// The dominance-pruning `best` map is shared across every end (a
-    /// state's (actions, elapsed) cost is objectively the same regardless
-    /// of which end is being sought, so pruning by it is end-independent),
-    /// and `expanded` ensures a given (state, cost) is only ever run
-    /// through `actions`/`expand` once, no matter how many ends' queues
-    /// independently discover it -- when it IS expanded, every successor is
-    /// pushed into every remaining end's own queue at that same moment
-    /// (with that end's own shortfall as priority), so a later duplicate
-    /// pop of an already-expanded state costs nothing beyond a cheap set
-    /// lookup. This is what shares the actually-expensive part
-    /// (`actions`/`expand`) across ends without sharing exploration order --
-    /// where the real per-(seed, end) redundancy the architect identified
-    /// lives. `explored` (states actually run through `actions`/`expand`)
-    /// is bounded by `budget` in total across every end, same spirit as
-    /// `search_from`. Soundness is unchanged: every entry in the returned
-    /// map is a node genuinely reached from `seed` via real actions
-    /// (`expand`) that independently passes `end_recovery_satisfied` for
-    /// that end.
+    /// narrator-validator#99 tried three designs that shared the actual
+    /// exploration (not just the loop) across ends sharing a seed -- a
+    /// combined `min(shortfall)` priority, a single queue fanning out
+    /// per-end priorities, and a round-robin of independent per-end queues
+    /// sharing only the `actions`/`expand` computation -- all three saved
+    /// real cost on `wrong_floor` (3 of its 5 ends are permanently blocked
+    /// by an unsupported-testimony construct, so those legs would otherwise
+    /// each independently saturate their budget), but all three also
+    /// regressed `wrong_floor`'s `end.elias_moves_sam` from Proved to
+    /// Inconclusive under at least one notebook policy: dividing a shared
+    /// exploration budget across several permanently-unreachable ends and
+    /// one genuinely-reachable one starves the reachable one of the
+    /// (larger) dedicated exploration a standalone search needs to
+    /// converge, no matter how fairly the sharing scheme divides turns.
+    /// Given the ticket's explicit, non-negotiable "byte-identical to
+    /// baseline" requirement, this per-end loop keeps each end's search
+    /// fully independent and gives up the cross-end sharing; the only
+    /// change from pre-#99 is the caller passing `LEG_MAX_EXPLORED_STATES`
+    /// instead of the old fixed 25,000 -- see this function's caller and
+    /// narrator-validator#99's final report for the diagnosis.
     fn search_from_multi_end(
         &self,
         seed: Node,
@@ -2439,101 +2426,18 @@ impl Model {
         ends: &[&EndRule],
     ) -> BTreeMap<String, Node> {
         let mut found = BTreeMap::<String, Node>::new();
-        let mut remaining = Vec::new();
         for end in ends {
-            if self.end_recovery_satisfied(end, &seed) {
-                found.insert(end.item.id.clone(), seed.clone());
-            } else {
-                remaining.push(*end);
-            }
-        }
-        if remaining.is_empty() {
-            return found;
-        }
-        let mut queues = Vec::with_capacity(remaining.len());
-        for end in &remaining {
-            let mut queue = BinaryHeap::new();
-            let h = self.end_shortfall(end, &seed.state);
-            queue.push(HeuristicQueueNode(seed.clone(), h));
-            queues.push(queue);
-        }
-        let mut best = BTreeMap::<State, Vec<(u32, u32)>>::new();
-        best.entry(self.search_state_key(&seed.state))
-            .or_default()
-            .push((seed.actions, seed.state.elapsed));
-        let mut expanded = BTreeSet::<(State, u32, u32)>::new();
-        let mut explored = 0usize;
-        // A round-robin round: one pop attempt per still-unresolved end.
-        // An end's queue coming up empty on a given round does NOT retire
-        // it -- another end's turn later in this same round (or a later
-        // round) can still push fresh entries into it via the multi-push
-        // below, so only a round in which *no* end anywhere made any
-        // progress (`any_progress` stays false) proves the frontier is
-        // truly, permanently exhausted.
-        loop {
-            if explored >= budget || remaining.iter().all(|end| found.contains_key(&end.item.id))
-            {
-                break;
-            }
-            let mut any_progress = false;
-            for index in 0..remaining.len() {
-                if found.contains_key(&remaining[index].item.id) {
-                    continue;
-                }
-                if explored >= budget {
-                    break;
-                }
-                let Some(HeuristicQueueNode(node, _)) = queues[index].pop() else {
-                    continue;
-                };
-                any_progress = true;
-                let expand_key = (
-                    self.search_state_key(&node.state),
-                    node.actions,
-                    node.state.elapsed,
-                );
-                if !expanded.insert(expand_key) {
-                    // Already expanded via some end's earlier turn -- its
-                    // successors were already pushed into every remaining
-                    // end's own queue at that moment, so this duplicate pop
-                    // needs no further work.
-                    continue;
-                }
-                explored += 1;
-                if node.actions >= MAX_ACTIONS || node.state.elapsed >= MAX_ELAPSED_MINUTES {
-                    continue;
-                }
-                for action in self.actions(&node.state, auto_facts, auto_deductions) {
-                    let Some(next) = self.expand(&node, action, auto_facts, auto_deductions)
-                    else {
-                        continue;
-                    };
-                    let cost = (next.actions, next.state.elapsed);
-                    let costs = best.entry(self.search_state_key(&next.state)).or_default();
-                    if costs
-                        .iter()
-                        .any(|known| known.0 <= cost.0 && known.1 <= cost.1)
-                    {
-                        continue;
-                    }
-                    costs.retain(|known| !(cost.0 <= known.0 && cost.1 <= known.1));
-                    costs.push(cost);
-                    for (other_index, end) in remaining.iter().enumerate() {
-                        if found.contains_key(&end.item.id) {
-                            continue;
-                        }
-                        if self.end_recovery_satisfied(end, &next) {
-                            found.insert(end.item.id.clone(), next.clone());
-                            continue;
-                        }
-                        let h = self.end_shortfall(end, &next.state);
-                        queues[other_index].push(HeuristicQueueNode(next.clone(), h));
-                    }
-                }
-            }
-            if !any_progress {
-                break;
-            }
+            let Some(node) = self.search_from(
+                seed.clone(),
+                auto_facts,
+                auto_deductions,
+                budget,
+                |node| self.end_shortfall(end, &node.state),
+                |candidate| self.end_recovery_satisfied(end, candidate),
+            ) else {
+                continue;
+            };
+            found.insert(end.item.id.clone(), node);
         }
         found
     }
@@ -2838,18 +2742,18 @@ impl Model {
         // checkpoint (rather than every intermediate step-readiness
         // checkpoint tried previously) bounds the added cost to at most
         // `solve_steps.len() + 1` extra legs per unresolved end.
-        // narrator-validator#99: rather than a separate `search_from` leg
-        // per (seed, end) pair -- which reruns the identical reachable-state
-        // walk once per unresolved end, saturating the budget on every
-        // repetition when the ends are blocked for a budget-independent
-        // reason -- `search_from_multi_end` shares ONE walk per seed across
-        // every still-unresolved end, checking each end's own
-        // `end_recovery_satisfied` at every node reached and recording a
-        // witness the first time each becomes true. This changes the cost
-        // from `ends x seeds x budget` to `seeds x budget` without weakening
-        // any individual end's proof: each recorded witness still is a node
-        // genuinely reached from `seed` via real actions that independently
-        // satisfies that end's own acceptance check.
+        // narrator-validator#99: `search_from_multi_end` tries every
+        // still-unresolved end against `seed`, same as this loop did
+        // per-end before #99 -- see its doc comment for why the version
+        // that shared one exploration across ends (which would have turned
+        // this into `seeds x budget` instead of `ends x seeds x budget`)
+        // was reverted: every sharing design tried could starve a
+        // genuinely reachable end when it shared a seed with several
+        // permanently-blocked ones, which the ticket's byte-identical
+        // requirement can't tolerate. What #99 *does* change here is the
+        // budget: `LEG_MAX_EXPLORED_STATES` instead of the old fixed
+        // 25,000, since a leg seeded from a genuine playthrough checkpoint
+        // is cheap to afford a larger budget on even without sharing.
         if bounded {
             let seeds = std::iter::once(step_nodes[self.solve_steps.len()].clone())
                 .chain(step_fail_nodes.iter().cloned())
