@@ -394,6 +394,70 @@ fn irrelevant_unsupported_construct_does_not_demote_a_genuine_witness() {
     assert_eq!(end.status, PlayabilityStatus::Proved, "{end:#?}");
 }
 
+/// Regression for narrator-validator#89: an entity nested inside ANOTHER
+/// entity (a diary in a satchel in a room), rather than sitting directly in
+/// a `setting.*`, must still resolve a `subject_locations` entry -- and
+/// that entry must be transitive, so a fact gated on examining the diary
+/// (`target: owner`, which needs the player co-located with
+/// `entity.diary`) is reachable once the search travels to
+/// `entity.satchel`'s room, `setting.den`. Before #89 the diary's
+/// `initial.container: entity.satchel` (a non-setting container) was
+/// unconditionally `unsupported_nested_container`, which would have
+/// demoted this to Inconclusive regardless of the travel/examine action
+/// genuinely satisfying it.
+#[test]
+fn entity_nested_inside_another_entity_resolves_transitively_to_proved() {
+    let story = base_story()
+        .replace(
+            "routes: []",
+            "routes:\n  - id: route.foyer_den\n    from: setting.foyer\n    to: setting.den\n    bidirectional: true\n    travel_minutes: 5",
+        )
+        .replace(
+            "  - id: setting.foyer\n    type: room\n    description: The entry foyer.\n    parent: setting.world",
+            "  - id: setting.foyer\n    type: room\n    description: The entry foyer.\n    parent: setting.world\n  - id: setting.den\n    type: room\n    description: A den five minutes from the foyer.\n    parent: setting.world",
+        )
+        .replace(
+            "entities: []",
+            "entities:\n  - id: entity.satchel\n    description: A leather satchel.\n    initial:\n      container: setting.den\n  - id: entity.diary\n    description: A locked diary.\n    initial:\n      container: entity.satchel\n    facts:\n      - id: fact.motive_hint\n        statement: A jealous rage seems to explain everything.\n        about: [answer.motive.jealousy]\n        on:\n          command: command.examine\n          parameters:\n            target: owner",
+        );
+    let report = report(story);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert!(
+        !report
+            .playability
+            .as_ref()
+            .unwrap()
+            .notebook_policies
+            .iter()
+            .any(|policy| policy.step_answerability.iter().any(|step| {
+                step.blocker.as_ref().is_some_and(|blocker| {
+                    blocker.code == "playability.unsupported_nested_container"
+                })
+            })),
+        "the diary's entity-in-entity container must resolve, not blocker: {:#?}",
+        report.playability
+    );
+    let policy = default_policy(&report);
+
+    let step = policy
+        .step_answerability
+        .iter()
+        .find(|step| step.id == "step.name_motive")
+        .expect("step.name_motive answerability");
+    assert_eq!(
+        step.status,
+        PlayabilityStatus::Proved,
+        "traveling to setting.den and examining the nested diary must prove the answer: {step:#?}"
+    );
+
+    let end = policy
+        .terminal_paths
+        .iter()
+        .find(|end| end.id == "end.solved")
+        .expect("end.solved terminal path");
+    assert_eq!(end.status, PlayabilityStatus::Proved, "{end:#?}");
+}
+
 /// Regression for the checkpointed per-step search (narrator-validator#83):
 /// a second step whose answer genuinely has no witness anywhere in the
 /// story must stay `NotProved` even though the first step -- the

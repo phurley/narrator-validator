@@ -305,6 +305,19 @@ struct Unsupported {
     witness_subject: Option<String>,
 }
 
+/// An authored `entities[].initial.container` value, captured verbatim so
+/// nested containers (an entity whose container is itself another entity,
+/// rather than a `setting.*`) can be resolved transitively once every file
+/// has been read -- the owning entity's own container may live in a file
+/// processed later in `from_files`'s loop, or later in the same file.
+#[derive(Clone)]
+struct RawContainerRef {
+    container: String,
+    path: String,
+    pointer: String,
+    range: Option<SourceRange>,
+}
+
 #[derive(Clone, Default)]
 struct Model {
     entries: Vec<String>,
@@ -320,6 +333,7 @@ struct Model {
     solution_target: Option<String>,
     point_awards: BTreeMap<String, PointAward>,
     subject_locations: BTreeMap<String, String>,
+    entity_containers: BTreeMap<String, RawContainerRef>,
     subject_requirements: BTreeMap<String, Vec<String>>,
     unsupported_commands: BTreeSet<String>,
     unsupported_triggers: BTreeSet<String>,
@@ -579,6 +593,7 @@ impl Model {
             model.read_ends(file, "end_states", sequence(root, "end_states"), false);
             model.read_ends(file, "win_states", sequence(root, "win_states"), true);
         }
+        model.resolve_nested_containers();
         model.apply_testimony_gates();
         if model.entries.is_empty() {
             if let Some(first) = model.routes.first() {
@@ -707,17 +722,16 @@ impl Model {
                     if let Some(container) =
                         map(owner, "initial").and_then(|initial| string(initial, "container"))
                     {
-                        if container.starts_with("setting.") {
-                            self.subject_locations
-                                .insert(owner_id.clone(), container.to_string());
-                        } else {
-                            self.unsupported(
-                                file,
-                                &format!("/{section}/{owner_index}/initial/container"),
-                                "playability.unsupported_nested_container",
-                                "nested entity reachability is outside the static action model",
-                            );
-                        }
+                        let pointer = format!("/{section}/{owner_index}/initial/container");
+                        self.entity_containers.insert(
+                            owner_id.clone(),
+                            RawContainerRef {
+                                container: container.to_string(),
+                                path: file.path.clone(),
+                                pointer: pointer.clone(),
+                                range: locate_pointer(file, &pointer),
+                            },
+                        );
                     }
                     if field(owner, "points").is_some() {
                         self.unsupported(file, &format!("/{section}/{owner_index}/points"), "playability.unsupported_entity_points", "entity point awards require inventory transitions and are outside this static subset");
@@ -783,6 +797,93 @@ impl Model {
                 );
             }
         }
+    }
+
+    /// Resolve every authored `entities[].initial.container` transitively
+    /// into a `setting.*` for `subject_locations`: a container may itself be
+    /// another entity (an item in a bag in a room), any number of levels
+    /// deep, and its own container may be authored in a different file or
+    /// later in the same one, so this runs once after every file's owned
+    /// facts have been read rather than inline in `read_owned_facts`.
+    ///
+    /// A container cycle (A contains B contains A) is guarded here rather
+    /// than assumed to be caught elsewhere -- nothing in `read_owned_facts`
+    /// or the schema validates that `initial.container` chains terminate --
+    /// and is reported the same way as any other unresolved container: the
+    /// entity keeps no `subject_locations` entry and gets an
+    /// `unsupported_nested_container` note at its own authored pointer.
+    ///
+    /// `subject_locations` is a fixed *initial* fact consumed by
+    /// `subject_known`/`action_available` to gate static reachability --
+    /// nothing in this model tracks an entity moving after play starts, so
+    /// there is no "container relocates during play" case to handle beyond
+    /// resolving the authored initial nesting.
+    fn resolve_nested_containers(&mut self) {
+        let mut resolved: BTreeMap<String, Option<String>> = BTreeMap::new();
+        let owners: Vec<String> = self.entity_containers.keys().cloned().collect();
+        for owner_id in &owners {
+            let mut visiting = BTreeSet::new();
+            let setting = Self::resolve_container_setting(
+                owner_id,
+                &self.entity_containers,
+                &mut resolved,
+                &mut visiting,
+            );
+            match setting {
+                Some(setting) => {
+                    self.subject_locations.insert(owner_id.clone(), setting);
+                }
+                None => {
+                    let raw = &self.entity_containers[owner_id];
+                    self.unsupported.push(Unsupported {
+                        code: "playability.unsupported_nested_container".to_string(),
+                        message: "nested entity reachability is outside the static action model"
+                            .to_string(),
+                        path: raw.path.clone(),
+                        pointer: raw.pointer.clone(),
+                        range: raw.range,
+                        search_excluded: true,
+                        witness_subject: None,
+                    });
+                }
+            }
+        }
+    }
+
+    /// Resolve `id` (an entity id or a `setting.*` literal) to the
+    /// `setting.*` it ultimately sits in, following `initial.container`
+    /// chains through any number of intermediate entities. Returns `None`
+    /// for a container cycle, a container pointing at something other than
+    /// a `setting.*`/`entity.*` id, or an entity with no known container at
+    /// all.
+    fn resolve_container_setting(
+        id: &str,
+        containers: &BTreeMap<String, RawContainerRef>,
+        resolved: &mut BTreeMap<String, Option<String>>,
+        visiting: &mut BTreeSet<String>,
+    ) -> Option<String> {
+        if id.starts_with("setting.") {
+            return Some(id.to_string());
+        }
+        if let Some(cached) = resolved.get(id) {
+            return cached.clone();
+        }
+        if !visiting.insert(id.to_string()) {
+            // Container cycle: A (transitively) contains itself.
+            return None;
+        }
+        let result = match containers.get(id) {
+            Some(raw)
+                if raw.container.starts_with("setting.")
+                    || raw.container.starts_with("entity.") =>
+            {
+                Self::resolve_container_setting(&raw.container, containers, resolved, visiting)
+            }
+            _ => None,
+        };
+        visiting.remove(id);
+        resolved.insert(id.to_string(), result.clone());
+        result
     }
 
     fn read_deductions(&mut self, file: &SourceFile, values: &[Value]) {
