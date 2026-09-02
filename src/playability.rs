@@ -359,6 +359,28 @@ struct Model {
     /// Consulted by `end_shortfall` as provenance credit -- see its doc
     /// comment.
     requirement_locations: BTreeMap<String, String>,
+    /// Fact ID -> the single `setting.*` location that fact's own gate
+    /// (trigger-produced, or an `on` action pattern whose entity/character
+    /// bindings all resolve to one place) pins as necessary before the fact
+    /// can ever be learned. Seeded from `requirement_locations`'s `fact.*`
+    /// entries (trigger-produced facts), then extended per-fact for an
+    /// examine/question-style `on` pattern: every binding value is resolved
+    /// (`setting.*` to itself, `entity.*`/`character.*` via
+    /// `subject_locations`) and recorded only if every binding resolves to
+    /// the *same* location -- if any binding doesn't resolve, or two
+    /// disagree, nothing is recorded, so this can never overclaim. Consulted
+    /// by `subject_shortfall` the same way `requirement_locations` is
+    /// consulted by `end_shortfall` -- see narrator-validator#94.
+    fact_acquisition_locations: BTreeMap<String, String>,
+    /// All-pairs BFS hop counts over `self.routes`, ignoring route
+    /// `requirements` (a heuristic distance signal doesn't need to be
+    /// admissible or even reachable-aware -- `search_from`'s soundness
+    /// never depends on it). Consulted by `hop_count`, which both
+    /// `end_shortfall`'s `away_from_producer` term and
+    /// `subject_shortfall`/`witness_extra_cost`'s location-match terms use
+    /// in place of a flat binary "elsewhere" penalty -- see
+    /// narrator-validator#94's Option B.
+    hop_counts: BTreeMap<(String, String), u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1485,6 +1507,108 @@ impl Model {
         self.precompute_patterns();
         self.build_subject_witnesses();
         self.build_requirement_locations();
+        self.build_fact_acquisition_locations();
+        self.build_hop_counts();
+    }
+
+    /// Build `hop_counts` -- see its field doc comment.
+    fn build_hop_counts(&mut self) {
+        let mut settings = BTreeSet::new();
+        for route in &self.routes {
+            settings.insert(route.from.clone());
+            settings.insert(route.to.clone());
+        }
+        let mut hops = BTreeMap::new();
+        for start in &settings {
+            let mut distance = BTreeMap::new();
+            distance.insert(start.clone(), 0u32);
+            let mut queue = std::collections::VecDeque::new();
+            queue.push_back(start.clone());
+            while let Some(current) = queue.pop_front() {
+                let current_distance = distance[&current];
+                for route in &self.routes {
+                    let neighbor = if route.from == current {
+                        Some(route.to.as_str())
+                    } else if route.bidirectional && route.to == current {
+                        Some(route.from.as_str())
+                    } else {
+                        None
+                    };
+                    if let Some(neighbor) = neighbor {
+                        if !distance.contains_key(neighbor) {
+                            distance.insert(neighbor.to_string(), current_distance + 1);
+                            queue.push_back(neighbor.to_string());
+                        }
+                    }
+                }
+            }
+            for (setting, steps) in distance {
+                hops.insert((start.clone(), setting), steps);
+            }
+        }
+        self.hop_counts = hops;
+    }
+
+    /// The BFS hop count from `from` to `to` over `self.routes`, or `1` if
+    /// no path is known (unconnected, or one side isn't a route-graph
+    /// setting at all) -- never `0` unless `from == to`, so this always
+    /// carries at least the old flat "elsewhere" penalty even when it can't
+    /// say anything more precise.
+    fn hop_count(&self, from: &str, to: &str) -> u32 {
+        if from == to {
+            return 0;
+        }
+        self.hop_counts
+            .get(&(from.to_string(), to.to_string()))
+            .copied()
+            .unwrap_or(1)
+    }
+
+    /// Build `fact_acquisition_locations` -- see its field doc comment.
+    fn build_fact_acquisition_locations(&mut self) {
+        let mut locations: BTreeMap<String, String> = self
+            .requirement_locations
+            .iter()
+            .filter(|(id, _)| id.starts_with("fact."))
+            .map(|(id, location)| (id.clone(), location.clone()))
+            .collect();
+        for fact in self.facts.values() {
+            if locations.contains_key(&fact.item.id) {
+                continue;
+            }
+            let Some(pattern) = &fact.on else {
+                continue;
+            };
+            let mut resolved: Option<String> = None;
+            let mut consistent = true;
+            for id in pattern.bindings.values().flatten() {
+                let binding_location = if id.starts_with("setting.") {
+                    Some(id.clone())
+                } else if id.starts_with("entity.") || id.starts_with("character.") {
+                    self.subject_locations.get(id).cloned()
+                } else {
+                    None
+                };
+                let Some(binding_location) = binding_location else {
+                    consistent = false;
+                    break;
+                };
+                match &resolved {
+                    None => resolved = Some(binding_location),
+                    Some(existing) if existing == &binding_location => {}
+                    Some(_) => {
+                        consistent = false;
+                        break;
+                    }
+                }
+            }
+            if consistent {
+                if let Some(location) = resolved {
+                    locations.insert(fact.item.id.clone(), location);
+                }
+            }
+        }
+        self.fact_acquisition_locations = locations;
     }
 
     /// Build `requirement_locations`: for every requirement ID produced by
@@ -1682,8 +1806,8 @@ impl Model {
                 let away_from_producer = self
                     .requirement_locations
                     .get(id)
-                    .is_some_and(|location| &state.location != location);
-                1 + u32::from(away_from_producer)
+                    .map_or(0, |location| self.hop_count(&state.location, location));
+                1 + away_from_producer
             })
             .sum::<u32>();
         let solution_shortfall = u32::from(end.solution_condition && !state.solution_solved);
@@ -1694,22 +1818,102 @@ impl Model {
         missing_requirements + solution_shortfall + points_shortfall + time_shortfall
     }
 
-    /// How far `row` still is from `row_satisfied`: the count of pool
-    /// members still missing (for `NOfM`, floored at the `n` still needed)
-    /// or of cards not yet known (for `Ordered`).
+    /// Goal-distance estimate for a single still-unknown card subject,
+    /// feeding `row_shortfall` -- see narrator-validator#94. `row_shortfall`
+    /// previously reduced every card to a flat, binary "known or not"
+    /// signal, which degrades to near-uniform-cost search over a large
+    /// branching factor. This gives partial credit toward whichever witness
+    /// is cheapest to reach: being at the one place a witnessing fact's gate
+    /// can be triggered, or having already met some of that fact's
+    /// testimony/question prerequisites, or a deduction's dependencies.
+    ///
+    /// MUST return exactly 0 iff `subject_known` is true -- `row_shortfall`
+    /// (and thus `step_shortfall`/`search_from`'s soundness argument) relies
+    /// on that invariant to keep "0 iff satisfied" true all the way up.
+    fn subject_shortfall(&self, state: &State, subject: &str) -> u32 {
+        if self.subject_known(state, subject) {
+            return 0;
+        }
+        // Entity/character subjects (step 2's cards, e.g. `entity.culvert_corner`)
+        // aren't established via `subject_witnesses` the way `answer.*`/
+        // `fact.*` subjects are -- `subject_known` gates them on
+        // co-location (or an owning witness) directly against
+        // `subject_locations`. Mirror that here instead of falling through
+        // to the witness-based path below, which would find no witnesses
+        // for most of these and collapse back to a flat 1.
+        if subject.starts_with("entity.") || subject.starts_with("character.") {
+            let away = self
+                .subject_locations
+                .get(subject)
+                .map_or(0, |location| self.hop_count(&state.location, location));
+            return 1 + away;
+        }
+        let extra = self
+            .subject_witnesses
+            .get(subject)
+            .into_iter()
+            .flatten()
+            .map(|witness| self.witness_extra_cost(state, witness))
+            .min()
+            .unwrap_or(0);
+        1 + extra
+    }
+
+    /// The extra-cost term `subject_shortfall` adds on top of its flat 1 for
+    /// a specific witness (a fact or deduction id) that would establish the
+    /// subject. See `subject_shortfall`'s doc comment.
+    fn witness_extra_cost(&self, state: &State, witness: &str) -> u32 {
+        if let Some(fact) = self.facts.get(witness) {
+            let away_from_acquisition = self
+                .fact_acquisition_locations
+                .get(witness)
+                .map_or(0, |location| self.hop_count(&state.location, location));
+            let unmet_prerequisites = fact
+                .when
+                .iter()
+                .filter(|predicate| matches!(predicate, Predicate::Has(id) if !has(state, id)))
+                .count() as u32;
+            return away_from_acquisition + unmet_prerequisites;
+        }
+        if let Some(deduction) = self.deductions.get(witness) {
+            return deduction
+                .dependencies
+                .iter()
+                .filter(|id| !has(state, id))
+                .count() as u32;
+        }
+        0
+    }
+
+    /// How far `row` still is from `row_satisfied`: for `Ordered`, the sum
+    /// of `subject_shortfall` over every card; for `NOfM`, the sum of the
+    /// `n - known` smallest shortfalls among the currently-unknown pool
+    /// members (the cheapest members left to acquire, since any `n` of the
+    /// pool satisfy the row). Zero iff `row_satisfied`: every unknown
+    /// subject's shortfall is `subject_shortfall`, which is >=1 whenever
+    /// `subject_known` is false, so a nonzero `needed` count always sums to
+    /// something positive, and `needed == 0` exactly tracks
+    /// `row_satisfied`'s own `known >= n` check.
     fn row_shortfall(&self, row: &SolveRow, state: &State) -> u32 {
         match row {
             SolveRow::NOfM { n, pool } => {
-                let known = pool
+                let mut shortfalls: Vec<u32> = pool
                     .iter()
-                    .filter(|subject| self.subject_known(state, subject))
-                    .count();
-                n.saturating_sub(known) as u32
+                    .filter(|subject| !self.subject_known(state, subject))
+                    .map(|subject| self.subject_shortfall(state, subject))
+                    .collect();
+                let known = pool.len() - shortfalls.len();
+                let needed = n.saturating_sub(known);
+                if needed == 0 {
+                    return 0;
+                }
+                shortfalls.sort_unstable();
+                shortfalls.into_iter().take(needed).sum()
             }
             SolveRow::Ordered { cards } => cards
                 .iter()
-                .filter(|subject| !self.subject_known(state, subject))
-                .count() as u32,
+                .map(|subject| self.subject_shortfall(state, subject))
+                .sum(),
         }
     }
 
@@ -4132,6 +4336,259 @@ flags:
         // This converts "sound by argument" (search_from only ever expands
         // real playthrough actions) into "sound by execution" for this
         // heuristic-ordered leg specifically.
+        let mut replay = seed;
+        for step in &found.steps {
+            let action = model
+                .actions(&replay.state, true, true)
+                .into_iter()
+                .find(|candidate| {
+                    candidate.id == step.action
+                        && candidate.kind == step.kind
+                        && candidate.to == step.to
+                })
+                .unwrap_or_else(|| {
+                    panic!("witness action {} still available for replay", step.action)
+                });
+            replay = model
+                .expand(&replay, action, true, true)
+                .expect("replayed action stays within the elapsed/action bounds");
+        }
+        assert!(
+            replay.state.next_step as usize > 0,
+            "replaying the witness's own recorded actions must re-derive the step-committed \
+             goal state: {:#?}",
+            replay.state
+        );
+        assert_eq!(replay.state, found.state);
+    }
+
+    /// A one-setting, one-row story whose only witness fact is gated on a
+    /// `fact.*` id nothing in the model ever produces -- genuinely
+    /// unlearnable, independent of search order. Exercises
+    /// `subject_shortfall`/`witness_extra_cost`'s `unmet_prerequisites` term
+    /// specifically: it stays fixed at 1 forever (the `Has` predicate never
+    /// holds), so the row's shortfall can never reach 0 and the step's
+    /// `solve_step` action can never become available -- see
+    /// narrator-validator#94.
+    fn unlearnable_motive_story() -> String {
+        r#"
+case:
+  id: case.example
+  format_version: "3.7.0"
+  ruleset:
+    id: ruleset.standard_mystery
+    version: "7.0.0"
+  players:
+    min: 1
+    max: 4
+  initial_time: "21:00"
+  entry_settings: [setting.foyer]
+  exit_settings: [setting.foyer]
+solution:
+  max_attempts: 2
+  steps:
+    - id: step.name_motive
+      prompt: What was the motive?
+      time_cost_minutes: 0
+      rows:
+        - match: n_of_m
+          n: 1
+          cards: [answer.motive.jealousy]
+      on_success:
+        effects:
+          - operation: set_flag
+            flag: flag.motive_named
+            value: true
+      on_failure:
+        points: -1
+end_states:
+  - id: end.solved
+    name: Solved
+    outcome: won
+    resolution: full
+    requires: [flag.motive_named]
+    text: You name the motive.
+settings:
+  - id: setting.world
+    type: island
+    navigable: false
+    description: The world containing the playable room.
+  - id: setting.foyer
+    type: room
+    description: The entry foyer.
+    parent: setting.world
+    facts:
+      - id: fact.motive_hint
+        statement: A jealous rage seems to explain everything, if only it could be confirmed.
+        about: [answer.motive.jealousy]
+        when:
+          all:
+            - knows: fact.never_learnable
+routes: []
+characters: []
+entities: []
+events: []
+deductions: []
+flags:
+  - id: flag.motive_named
+    name: Motive named
+    description: Whether the motive has been named.
+    initial_state: false
+"#
+        .to_string()
+    }
+
+    #[test]
+    fn subject_shortfall_heuristic_does_not_manufacture_a_false_proof_for_an_unlearnable_witness() {
+        let source = unlearnable_motive_story();
+        let (model, seed) = windows_story_model_and_seed(&source);
+        let found = model.search_from(
+            seed,
+            true,
+            true,
+            |node| model.step_shortfall(&node.state, 0),
+            |candidate| candidate.state.next_step as usize > 0,
+        );
+        assert!(
+            found.is_none(),
+            "fact.motive_hint's `knows: fact.never_learnable` gate can never hold, so \
+             answer.motive.jealousy can never be known and the row can never be \
+             satisfied -- the heuristic must not hallucinate a witness: {:#?}",
+            found.map(|node| node.state)
+        );
+    }
+
+    /// A two-setting story whose single card is witnessed by a fact that is
+    /// both location-gated (`fact_acquisition_locations`, via an `on`
+    /// pattern resolving to `setting.den`) and prerequisite-gated (a `knows`
+    /// `when` on a second, itself-examinable fact at the starting room).
+    /// Exercises both `witness_extra_cost` terms together and gives
+    /// `subject_shortfall` room to show genuine, monotonically-decreasing
+    /// partial credit as the real witness is assembled -- see
+    /// narrator-validator#94.
+    fn witnessed_motive_story() -> String {
+        r#"
+case:
+  id: case.example
+  format_version: "3.7.0"
+  ruleset:
+    id: ruleset.standard_mystery
+    version: "7.0.0"
+  players:
+    min: 1
+    max: 4
+  initial_time: "21:00"
+  entry_settings: [setting.foyer]
+  exit_settings: [setting.foyer]
+solution:
+  max_attempts: 2
+  steps:
+    - id: step.name_motive
+      prompt: What was the motive?
+      time_cost_minutes: 0
+      rows:
+        - match: n_of_m
+          n: 1
+          cards: [answer.motive.jealousy]
+      on_success:
+        effects:
+          - operation: set_flag
+            flag: flag.motive_named
+            value: true
+      on_failure:
+        points: -1
+end_states:
+  - id: end.solved
+    name: Solved
+    outcome: won
+    resolution: full
+    requires: [flag.motive_named]
+    text: You name the motive.
+settings:
+  - id: setting.world
+    type: island
+    navigable: false
+    description: The world containing the playable rooms.
+  - id: setting.foyer
+    type: room
+    description: The entry foyer.
+    parent: setting.world
+  - id: setting.den
+    type: room
+    description: A den seven minutes from the foyer.
+    parent: setting.world
+routes:
+  - id: route.foyer_den
+    from: setting.foyer
+    to: setting.den
+    bidirectional: true
+    travel_minutes: 7
+characters:
+  - id: character.confidant
+    name: Confidant
+    initial:
+      location: setting.foyer
+    facts:
+      - id: fact.confidant_shares_hint
+        statement: The confidant admits a private grudge.
+        about: []
+        on:
+          command: command.examine
+          parameters:
+            target: owner
+  - id: character.witness
+    name: Witness
+    initial:
+      location: setting.den
+    facts:
+      - id: fact.motive_evidence
+        statement: The witness saw the true motive in action.
+        about: [answer.motive.jealousy]
+        on:
+          command: command.examine
+          parameters:
+            target: owner
+        when:
+          all:
+            - knows: fact.confidant_shares_hint
+entities: []
+events: []
+deductions: []
+flags:
+  - id: flag.motive_named
+    name: Motive named
+    description: Whether the motive has been named.
+    initial_state: false
+"#
+        .to_string()
+    }
+
+    #[test]
+    fn subject_shortfall_heuristic_proves_and_replays_a_genuine_two_hop_witness() {
+        let source = witnessed_motive_story();
+        let (model, seed) = windows_story_model_and_seed(&source);
+        assert_eq!(
+            model.step_shortfall(&seed.state, 0),
+            3,
+            "seed is away from the witness's acquisition location (1) and missing its \
+             prerequisite fact (1), on top of the row's own flat 1 for not-yet-known"
+        );
+        let found = model
+            .search_from(
+                seed.clone(),
+                true,
+                true,
+                |node| model.step_shortfall(&node.state, 0),
+                |candidate| candidate.state.next_step as usize > 0,
+            )
+            .expect(
+                "examining the confidant, traveling to the den, and examining the witness \
+                 is a genuine three-action path to the card",
+            );
+
+        // Witness-replay: re-derive the goal by actually executing the
+        // found path's own recorded actions from the seed through
+        // `actions`/`expand`, rather than trusting the search's bookkeeping.
         let mut replay = seed;
         for step in &found.steps {
             let action = model
