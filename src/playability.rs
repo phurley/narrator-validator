@@ -4752,4 +4752,178 @@ flags:
         );
         assert_eq!(replay.state, found.state);
     }
+
+    /// Two rooms, a `command.investigate` trigger whose `on` pattern binds
+    /// one entity present in each room (`entity.item` at `setting.room_a`,
+    /// `entity.device` fixed at `setting.room_b`), gated `when: at
+    /// setting.room_b` -- the exact shape narrator-validator#96 exists for
+    /// (quiet_kennel's `trigger.test_jo_curry_against_sedative_audit`).
+    /// `portable` toggles `entity.item`'s `physical.portable`, so the same
+    /// builder produces both the take-only-inventory fixture and its
+    /// portable:false control.
+    fn cross_room_investigate_story(portable: bool) -> String {
+        format!(
+            r#"
+case:
+  id: case.example
+  format_version: "3.7.0"
+  players:
+    min: 1
+    max: 4
+  initial_time: "09:00"
+  entry_settings: [setting.room_a]
+  exit_settings: [setting.room_a]
+end_states:
+  - id: end.cross_room_verified
+    name: Cross-room verified
+    outcome: won
+    resolution: full
+    requires: [flag.cross_room_verified]
+    text: The item is checked against the device in the other room.
+settings:
+  - id: setting.world
+    type: island
+    navigable: false
+    description: The world containing the playable rooms.
+  - id: setting.room_a
+    type: room
+    description: The room holding the portable item.
+    parent: setting.world
+  - id: setting.room_b
+    type: room
+    description: The room holding the fixed device.
+    parent: setting.world
+routes:
+  - id: route.a_b
+    from: setting.room_a
+    to: setting.room_b
+    bidirectional: true
+    travel_minutes: 5
+characters: []
+entities:
+  - id: entity.item
+    description: A small portable item.
+    physical:
+      portable: {portable}
+    initial:
+      container: setting.room_a
+  - id: entity.device
+    description: A fixed device bolted to the wall.
+    initial:
+      container: setting.room_b
+events: []
+deductions: []
+commands:
+  - id: command.take
+    name: Take
+    description: Pick up an entity that is present and portable.
+    parameters:
+      - name: item
+        types: [entity]
+        min: 1
+        max: 1
+  - id: command.investigate
+    name: Investigate
+    description: Compare the item against the device.
+    parameters:
+      - name: target
+        types: [entity]
+        min: 1
+        max: 1
+      - name: comparison
+        types: [entity]
+        min: 1
+        max: 1
+triggers:
+  - id: trigger.cross_room_check
+    name: Cross-room check
+    on:
+      command: command.investigate
+      parameters:
+        target: entity.item
+        comparison: entity.device
+    when:
+      all:
+        - at: setting.room_b
+    effects:
+      - operation: set_flag
+        flag: flag.cross_room_verified
+        value: true
+flags:
+  - id: flag.cross_room_verified
+    name: Cross-room verified
+    description: Whether the item has been checked against the device.
+    initial_state: false
+"#,
+            portable = portable
+        )
+    }
+
+    #[test]
+    fn portable_entity_can_be_carried_across_rooms_to_satisfy_a_cross_room_trigger() {
+        let source = cross_room_investigate_story(true);
+        let mut model = Model::from_files(&[SourceFile {
+            path: "story.yaml".to_string(),
+            source,
+        }]);
+        model.normalize();
+        assert!(
+            model.takeable_entities.contains("entity.item"),
+            "entity.item is portable and referenced in the trigger's own `on` binding, so it \
+             must be a take candidate: {:?}",
+            model.takeable_entities
+        );
+        let analysis = model.search(true, true);
+        let end = analysis
+            .terminal_paths
+            .iter()
+            .find(|end| end.id == "end.cross_room_verified")
+            .expect("end.cross_room_verified terminal path");
+        assert_eq!(
+            end.status,
+            PlayabilityStatus::Proved,
+            "carrying the portable item into room_b must let the cross-room trigger fire: \
+             {end:#?}"
+        );
+        let ordered_steps = &end
+            .lower_bound
+            .as_ref()
+            .expect("a proved end carries a lower-bound witness")
+            .ordered_steps;
+        assert!(
+            ordered_steps.iter().any(|step| step.kind == "take"),
+            "the witness must actually take the portable entity, not merely reach the room: \
+             {ordered_steps:#?}"
+        );
+    }
+
+    /// Soundness control for the fixture above: flip `physical.portable` to
+    /// `false` on the exact same setup. A non-portable entity must never
+    /// become carryable, so the cross-room trigger -- and the end it gates
+    /// -- must stay unreached.
+    #[test]
+    fn non_portable_entity_cannot_be_carried_and_the_cross_room_trigger_stays_unreached() {
+        let source = cross_room_investigate_story(false);
+        let mut model = Model::from_files(&[SourceFile {
+            path: "story.yaml".to_string(),
+            source,
+        }]);
+        model.normalize();
+        assert!(
+            model.takeable_entities.is_empty(),
+            "a non-portable entity must never be a take candidate: {:?}",
+            model.takeable_entities
+        );
+        let analysis = model.search(true, true);
+        let end = analysis
+            .terminal_paths
+            .iter()
+            .find(|end| end.id == "end.cross_room_verified")
+            .expect("end.cross_room_verified terminal path");
+        assert_ne!(
+            end.status,
+            PlayabilityStatus::Proved,
+            "a non-portable entity must not let the cross-room trigger fire: {end:#?}"
+        );
+    }
 }
