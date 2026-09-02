@@ -2393,30 +2393,43 @@ impl Model {
     /// Like `search_from`, but resolves every still-unresolved end in
     /// `ends` from one `seed`, instead of one fixed goal at a time.
     ///
-    /// Each end gets its own independent best-first queue and dominance map
-    /// -- exactly the priority ordering a dedicated `search_from` call for
-    /// that end alone would use -- run in ROUND-ROBIN lockstep (one pop per
-    /// still-active end per round) so no single end's exploration can starve
-    /// another's turn. A single shared `min(shortfall)` priority (tried and
-    /// reverted during narrator-validator#99's development) or a shared
-    /// queue with fanned-out per-end priorities (also tried and reverted)
-    /// both let a permanently unreachable end -- one gated behind a
-    /// `Predicate::Never` unsupported construct still reports a small,
-    /// never-quite-zero shortfall that looks perpetually "almost there" --
-    /// dominate the shared frontier and starve a genuinely reachable end's
-    /// own convergence; wrong_floor's `end.elias_moves_sam` regressed from
-    /// Proved to Inconclusive under both. Round-robin fairness reproduces
-    /// each end's own dedicated search behavior exactly whenever only one
-    /// end remains (the common case), while `successor_cache` still shares
-    /// the actually-expensive part -- `actions`/`expand` -- across ends
-    /// whose searches visit the same physical state, which is where the
-    /// real per-(seed, end) redundancy the architect identified lives.
-    /// `explored` (successor-cache misses, i.e. genuinely new state
-    /// expansions) is bounded by `budget` in total across every end, same
-    /// spirit as `search_from`. Soundness is unchanged: every entry in the
-    /// returned map is a node genuinely reached from `seed` via real
-    /// actions (`expand`) that independently passes `end_recovery_satisfied`
-    /// for that end.
+    /// Each end gets its own independent best-first priority queue --
+    /// exactly the ordering a dedicated `search_from` call for that end
+    /// alone would use -- run in ROUND-ROBIN lockstep (one pop per
+    /// still-active end per round) so no single end's queue can starve
+    /// another's turn. A single shared `min(shortfall)` priority, and a
+    /// single shared queue fanning out per-end priorities into one combined
+    /// pop order, were both tried and reverted during narrator-validator#99's
+    /// development: either way, letting different ends' priority *values*
+    /// compete directly for the front of one frontier lets a permanently
+    /// unreachable end -- one gated behind a `Predicate::Never` unsupported
+    /// construct still reports a small, never-quite-zero shortfall that
+    /// looks perpetually "almost there" -- dominate essentially every pop
+    /// and starve a genuinely reachable end's own convergence;
+    /// wrong_floor's `end.elias_moves_sam` regressed from Proved to
+    /// Inconclusive under both. Round-robin turn-taking never compares one
+    /// end's priority number against another's, so it can't be misled that
+    /// way, and it reproduces a dedicated `search_from`'s exact behavior
+    /// whenever only one end remains (the common case).
+    ///
+    /// The dominance-pruning `best` map is shared across every end (a
+    /// state's (actions, elapsed) cost is objectively the same regardless
+    /// of which end is being sought, so pruning by it is end-independent),
+    /// and `expanded` ensures a given (state, cost) is only ever run
+    /// through `actions`/`expand` once, no matter how many ends' queues
+    /// independently discover it -- when it IS expanded, every successor is
+    /// pushed into every remaining end's own queue at that same moment
+    /// (with that end's own shortfall as priority), so a later duplicate
+    /// pop of an already-expanded state costs nothing beyond a cheap set
+    /// lookup. This is what shares the actually-expensive part
+    /// (`actions`/`expand`) across ends without sharing exploration order --
+    /// where the real per-(seed, end) redundancy the architect identified
+    /// lives. `explored` (states actually run through `actions`/`expand`)
+    /// is bounded by `budget` in total across every end, same spirit as
+    /// `search_from`. Soundness is unchanged: every entry in the returned
+    /// map is a node genuinely reached from `seed` via real actions
+    /// (`expand`) that independently passes `end_recovery_satisfied` for
+    /// that end.
     fn search_from_multi_end(
         &self,
         seed: Node,
@@ -2438,19 +2451,17 @@ impl Model {
             return found;
         }
         let mut queues = Vec::with_capacity(remaining.len());
-        let mut bests = Vec::with_capacity(remaining.len());
         for end in &remaining {
-            let mut best = BTreeMap::<State, Vec<(u32, u32)>>::new();
-            best.entry(self.search_state_key(&seed.state))
-                .or_default()
-                .push((seed.actions, seed.state.elapsed));
-            bests.push(best);
             let mut queue = BinaryHeap::new();
             let h = self.end_shortfall(end, &seed.state);
             queue.push(HeuristicQueueNode(seed.clone(), h));
             queues.push(queue);
         }
-        let mut successor_cache = BTreeMap::<(State, u32, u32), Vec<Node>>::new();
+        let mut best = BTreeMap::<State, Vec<(u32, u32)>>::new();
+        best.entry(self.search_state_key(&seed.state))
+            .or_default()
+            .push((seed.actions, seed.state.elapsed));
+        let mut expanded = BTreeSet::<(State, u32, u32)>::new();
         let mut explored = 0usize;
         let mut active = vec![true; remaining.len()];
         while explored < budget && active.iter().any(|is_active| *is_active) {
@@ -2474,27 +2485,32 @@ impl Model {
                     node.actions,
                     node.state.elapsed,
                 );
-                let successors = if let Some(cached) = successor_cache.get(&expand_key) {
-                    cached.clone()
-                } else {
-                    explored += 1;
-                    let successors = if node.actions >= MAX_ACTIONS
-                        || node.state.elapsed >= MAX_ELAPSED_MINUTES
-                    {
-                        Vec::new()
-                    } else {
-                        self.actions(&node.state, auto_facts, auto_deductions)
-                            .into_iter()
-                            .filter_map(|action| {
-                                self.expand(&node, action, auto_facts, auto_deductions)
-                            })
-                            .collect::<Vec<_>>()
+                if !expanded.insert(expand_key) {
+                    // Already expanded via some end's earlier turn -- its
+                    // successors were already pushed into every remaining
+                    // end's own queue at that moment, so this duplicate pop
+                    // needs no further work.
+                    continue;
+                }
+                explored += 1;
+                if node.actions >= MAX_ACTIONS || node.state.elapsed >= MAX_ELAPSED_MINUTES {
+                    continue;
+                }
+                for action in self.actions(&node.state, auto_facts, auto_deductions) {
+                    let Some(next) = self.expand(&node, action, auto_facts, auto_deductions)
+                    else {
+                        continue;
                     };
-                    successor_cache.insert(expand_key, successors.clone());
-                    successors
-                };
-                for next in successors {
                     let cost = (next.actions, next.state.elapsed);
+                    let costs = best.entry(self.search_state_key(&next.state)).or_default();
+                    if costs
+                        .iter()
+                        .any(|known| known.0 <= cost.0 && known.1 <= cost.1)
+                    {
+                        continue;
+                    }
+                    costs.retain(|known| !(cost.0 <= known.0 && cost.1 <= known.1));
+                    costs.push(cost);
                     for (other_index, end) in remaining.iter().enumerate() {
                         if found.contains_key(&end.item.id) {
                             continue;
@@ -2503,17 +2519,6 @@ impl Model {
                             found.insert(end.item.id.clone(), next.clone());
                             continue;
                         }
-                        let costs = bests[other_index]
-                            .entry(self.search_state_key(&next.state))
-                            .or_default();
-                        if costs
-                            .iter()
-                            .any(|known| known.0 <= cost.0 && known.1 <= cost.1)
-                        {
-                            continue;
-                        }
-                        costs.retain(|known| !(cost.0 <= known.0 && cost.1 <= known.1));
-                        costs.push(cost);
                         let h = self.end_shortfall(end, &next.state);
                         queues[other_index].push(HeuristicQueueNode(next.clone(), h));
                     }
