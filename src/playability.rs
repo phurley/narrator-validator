@@ -3489,4 +3489,201 @@ mod tests {
         // Now both the end and the only step are proved.
         assert!(model.search_fully_settled(&proofs_with_end, &step_progress_done, &answerable));
     }
+
+    /// Clone of `tests/step_playability.rs`'s
+    /// `mutually_exclusive_time_windows_falsify_independent_reachability`
+    /// fixture, but with BOTH exact-time-window cards as two `n_of_m` rows
+    /// of a *single* step instead of split across two steps -- unlike that
+    /// integration test (whose two-step composition never actually drives
+    /// a state count anywhere near `MAX_EXPLORED_STATES`, so its `bounded`
+    /// stays false and `search_from`'s chaining leg is never exercised),
+    /// this calls `search_from` with the new heuristic directly so the
+    /// heuristic's row-shortfall balancing across two simultaneous rows in
+    /// one step is what's actually under test. `second_route_minutes` and
+    /// `second_fact_time` let the same builder produce both the negative
+    /// (mutually exclusive) and positive (compatible, round-trip
+    /// reachable) fixtures below.
+    fn one_step_two_windows_story(second_route_minutes: u32, second_fact_time: &str) -> String {
+        format!(
+            r#"
+case:
+  id: case.example
+  format_version: "3.7.0"
+  ruleset:
+    id: ruleset.standard_mystery
+    version: "7.0.0"
+  players:
+    min: 1
+    max: 4
+  initial_time: "21:00"
+  entry_settings: [setting.foyer]
+  exit_settings: [setting.foyer]
+solution:
+  max_attempts: 2
+  steps:
+    - id: step.name_both
+      prompt: What was the motive, and when did it happen?
+      time_cost_minutes: 0
+      rows:
+        - match: n_of_m
+          n: 1
+          cards: [answer.motive.jealousy]
+        - match: n_of_m
+          n: 1
+          cards: [answer.time.night]
+      on_success:
+        effects:
+          - operation: set_flag
+            flag: flag.both_named
+            value: true
+      on_failure:
+        points: -1
+end_states:
+  - id: end.solved
+    name: Solved
+    outcome: won
+    resolution: full
+    requires: [flag.both_named]
+    text: You name the motive and the time.
+settings:
+  - id: setting.world
+    type: island
+    navigable: false
+    description: The world containing the playable rooms.
+  - id: setting.foyer
+    type: room
+    description: The entry foyer.
+    parent: setting.world
+  - id: setting.den
+    type: room
+    description: A den seven minutes from the foyer.
+    parent: setting.world
+    facts:
+      - id: fact.motive_hint
+        statement: A jealous rage seems to explain everything.
+        about: [answer.motive.jealousy]
+        when:
+          all:
+            - time:
+                relation: at
+                value: "21:07"
+  - id: setting.attic
+    type: room
+    description: An attic away from the foyer.
+    parent: setting.world
+    facts:
+      - id: fact.time_hint
+        statement: The clock in the attic stopped at the moment of the crime.
+        about: [answer.time.night]
+        when:
+          all:
+            - time:
+                relation: at
+                value: "{second_fact_time}"
+routes:
+  - id: route.foyer_den
+    from: setting.foyer
+    to: setting.den
+    bidirectional: true
+    travel_minutes: 7
+  - id: route.foyer_attic
+    from: setting.foyer
+    to: setting.attic
+    bidirectional: true
+    travel_minutes: {second_route_minutes}
+characters: []
+entities: []
+events: []
+deductions: []
+flags:
+  - id: flag.both_named
+    name: Both named
+    description: Whether the motive and time have both been named.
+    initial_state: false
+"#
+        )
+    }
+
+    /// Builds the search_from seed and the target step's heuristic/goal
+    /// closures for `one_step_two_windows_story`, mirroring the real
+    /// per-step chaining call site in `search`.
+    fn windows_story_model_and_seed(source: &str) -> (Model, Node) {
+        let mut model = Model::from_files(&[SourceFile {
+            path: "story.yaml".to_string(),
+            source: source.to_string(),
+        }]);
+        model.normalize();
+        let entry = model.entries[0].clone();
+        let seed = model.opening_node(&entry, true, true);
+        (model, seed)
+    }
+
+    #[test]
+    fn search_from_heuristic_does_not_manufacture_a_false_proof_for_simultaneous_exclusive_windows()
+    {
+        let source = one_step_two_windows_story(11, "21:11");
+        let (model, seed) = windows_story_model_and_seed(&source);
+        let found = model.search_from(
+            seed,
+            true,
+            true,
+            |node| model.step_shortfall(&node.state, 0),
+            |candidate| candidate.state.next_step as usize > 0,
+        );
+        assert!(
+            found.is_none(),
+            "the den's and attic's exact-time windows can never both be hit in one \
+             play-through, even with both rows in a single step: {:#?}",
+            found.map(|node| node.state)
+        );
+    }
+
+    #[test]
+    fn search_from_heuristic_proves_and_replays_a_genuine_witness_for_compatible_windows() {
+        let source = one_step_two_windows_story(7, "21:21");
+        let (model, seed) = windows_story_model_and_seed(&source);
+        let found = model
+            .search_from(
+                seed.clone(),
+                true,
+                true,
+                |node| model.step_shortfall(&node.state, 0),
+                |candidate| candidate.state.next_step as usize > 0,
+            )
+            .expect(
+                "21:07 and 21:21 are seven minutes apart each way, reachable by a round \
+                 trip through the foyer",
+            );
+
+        // Witness-replay: re-derive the goal by actually executing the
+        // found path's own recorded actions from the seed through
+        // `actions`/`expand`, rather than trusting the search's bookkeeping.
+        // This converts "sound by argument" (search_from only ever expands
+        // real playthrough actions) into "sound by execution" for this
+        // heuristic-ordered leg specifically.
+        let mut replay = seed;
+        for step in &found.steps {
+            let action = model
+                .actions(&replay.state, true, true)
+                .into_iter()
+                .find(|candidate| {
+                    candidate.id == step.action
+                        && candidate.kind == step.kind
+                        && candidate.to == step.to
+                })
+                .unwrap_or_else(|| {
+                    panic!("witness action {} still available for replay", step.action)
+                });
+            replay = model
+                .expand(&replay, action, true, true)
+                .expect("replayed action stays within the elapsed/action bounds");
+        }
+        assert!(
+            replay.state.next_step as usize > 0,
+            "replaying the witness's own recorded actions must re-derive the step-committed \
+             goal state: {:#?}",
+            replay.state
+        );
+        assert_eq!(replay.state, found.state);
+    }
 }
