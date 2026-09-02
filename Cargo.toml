@@ -1,6 +1,6 @@
 [package]
 name = "narrator-validator"
-version = "1.11.4"
+version = "1.11.5"
 default-run = "narrator-validator"
 edition = "2021"
 rust-version = "1.80"
