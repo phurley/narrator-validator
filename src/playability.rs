@@ -285,6 +285,24 @@ struct Unsupported {
     path: String,
     pointer: String,
     range: Option<SourceRange>,
+    /// True when the flagged construct is structurally excluded from the
+    /// search itself: an unsatisfiable predicate (`Predicate::Never`), a
+    /// route/visibility gate that can never hold (`has()` never returns
+    /// true for an `entity.*` id), or a command/trigger filtered out of
+    /// the candidate set entirely (`unsupported_commands`/
+    /// `unsupported_triggers`). No witness the search finds can ever
+    /// depend on a search-excluded construct, so it can never demote a
+    /// genuinely-proved end/step -- see narrator-validator#88.
+    ///
+    /// False for the rarer constructs that stay *live* in the model
+    /// despite being unsupported (an authored actor/owner that can't be
+    /// resolved makes a fact/trigger's `on` gate silently drop to
+    /// "ambient", not disappear; an ambiguous deduction remains fully
+    /// establishable). For those, `witness_subject` names the id whose
+    /// presence in a witness's reached state marks the construct as
+    /// actually on that witness's path.
+    search_excluded: bool,
+    witness_subject: Option<String>,
 }
 
 #[derive(Clone, Default)]
@@ -355,6 +373,15 @@ struct Node {
     wait_minutes: u32,
     steps: Vec<PlayabilityStep>,
     unlocks: BTreeSet<String>,
+    /// IDs of `unsupported_triggers` whose `on` pattern actually matched
+    /// (and whose `when` held) at some action along this witness's path.
+    /// The trigger's real effect was never applied -- it's excluded from
+    /// firing -- but an unsupported trigger piggybacks on an otherwise
+    /// ordinary, still-available command, so this witness *did* take the
+    /// action that would genuinely have set it off. Used to scope
+    /// narrator-validator#88's demotion to witnesses this can actually
+    /// affect.
+    shadowed_triggers: BTreeSet<String>,
 }
 
 #[derive(Clone)]
@@ -722,9 +749,22 @@ impl Model {
                 let Some(item) = located_at(file, value, pointer, owner_id.clone()) else {
                     continue;
                 };
+                let unsupported_before = self.unsupported.len();
                 let on = field(&item.map, "on")
                     .and_then(Value::as_mapping)
                     .and_then(|map| self.pattern(file, &item.pointer, map, item.owner.as_deref()));
+                // `pattern()` failing here (authored actor / unresolved
+                // `owner`) doesn't drop the fact -- it drops the `on` gate,
+                // which falls through to the "ambient, fires once `when`
+                // holds" path below, i.e. this fact stays live in the
+                // search. Mark the note(s) it just raised as such, keyed by
+                // the fact that could actually end up on a witness.
+                if on.is_none() {
+                    for note in &mut self.unsupported[unsupported_before..] {
+                        note.search_excluded = false;
+                        note.witness_subject = Some(item.id.clone());
+                    }
+                }
                 let when = self.predicates(file, &item.pointer, &item.map);
                 let opening =
                     field(&item.map, "on").is_none() && field(&item.map, "when").is_none();
@@ -852,6 +892,21 @@ impl Model {
             let effects = self.effects(file, &item.pointer, &item.map, false);
             if self.unsupported.len() > unsupported_before {
                 self.unsupported_triggers.insert(item.id.clone());
+                // Unlike an unsupported command (whose entire action
+                // becomes unavailable, so it can never be part of any
+                // witness) an unsupported trigger piggybacks on whatever
+                // command matches its `on` pattern -- that command stays
+                // perfectly ordinary and available. A witness can
+                // therefore genuinely take the action that would have set
+                // this trigger off in the real game, even though the
+                // model silently drops its effect. Tag every note this
+                // trigger just raised (regardless of which specific
+                // sub-reason) so `witness_reached_by` can check whether
+                // this witness actually shadowed it.
+                for note in &mut self.unsupported[unsupported_before..] {
+                    note.search_excluded = false;
+                    note.witness_subject = Some(item.id.clone());
+                }
             }
             let mut facts = Vec::new();
             if let Some(values) = field(&item.map, "facts").and_then(Value::as_sequence) {
@@ -1148,6 +1203,18 @@ impl Model {
             path: file.path.clone(),
             pointer: pointer.to_string(),
             range: locate_pointer(file, pointer),
+            // Every call site that reaches this helper turns the flagged
+            // construct into something the search can never satisfy: a
+            // `Predicate::Never`, an unsatisfiable `entity.*` requirement,
+            // or (via the `unsupported_commands`/`unsupported_triggers`
+            // tracking around the calls in `read_commands`/`read_triggers`)
+            // a fully filtered-out command/trigger. The two call sites that
+            // instead leave a live, ambient construct behind (`pattern()`'s
+            // authored-actor/owner failures) patch `search_excluded` back
+            // to `false` immediately after, once the owning fact/trigger id
+            // is known.
+            search_excluded: true,
+            witness_subject: None,
         });
     }
 
@@ -1207,6 +1274,11 @@ impl Model {
                         path: fact.item.path.clone(),
                         pointer: fact.item.pointer.clone(),
                         range: fact.item.range,
+                        // A `Predicate::Never` gate, same as `predicates()`'s
+                        // fallbacks: the fact can never be learned by the
+                        // search, so no witness can ever depend on it.
+                        search_excluded: true,
+                        witness_subject: None,
                     });
                 }
             }
@@ -1253,6 +1325,15 @@ impl Model {
                     path: deduction.item.path.clone(),
                     pointer: format!("{}/inputs", deduction.item.pointer),
                     range: deduction.inputs_range,
+                    // Unlike every other unsupported construct, an
+                    // ambiguous deduction stays fully live in the search --
+                    // it is a genuine `command.deduce`/auto-established
+                    // deduction the model can and does establish, just one
+                    // whose runtime selection isn't guaranteed to match.
+                    // Only relevant to a witness that actually establishes
+                    // it.
+                    search_excluded: false,
+                    witness_subject: Some(id.clone()),
                 });
             }
         }
@@ -1636,6 +1717,26 @@ impl Model {
         if action.kind == "route" {
             next.route_actions += 1;
         }
+        // Record any `unsupported_triggers` this action's pattern would
+        // genuinely have fired (its `on` matches and `when` holds against
+        // the state *before* this action, same snapshot `apply_action`
+        // uses for its own real trigger matching below) -- narrator-
+        // validator#88 needs to know this witness actually took the action
+        // that shadows the trigger's un-modeled effect, not merely that
+        // the trigger exists somewhere in the story.
+        next.shadowed_triggers.extend(
+            self.triggers
+                .values()
+                .filter(|trigger| {
+                    self.unsupported_triggers.contains(&trigger.item.id)
+                        && trigger
+                            .on
+                            .as_ref()
+                            .is_some_and(|pattern| pattern_matches(pattern, &action.pattern))
+                        && predicates_hold(&trigger.when, &node.state, self.initial_minutes)
+                })
+                .map(|trigger| trigger.item.id.clone()),
+        );
         self.apply_action(&mut next.state, &action, &mut next.unlocks, auto_facts);
         self.settle(
             &mut next.state,
@@ -1777,6 +1878,7 @@ impl Model {
             wait_minutes: 0,
             steps: Vec::new(),
             unlocks,
+            shadowed_triggers: BTreeSet::new(),
         }
     }
 
@@ -2170,10 +2272,25 @@ impl Model {
             })
             .collect::<Vec<_>>();
         let terminal_paths = self.ends.iter().map(|end| {
-            if let Some(reason) = self.unsupported.first().filter(|_| proofs.contains_key(&end.item.id)) {
-                TerminalPathAnalysis { id: end.item.id.clone(), outcome: end.outcome.clone(), status: PlayabilityStatus::Inconclusive, path: end.item.path.clone(), pointer: end.item.pointer.clone(), range: end.item.range, lower_bound: None, blocker: Some(PlayabilityBlocker { code: reason.code.clone(), message: format!("a supported path was found, but `{}` may change its result; the path is not reported as proved", reason.message), path: reason.path.clone(), pointer: reason.pointer.clone(), range: reason.range, chain: vec![end.item.id.clone()] }) }
-            } else if let Some(node) = proofs.get(&end.item.id) {
-                TerminalPathAnalysis { id: end.item.id.clone(), outcome: end.outcome.clone(), status: PlayabilityStatus::Proved, path: end.item.path.clone(), pointer: end.item.pointer.clone(), range: end.item.range, lower_bound: Some(PlayabilityLowerBound { entry_setting: node.state.entry.clone(), action_count: node.actions, route_action_count: node.route_actions, elapsed_minutes: node.state.elapsed, wait_minutes: node.wait_minutes, required_waits: self.triggers.values().filter(|trigger| trigger.after > 0 && node.state.completed.contains(&trigger.item.id)).map(|trigger| PlayabilityRequiredWait { trigger: trigger.item.id.clone(), delay_minutes: trigger.after }).collect(), ordered_steps: node.steps.clone(), pivotal_unlocks: node.unlocks.iter().cloned().collect() }), blocker: None }
+            if let Some(node) = proofs.get(&end.item.id) {
+                // A witness was actually found. Only demote it to
+                // Inconclusive if some unsupported construct is both
+                // (a) still live in the search model (`search_excluded ==
+                // false`) and (b) actually reached by this specific
+                // witness (its `witness_subject` shows up in the state the
+                // witness settles into). Every other unsupported note
+                // describes something the search structurally could never
+                // have used to build this witness in the first place --
+                // see narrator-validator#88.
+                if let Some(reason) = self
+                    .unsupported
+                    .iter()
+                    .find(|reason| self.witness_reached_by(reason, node))
+                {
+                    TerminalPathAnalysis { id: end.item.id.clone(), outcome: end.outcome.clone(), status: PlayabilityStatus::Inconclusive, path: end.item.path.clone(), pointer: end.item.pointer.clone(), range: end.item.range, lower_bound: None, blocker: Some(PlayabilityBlocker { code: reason.code.clone(), message: format!("a supported path was found, but `{}` may change its result; the path is not reported as proved", reason.message), path: reason.path.clone(), pointer: reason.pointer.clone(), range: reason.range, chain: vec![end.item.id.clone()] }) }
+                } else {
+                    TerminalPathAnalysis { id: end.item.id.clone(), outcome: end.outcome.clone(), status: PlayabilityStatus::Proved, path: end.item.path.clone(), pointer: end.item.pointer.clone(), range: end.item.range, lower_bound: Some(PlayabilityLowerBound { entry_setting: node.state.entry.clone(), action_count: node.actions, route_action_count: node.route_actions, elapsed_minutes: node.state.elapsed, wait_minutes: node.wait_minutes, required_waits: self.triggers.values().filter(|trigger| trigger.after > 0 && node.state.completed.contains(&trigger.item.id)).map(|trigger| PlayabilityRequiredWait { trigger: trigger.item.id.clone(), delay_minutes: trigger.after }).collect(), ordered_steps: node.steps.clone(), pivotal_unlocks: node.unlocks.iter().cloned().collect() }), blocker: None }
+                }
             } else {
                 let unlearnable = end
                     .requirements
@@ -2265,6 +2382,45 @@ impl Model {
             solution_answerability,
             step_answerability,
         }
+    }
+
+    /// True if `reason` is both still live in the search model and its
+    /// flagged construct is actually part of the state `node`'s witness
+    /// settles into -- i.e. this specific proof genuinely depends on it,
+    /// rather than the construct merely existing somewhere else in the
+    /// story. See narrator-validator#88.
+    fn witness_reached_by(&self, reason: &Unsupported, node: &Node) -> bool {
+        if reason.search_excluded {
+            return false;
+        }
+        let Some(subject) = &reason.witness_subject else {
+            // A live-but-unattributed construct: we can't rule out
+            // relevance, so stay conservative and demote.
+            return true;
+        };
+        if node.state.facts.contains(subject)
+            || node.state.available_facts.contains(subject)
+            || node.state.deductions.contains(subject)
+            || node.state.flags.contains(subject)
+            || node.state.completed.contains(subject)
+            || node.shadowed_triggers.contains(subject)
+        {
+            return true;
+        }
+        // An unsupported trigger whose own `on` gate couldn't be resolved
+        // (rather than a supported gate this witness did or didn't
+        // shadow) can't be pinned to any specific action the witness took.
+        // Its precise firing point along the path also isn't observable
+        // from the final state alone (e.g. an `at`/`time before` predicate
+        // isn't monotonic). Stay conservative rather than guess.
+        if self
+            .triggers
+            .get(subject)
+            .is_some_and(|trigger| trigger.on.is_none())
+        {
+            return true;
+        }
+        false
     }
 
     fn has_possible_producer(&self, requirement: &str) -> bool {
@@ -3388,6 +3544,7 @@ mod tests {
             wait_minutes: 0,
             steps: Vec::new(),
             unlocks: BTreeSet::new(),
+            shadowed_triggers: BTreeSet::new(),
         }
     }
 
