@@ -2390,18 +2390,33 @@ impl Model {
             && self.end_satisfied(end, &candidate.state)
     }
 
-    /// Like `search_from`, but checks every still-unresolved end in `ends`
-    /// at each node reached, instead of a single fixed goal, recording the
-    /// first (minimal-action) witness found for each as it's discovered.
-    /// This is what turns the per-end bounded-recovery loop's cost from
-    /// `ends x seeds x budget` into `seeds x budget`: the reachable-state
-    /// walk from a given `seed` is identical regardless of which end it's
-    /// looking for, so one shared walk can serve every unresolved end
-    /// instead of a separate saturated walk per end. Soundness is
-    /// unchanged from `search_from`: every entry in the returned map is a
-    /// node genuinely reached from `seed` via real actions (`expand`) that
-    /// independently passes `end_recovery_satisfied` for that end, so
-    /// ends sharing a walk cannot manufacture a false proof for one another.
+    /// Like `search_from`, but resolves every still-unresolved end in
+    /// `ends` from one `seed`, instead of one fixed goal at a time.
+    ///
+    /// Each end gets its own independent best-first queue and dominance map
+    /// -- exactly the priority ordering a dedicated `search_from` call for
+    /// that end alone would use -- run in ROUND-ROBIN lockstep (one pop per
+    /// still-active end per round) so no single end's exploration can starve
+    /// another's turn. A single shared `min(shortfall)` priority (tried and
+    /// reverted during narrator-validator#99's development) or a shared
+    /// queue with fanned-out per-end priorities (also tried and reverted)
+    /// both let a permanently unreachable end -- one gated behind a
+    /// `Predicate::Never` unsupported construct still reports a small,
+    /// never-quite-zero shortfall that looks perpetually "almost there" --
+    /// dominate the shared frontier and starve a genuinely reachable end's
+    /// own convergence; wrong_floor's `end.elias_moves_sam` regressed from
+    /// Proved to Inconclusive under both. Round-robin fairness reproduces
+    /// each end's own dedicated search behavior exactly whenever only one
+    /// end remains (the common case), while `successor_cache` still shares
+    /// the actually-expensive part -- `actions`/`expand` -- across ends
+    /// whose searches visit the same physical state, which is where the
+    /// real per-(seed, end) redundancy the architect identified lives.
+    /// `explored` (successor-cache misses, i.e. genuinely new state
+    /// expansions) is bounded by `budget` in total across every end, same
+    /// spirit as `search_from`. Soundness is unchanged: every entry in the
+    /// returned map is a node genuinely reached from `seed` via real
+    /// actions (`expand`) that independently passes `end_recovery_satisfied`
+    /// for that end.
     fn search_from_multi_end(
         &self,
         seed: Node,
@@ -2411,70 +2426,98 @@ impl Model {
         ends: &[&EndRule],
     ) -> BTreeMap<String, Node> {
         let mut found = BTreeMap::<String, Node>::new();
-        let mut remaining = ends.to_vec();
-        remaining.retain(|end| {
+        let mut remaining = Vec::new();
+        for end in ends {
             if self.end_recovery_satisfied(end, &seed) {
                 found.insert(end.item.id.clone(), seed.clone());
-                false
             } else {
-                true
+                remaining.push(*end);
             }
-        });
+        }
         if remaining.is_empty() {
             return found;
         }
-        let min_shortfall = |node: &Node, remaining: &[&EndRule]| -> u32 {
-            remaining
-                .iter()
-                .map(|end| self.end_shortfall(end, &node.state))
-                .min()
-                .unwrap_or(0)
-        };
-        let mut queue = BinaryHeap::new();
-        let mut best = BTreeMap::<State, Vec<(u32, u32)>>::new();
-        best.entry(self.search_state_key(&seed.state))
-            .or_default()
-            .push((seed.actions, seed.state.elapsed));
-        let seed_h = min_shortfall(&seed, &remaining);
-        queue.push(HeuristicQueueNode(seed, seed_h));
+        let mut queues = Vec::with_capacity(remaining.len());
+        let mut bests = Vec::with_capacity(remaining.len());
+        for end in &remaining {
+            let mut best = BTreeMap::<State, Vec<(u32, u32)>>::new();
+            best.entry(self.search_state_key(&seed.state))
+                .or_default()
+                .push((seed.actions, seed.state.elapsed));
+            bests.push(best);
+            let mut queue = BinaryHeap::new();
+            let h = self.end_shortfall(end, &seed.state);
+            queue.push(HeuristicQueueNode(seed.clone(), h));
+            queues.push(queue);
+        }
+        let mut successor_cache = BTreeMap::<(State, u32, u32), Vec<Node>>::new();
         let mut explored = 0usize;
-        while let Some(HeuristicQueueNode(node, _)) = queue.pop() {
-            if explored >= budget || remaining.is_empty() {
-                break;
-            }
-            explored += 1;
-            if node.actions >= MAX_ACTIONS || node.state.elapsed >= MAX_ELAPSED_MINUTES {
-                continue;
-            }
-            for action in self.actions(&node.state, auto_facts, auto_deductions) {
-                let Some(next) = self.expand(&node, action, auto_facts, auto_deductions) else {
+        let mut active = vec![true; remaining.len()];
+        while explored < budget && active.iter().any(|is_active| *is_active) {
+            for index in 0..remaining.len() {
+                if !active[index] {
+                    continue;
+                }
+                if found.contains_key(&remaining[index].item.id) {
+                    active[index] = false;
+                    continue;
+                }
+                if explored >= budget {
+                    break;
+                }
+                let Some(HeuristicQueueNode(node, _)) = queues[index].pop() else {
+                    active[index] = false;
                     continue;
                 };
-                let cost = (next.actions, next.state.elapsed);
-                let costs = best.entry(self.search_state_key(&next.state)).or_default();
-                if costs
-                    .iter()
-                    .any(|known| known.0 <= cost.0 && known.1 <= cost.1)
-                {
-                    continue;
-                }
-                costs.retain(|known| !(cost.0 <= known.0 && cost.1 <= known.1));
-                costs.push(cost);
-                let mut newly_satisfied = Vec::new();
-                for end in &remaining {
-                    if self.end_recovery_satisfied(end, &next) {
-                        found.insert(end.item.id.clone(), next.clone());
-                        newly_satisfied.push(end.item.id.clone());
+                let expand_key = (
+                    self.search_state_key(&node.state),
+                    node.actions,
+                    node.state.elapsed,
+                );
+                let successors = if let Some(cached) = successor_cache.get(&expand_key) {
+                    cached.clone()
+                } else {
+                    explored += 1;
+                    let successors = if node.actions >= MAX_ACTIONS
+                        || node.state.elapsed >= MAX_ELAPSED_MINUTES
+                    {
+                        Vec::new()
+                    } else {
+                        self.actions(&node.state, auto_facts, auto_deductions)
+                            .into_iter()
+                            .filter_map(|action| {
+                                self.expand(&node, action, auto_facts, auto_deductions)
+                            })
+                            .collect::<Vec<_>>()
+                    };
+                    successor_cache.insert(expand_key, successors.clone());
+                    successors
+                };
+                for next in successors {
+                    let cost = (next.actions, next.state.elapsed);
+                    for (other_index, end) in remaining.iter().enumerate() {
+                        if found.contains_key(&end.item.id) {
+                            continue;
+                        }
+                        if self.end_recovery_satisfied(end, &next) {
+                            found.insert(end.item.id.clone(), next.clone());
+                            continue;
+                        }
+                        let costs = bests[other_index]
+                            .entry(self.search_state_key(&next.state))
+                            .or_default();
+                        if costs
+                            .iter()
+                            .any(|known| known.0 <= cost.0 && known.1 <= cost.1)
+                        {
+                            continue;
+                        }
+                        costs.retain(|known| !(cost.0 <= known.0 && cost.1 <= known.1));
+                        costs.push(cost);
+                        let h = self.end_shortfall(end, &next.state);
+                        queues[other_index].push(HeuristicQueueNode(next.clone(), h));
                     }
                 }
-                if !newly_satisfied.is_empty() {
-                    remaining.retain(|end| !newly_satisfied.contains(&end.item.id));
-                }
-                if remaining.is_empty() {
-                    return found;
-                }
-                let next_h = min_shortfall(&next, &remaining);
-                queue.push(HeuristicQueueNode(next, next_h));
             }
         }
         found
