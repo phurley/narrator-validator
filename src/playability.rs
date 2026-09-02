@@ -13,7 +13,7 @@ use serde_yaml::{Mapping, Value};
 
 use crate::{Position, SourceFile, SourceRange};
 
-const MODEL_VERSION: u32 = 3;
+const MODEL_VERSION: u32 = 4;
 const MAX_EXPLORED_STATES: usize = 25_000;
 const MAX_ACTIONS: u32 = 96;
 const MAX_ELAPSED_MINUTES: u32 = 2 * 24 * 60;
@@ -260,6 +260,18 @@ struct PointAward {
     requirements: Vec<String>,
 }
 
+/// The supported predicate subset -- deliberately has no variant that can
+/// require a subject's *absence*, or that an entity NOT be carried. `Has`
+/// only ever asserts presence (a fact/deduction/flag/trigger-completion, or
+/// the current location); nothing here or in `has()` can express "does not
+/// have". This is why `State::inventory` is safe to model as monotone
+/// (`command.take` only ever inserts, nothing ever removes): once a
+/// portable entity is picked up, there is no supported predicate that could
+/// possibly start failing because of it, so `command.drop` -- were it
+/// modeled -- could never make a previously-unreachable end/step reachable.
+/// Omitting it is therefore not a completeness gap in the take-only
+/// increment; it is provably inert for this predicate subset. See
+/// narrator-validator#96.
 #[derive(Clone)]
 enum Predicate {
     Has(String),
@@ -381,6 +393,28 @@ struct Model {
     /// in place of a flat binary "elsewhere" penalty -- see
     /// narrator-validator#94's Option B.
     hop_counts: BTreeMap<(String, String), u32>,
+    /// `entity.*` IDs authored with `physical.portable: true`. Populated
+    /// from the `entities` branch of `read_owned_facts`. Every portable
+    /// entity is a candidate for `command.take`, but not every one is
+    /// actually generated as a take action -- see `takeable_entities`.
+    portable_entities: BTreeSet<String>,
+    /// The subset of `portable_entities` that actually appears in some
+    /// *trigger's* `on` binding, a `solution_answer_rows` row, or a
+    /// `solve_steps` row's pool/cards -- i.e. an entity some trigger or
+    /// solve gate could actually care about the player carrying.
+    /// Deliberately NOT sourced from the full `precomputed_patterns` set:
+    /// an owned fact's `on` pattern binds `owner`, which always resolves to
+    /// that fact's own entity, so it's satisfied by co-location with itself
+    /// wherever it currently is and never needs carrying -- see
+    /// `precompute_takeable_entities`'s doc comment for why that
+    /// distinction matters in practice. `actions()` only ever generates a
+    /// `command.take` candidate for a member of this set, never for every
+    /// portable entity in the story: an unconstrained take-for-everything
+    /// model reintroduces the exact 2^k inventory-subset state-space
+    /// blowup narrator-validator#91/#94 just fixed for a different axis.
+    /// Built once in `normalize()`, after `precompute_patterns` and the
+    /// solve/solution rows are available.
+    takeable_entities: BTreeSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -409,6 +443,11 @@ struct State {
     /// Failed full-sequence attempts consumed so far. Only meaningful when
     /// `Model::max_attempts` is authored.
     attempts_used: u32,
+    /// Portable entities the player currently carries, via `command.take`.
+    /// Monotone -- nothing ever removes from this set; there is no
+    /// `command.drop` effect in the static model. See the doc comment on
+    /// `actions()`'s take-generation block for why that omission is sound.
+    inventory: BTreeSet<String>,
 }
 
 #[derive(Clone)]
@@ -751,6 +790,11 @@ impl Model {
                         }
                     }
                 } else if section == "entities" {
+                    if map(owner, "physical").and_then(|physical| bool_field(physical, "portable"))
+                        == Some(true)
+                    {
+                        self.portable_entities.insert(owner_id.clone());
+                    }
                     if let Some(container) =
                         map(owner, "initial").and_then(|initial| string(initial, "container"))
                     {
@@ -1505,10 +1549,55 @@ impl Model {
             .sort_by(|a, b| (&a.path, &a.pointer, &a.code).cmp(&(&b.path, &b.pointer, &b.code)));
         self.precompute_elapsed_equivalence_horizon();
         self.precompute_patterns();
+        self.precompute_takeable_entities();
         self.build_subject_witnesses();
         self.build_requirement_locations();
         self.build_fact_acquisition_locations();
         self.build_hop_counts();
+    }
+
+    /// Build `takeable_entities` -- see its field doc comment. Must run
+    /// after `precompute_patterns` (consumes its bindings) but has no
+    /// ordering dependency on the `build_*` steps that follow.
+    fn precompute_takeable_entities(&mut self) {
+        let mut referenced = BTreeSet::new();
+        // Deliberately trigger `on` bindings only, not every fact `on`
+        // binding (i.e. not the full `precomputed_patterns` set): an owned
+        // fact's `on` pattern binds `owner`, which resolves to the fact's
+        // own entity -- co-location with itself is automatic wherever that
+        // entity currently is, portable or not, so it never needs carrying.
+        // In quiet_kennel this distinction is the whole ballgame: every one
+        // of its 12 portable entities has a self-referential examine fact
+        // and so would appear in `precomputed_patterns`, but only the 4
+        // actually gated behind a cross-location trigger binding
+        // (`trigger.test_jo_curry_against_sedative_audit` and its
+        // siblings -- see narrator-validator#96) ever benefit from being
+        // carried. Restricting to trigger bindings keeps the take-action
+        // fan-out proportional to the real cross-room need instead of the
+        // story's total portable-entity count.
+        for pattern in self
+            .triggers
+            .values()
+            .filter_map(|trigger| trigger.on.as_ref())
+        {
+            referenced.extend(pattern.bindings.values().flatten().cloned());
+        }
+        for row in &self.solution_answer_rows {
+            referenced.extend(row.iter().cloned());
+        }
+        for step in &self.solve_steps {
+            for row in &step.rows {
+                match row {
+                    SolveRow::NOfM { pool, .. } => referenced.extend(pool.iter().cloned()),
+                    SolveRow::Ordered { cards } => referenced.extend(cards.iter().cloned()),
+                }
+            }
+        }
+        self.takeable_entities = self
+            .portable_entities
+            .intersection(&referenced)
+            .cloned()
+            .collect();
     }
 
     /// Build `hop_counts` -- see its field doc comment.
@@ -1722,8 +1811,10 @@ impl Model {
     /// location credit where the model tracks a physical position for the
     /// subject at all (`subject_locations`, populated from an authored
     /// `initial.location`/`initial.container`): being co-located with the
-    /// subject, or holding an explicit witness, establishes it. Most
-    /// characters (and every setting, which is never itself a
+    /// subject, or holding an explicit witness, establishes it. A portable
+    /// entity carried in `state.inventory` also counts, even away from its
+    /// authored starting location -- see `State::inventory`'s doc comment.
+    /// Most characters (and every setting, which is never itself a
     /// `subject_locations` key) have no authored physical position in this
     /// static model at all; those are treated as ambient background
     /// knowledge -- the named cast and the map are known from the outset,
@@ -1737,6 +1828,9 @@ impl Model {
                 .is_some_and(|witnesses| witnesses.iter().any(|witness| has(state, witness)));
         }
         if state.location == subject {
+            return true;
+        }
+        if state.inventory.contains(subject) {
             return true;
         }
         if let Some(location) = self.subject_locations.get(subject) {
@@ -2298,6 +2392,7 @@ impl Model {
             solution_solved: false,
             next_step: 0,
             attempts_used: 0,
+            inventory: BTreeSet::new(),
         };
         let mut unlocks = state.facts.union(&state.available_facts).cloned().collect();
         self.settle(&mut state, None, &mut unlocks, auto_facts, auto_deductions);
@@ -2934,6 +3029,45 @@ impl Model {
                 });
             }
         }
+        // `command.take` isn't in `precomputed_patterns` (its `item`
+        // parameter has `min: 1`, so `read_commands` marks it
+        // `requires_binding` and `precompute_patterns` skips generating a
+        // no-binding pattern for it) -- it needs one candidate per
+        // currently-reachable portable entity instead of a single fixed
+        // pattern. Restricted to `takeable_entities`, not every portable
+        // entity in the story: see that field's doc comment for why.
+        if self.commands.contains_key("command.take")
+            && !self.unsupported_commands.contains("command.take")
+        {
+            for item in &self.takeable_entities {
+                if state.inventory.contains(item) {
+                    continue;
+                }
+                if self.subject_locations.get(item) != Some(&state.location) {
+                    continue;
+                }
+                if !self
+                    .subject_requirements
+                    .get(item)
+                    .map_or(true, |requirements| {
+                        requirements.iter().all(|id| has(state, id))
+                    })
+                {
+                    continue;
+                }
+                actions.push(CandidateAction {
+                    kind: "take",
+                    id: format!("command.take {item}"),
+                    pattern: ActionPattern {
+                        command: "command.take".to_string(),
+                        bindings: BTreeMap::from([("item".to_string(), vec![item.clone()])]),
+                    },
+                    from: None,
+                    to: None,
+                    minutes: 0,
+                });
+            }
+        }
         for pattern in &self.precomputed_patterns {
             if self.action_available(pattern, state) {
                 let advances_time = self
@@ -3090,7 +3224,20 @@ impl Model {
                 || id.starts_with("trigger.")
             {
                 has(state, id)
-            } else if id.starts_with("entity.") || id.starts_with("character.") {
+            } else if id.starts_with("entity.") {
+                // A carried portable entity satisfies a binding wherever the
+                // player is, not only where it started -- see the doc
+                // comment on `State::inventory`. Characters are never
+                // carryable, so that branch below stays co-location-only.
+                (state.inventory.contains(id)
+                    || self.subject_locations.get(id) == Some(&state.location))
+                    && self
+                        .subject_requirements
+                        .get(id)
+                        .map_or(true, |requirements| {
+                            requirements.iter().all(|id| has(state, id))
+                        })
+            } else if id.starts_with("character.") {
                 self.subject_locations.get(id) == Some(&state.location)
                     && self
                         .subject_requirements
@@ -3202,6 +3349,17 @@ impl Model {
                 state.available_facts.remove(id);
                 state.facts.insert(id.to_string());
                 unlocks.insert(id.to_string());
+            }
+        }
+        if action.kind == "take" {
+            if let Some(item) = action
+                .pattern
+                .bindings
+                .get("item")
+                .and_then(|ids| ids.first())
+            {
+                state.inventory.insert(item.clone());
+                unlocks.insert(item.clone());
             }
         }
         if action.kind == "route" {
@@ -3680,6 +3838,7 @@ mod elapsed_equivalence_tests {
             solution_solved: false,
             next_step: 0,
             attempts_used: 0,
+            inventory: BTreeSet::new(),
         }
     }
 
@@ -3939,6 +4098,7 @@ mod tests {
             solution_solved: false,
             next_step: 0,
             attempts_used: 0,
+            inventory: BTreeSet::new(),
         };
 
         assert!(model
@@ -3973,6 +4133,7 @@ mod tests {
                 solution_solved: false,
                 next_step: 0,
                 attempts_used: 0,
+                inventory: BTreeSet::new(),
             },
             actions: 0,
             route_actions: 0,
@@ -4613,5 +4774,179 @@ flags:
             replay.state
         );
         assert_eq!(replay.state, found.state);
+    }
+
+    /// Two rooms, a `command.investigate` trigger whose `on` pattern binds
+    /// one entity present in each room (`entity.item` at `setting.room_a`,
+    /// `entity.device` fixed at `setting.room_b`), gated `when: at
+    /// setting.room_b` -- the exact shape narrator-validator#96 exists for
+    /// (quiet_kennel's `trigger.test_jo_curry_against_sedative_audit`).
+    /// `portable` toggles `entity.item`'s `physical.portable`, so the same
+    /// builder produces both the take-only-inventory fixture and its
+    /// portable:false control.
+    fn cross_room_investigate_story(portable: bool) -> String {
+        format!(
+            r#"
+case:
+  id: case.example
+  format_version: "3.7.0"
+  players:
+    min: 1
+    max: 4
+  initial_time: "09:00"
+  entry_settings: [setting.room_a]
+  exit_settings: [setting.room_a]
+end_states:
+  - id: end.cross_room_verified
+    name: Cross-room verified
+    outcome: won
+    resolution: full
+    requires: [flag.cross_room_verified]
+    text: The item is checked against the device in the other room.
+settings:
+  - id: setting.world
+    type: island
+    navigable: false
+    description: The world containing the playable rooms.
+  - id: setting.room_a
+    type: room
+    description: The room holding the portable item.
+    parent: setting.world
+  - id: setting.room_b
+    type: room
+    description: The room holding the fixed device.
+    parent: setting.world
+routes:
+  - id: route.a_b
+    from: setting.room_a
+    to: setting.room_b
+    bidirectional: true
+    travel_minutes: 5
+characters: []
+entities:
+  - id: entity.item
+    description: A small portable item.
+    physical:
+      portable: {portable}
+    initial:
+      container: setting.room_a
+  - id: entity.device
+    description: A fixed device bolted to the wall.
+    initial:
+      container: setting.room_b
+events: []
+deductions: []
+commands:
+  - id: command.take
+    name: Take
+    description: Pick up an entity that is present and portable.
+    parameters:
+      - name: item
+        types: [entity]
+        min: 1
+        max: 1
+  - id: command.investigate
+    name: Investigate
+    description: Compare the item against the device.
+    parameters:
+      - name: target
+        types: [entity]
+        min: 1
+        max: 1
+      - name: comparison
+        types: [entity]
+        min: 1
+        max: 1
+triggers:
+  - id: trigger.cross_room_check
+    name: Cross-room check
+    on:
+      command: command.investigate
+      parameters:
+        target: entity.item
+        comparison: entity.device
+    when:
+      all:
+        - at: setting.room_b
+    effects:
+      - operation: set_flag
+        flag: flag.cross_room_verified
+        value: true
+flags:
+  - id: flag.cross_room_verified
+    name: Cross-room verified
+    description: Whether the item has been checked against the device.
+    initial_state: false
+"#,
+            portable = portable
+        )
+    }
+
+    #[test]
+    fn portable_entity_can_be_carried_across_rooms_to_satisfy_a_cross_room_trigger() {
+        let source = cross_room_investigate_story(true);
+        let mut model = Model::from_files(&[SourceFile {
+            path: "story.yaml".to_string(),
+            source,
+        }]);
+        model.normalize();
+        assert!(
+            model.takeable_entities.contains("entity.item"),
+            "entity.item is portable and referenced in the trigger's own `on` binding, so it \
+             must be a take candidate: {:?}",
+            model.takeable_entities
+        );
+        let analysis = model.search(true, true);
+        let end = analysis
+            .terminal_paths
+            .iter()
+            .find(|end| end.id == "end.cross_room_verified")
+            .expect("end.cross_room_verified terminal path");
+        assert_eq!(
+            end.status,
+            PlayabilityStatus::Proved,
+            "carrying the portable item into room_b must let the cross-room trigger fire: \
+             {end:#?}"
+        );
+        let ordered_steps = &end
+            .lower_bound
+            .as_ref()
+            .expect("a proved end carries a lower-bound witness")
+            .ordered_steps;
+        assert!(
+            ordered_steps.iter().any(|step| step.kind == "take"),
+            "the witness must actually take the portable entity, not merely reach the room: \
+             {ordered_steps:#?}"
+        );
+    }
+
+    /// Soundness control for the fixture above: flip `physical.portable` to
+    /// `false` on the exact same setup. A non-portable entity must never
+    /// become carryable, so the cross-room trigger -- and the end it gates
+    /// -- must stay unreached.
+    #[test]
+    fn non_portable_entity_cannot_be_carried_and_the_cross_room_trigger_stays_unreached() {
+        let source = cross_room_investigate_story(false);
+        let mut model = Model::from_files(&[SourceFile {
+            path: "story.yaml".to_string(),
+            source,
+        }]);
+        model.normalize();
+        assert!(
+            model.takeable_entities.is_empty(),
+            "a non-portable entity must never be a take candidate: {:?}",
+            model.takeable_entities
+        );
+        let analysis = model.search(true, true);
+        let end = analysis
+            .terminal_paths
+            .iter()
+            .find(|end| end.id == "end.cross_room_verified")
+            .expect("end.cross_room_verified terminal path");
+        assert_ne!(
+            end.status,
+            PlayabilityStatus::Proved,
+            "a non-portable entity must not let the cross-room trigger fire: {end:#?}"
+        );
     }
 }
