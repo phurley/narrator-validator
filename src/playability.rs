@@ -20,6 +20,19 @@ const MAX_EXPLORED_STATES: usize = 25_000;
 // reachable graph from the story's beginning -- see `search_from`'s doc
 // comment. That narrower starting point means a larger budget here is cheap
 // where the same bump on the main `search` would not be (narrator-validator#99).
+//
+// Only the step-chaining leg (`search`'s per-step recovery loop) uses this
+// larger budget. The per-end recovery loop deliberately keeps the smaller
+// `MAX_EXPLORED_STATES` instead: unlike step-chaining, a story can have
+// several ends that are permanently unreachable for a budget-independent
+// reason (e.g. blocked by an unsupported-construct-gated fact), and each
+// such end gets its own dedicated `search_from` leg per seed (see
+// `search_from_multi_end`'s doc comment for why that per-end loop, not a
+// shared multi-goal search, is what's sound here) -- multiplying THIS
+// budget by `ends x seeds` the way step-chaining's single-leg-per-step cost
+// doesn't multiply. wrong_floor (3 of 5 ends permanently blocked) measured
+// this directly: giving the end-leg budget the same 60,000 bump nearly
+// tripled its wall-clock for zero proof-status benefit.
 const LEG_MAX_EXPLORED_STATES: usize = 60_000;
 const MAX_ACTIONS: u32 = 96;
 const MAX_ELAPSED_MINUTES: u32 = 2 * 24 * 60;
@@ -2750,10 +2763,11 @@ impl Model {
         // was reverted: every sharing design tried could starve a
         // genuinely reachable end when it shared a seed with several
         // permanently-blocked ones, which the ticket's byte-identical
-        // requirement can't tolerate. What #99 *does* change here is the
-        // budget: `LEG_MAX_EXPLORED_STATES` instead of the old fixed
-        // 25,000, since a leg seeded from a genuine playthrough checkpoint
-        // is cheap to afford a larger budget on even without sharing.
+        // requirement can't tolerate. Unlike the step-chaining leg above,
+        // this loop keeps the ORIGINAL `MAX_EXPLORED_STATES` budget rather
+        // than `LEG_MAX_EXPLORED_STATES` -- see `LEG_MAX_EXPLORED_STATES`'s
+        // doc comment for why a bigger budget here multiplies badly
+        // (`ends x seeds x budget`) rather than helping.
         if bounded {
             let seeds = std::iter::once(step_nodes[self.solve_steps.len()].clone())
                 .chain(step_fail_nodes.iter().cloned())
@@ -2771,7 +2785,7 @@ impl Model {
                     seed,
                     auto_facts,
                     auto_deductions,
-                    LEG_MAX_EXPLORED_STATES,
+                    MAX_EXPLORED_STATES,
                     &unresolved,
                 );
                 proofs.extend(found);
