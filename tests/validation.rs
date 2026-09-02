@@ -5872,6 +5872,89 @@ fn reference_text_reports_cycle_reached_from_case_players_description() {
 }
 
 #[test]
+fn reference_text_resolves_persona_description_and_narrator_guidance() {
+    let source = format_3_6_players_story()
+        .replace(
+            "description: Leads the investigation and asks the questions.",
+            "description: \"The Detective investigates [[character.victim.description]]\"",
+        )
+        .replace(
+            "  - id: character.culprit\n    description: A suspect with a carefully guarded secret.\n",
+            "  - id: character.culprit\n    description: A suspect with a carefully guarded secret.\n    narrator_guidance:\n      secret: The culprit hid the murder weapon.\n",
+        )
+        .replace(
+            "narrator_guidance: Address this player directly when revealing deductions.",
+            "narrator_guidance: \"Privately tell them [[character.culprit.narrator_guidance.secret]]\"",
+        );
+    let persona_report = report(source);
+    assert!(persona_report.valid, "{:#?}", persona_report.diagnostics);
+
+    let description = persona_report
+        .reference_text
+        .iter()
+        .find(|field| field.pointer == "/case/players/personas/0/description")
+        .expect("persona description was resolved");
+    assert_eq!(
+        description.resolved,
+        "The Detective investigates The victim at the center of the mystery."
+    );
+    assert_eq!(
+        description.provenance[0].expression.target_id,
+        "character.victim"
+    );
+
+    let guidance = persona_report
+        .reference_text
+        .iter()
+        .find(|field| field.pointer == "/case/players/personas/0/narrator_guidance")
+        .expect("persona narrator guidance was resolved");
+    assert_eq!(
+        guidance.resolved,
+        "Privately tell them The culprit hid the murder weapon."
+    );
+    assert_eq!(
+        guidance.provenance[0].expression.target_id,
+        "character.culprit"
+    );
+}
+
+#[test]
+fn reference_text_reports_unknown_id_and_disclosure_in_persona_prose() {
+    let unknown_source = format_3_6_players_story().replace(
+        "description: Leads the investigation and asks the questions.",
+        "description: \"[[character.unknown]]\"",
+    );
+    let unknown = report(unknown_source)
+        .diagnostics
+        .into_iter()
+        .find(|diagnostic| diagnostic.code == "reference_text.unknown_id")
+        .expect("unknown-id diagnostic for persona description");
+    assert_eq!(
+        unknown.pointer.as_deref(),
+        Some("/case/players/personas/0/description")
+    );
+
+    let disclosure_source = format_3_6_players_story()
+        .replace(
+            "  - id: character.victim\n    description: The victim at the center of the mystery.\n",
+            "  - id: character.victim\n    description: The victim at the center of the mystery.\n    narrator_guidance:\n      secret: The victim knew the culprit.\n",
+        )
+        .replace(
+            "description: Leads the investigation and asks the questions.",
+            "description: \"[[character.victim.narrator_guidance.secret]]\"",
+        );
+    let disclosure = report(disclosure_source)
+        .diagnostics
+        .into_iter()
+        .find(|diagnostic| diagnostic.code == "reference_text.disclosure")
+        .expect("disclosure diagnostic for persona description");
+    assert_eq!(
+        disclosure.pointer.as_deref(),
+        Some("/case/players/personas/0/description")
+    );
+}
+
+#[test]
 fn reference_text_reports_unknown_missing_non_string_empty_and_malformed_targets() {
     let cases = [
         ("[[character.unknown]]", "reference_text.unknown_id"),

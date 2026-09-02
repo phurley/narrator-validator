@@ -9208,6 +9208,7 @@ impl<'a> Validator<'a> {
                 collect_item_text_consumers(item, &mut consumers);
             }
         }
+        collect_persona_text_consumers(cases, &mut consumers);
         collect_nested_command_text(commands, &mut consumers);
         collect_nested_command_text(triggers, &mut consumers);
         for file in &self.parsed {
@@ -9826,6 +9827,41 @@ fn collect_item_text_consumers(item: &Item, consumers: &mut Vec<TextConsumer>) {
                 authored: text.to_string(),
                 disclosure: field.disclosure,
             });
+        }
+    }
+}
+
+fn collect_persona_text_consumers(cases: &[Item], consumers: &mut Vec<TextConsumer>) {
+    for case in cases {
+        let Some(personas) =
+            mapping_path(&case.mapping, "players.personas").and_then(Value::as_sequence)
+        else {
+            continue;
+        };
+        for (index, persona) in personas.iter().enumerate() {
+            let Some(persona) = persona.as_mapping() else {
+                continue;
+            };
+            let owner_id = string_field(persona, "id").map(str::to_string);
+            for field in CONSUMER_FIELDS
+                .iter()
+                .filter(|field| field.kind == "persona")
+            {
+                if let Some(text) = mapping_path(persona, field.path).and_then(Value::as_str) {
+                    consumers.push(TextConsumer {
+                        owner_id: owner_id.clone(),
+                        path: case.path.clone(),
+                        source: case.source.clone(),
+                        pointer: format!(
+                            "{}/players/personas/{index}/{}",
+                            case.pointer,
+                            field.path.replace('.', "/")
+                        ),
+                        authored: text.to_string(),
+                        disclosure: field.disclosure,
+                    });
+                }
+            }
         }
     }
 }
