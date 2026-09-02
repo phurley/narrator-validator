@@ -2463,23 +2463,30 @@ impl Model {
             .push((seed.actions, seed.state.elapsed));
         let mut expanded = BTreeSet::<(State, u32, u32)>::new();
         let mut explored = 0usize;
-        let mut active = vec![true; remaining.len()];
-        while explored < budget && active.iter().any(|is_active| *is_active) {
+        // A round-robin round: one pop attempt per still-unresolved end.
+        // An end's queue coming up empty on a given round does NOT retire
+        // it -- another end's turn later in this same round (or a later
+        // round) can still push fresh entries into it via the multi-push
+        // below, so only a round in which *no* end anywhere made any
+        // progress (`any_progress` stays false) proves the frontier is
+        // truly, permanently exhausted.
+        loop {
+            if explored >= budget || remaining.iter().all(|end| found.contains_key(&end.item.id))
+            {
+                break;
+            }
+            let mut any_progress = false;
             for index in 0..remaining.len() {
-                if !active[index] {
-                    continue;
-                }
                 if found.contains_key(&remaining[index].item.id) {
-                    active[index] = false;
                     continue;
                 }
                 if explored >= budget {
                     break;
                 }
                 let Some(HeuristicQueueNode(node, _)) = queues[index].pop() else {
-                    active[index] = false;
                     continue;
                 };
+                any_progress = true;
                 let expand_key = (
                     self.search_state_key(&node.state),
                     node.actions,
@@ -2523,6 +2530,9 @@ impl Model {
                         queues[other_index].push(HeuristicQueueNode(next.clone(), h));
                     }
                 }
+            }
+            if !any_progress {
+                break;
             }
         }
         found
