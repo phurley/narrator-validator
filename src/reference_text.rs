@@ -135,6 +135,11 @@ pub const CONSUMER_FIELDS: &[ConsumerField] = &[
         disclosure: PUBLIC,
     },
     ConsumerField {
+        kind: "case",
+        path: "players.description",
+        disclosure: PUBLIC,
+    },
+    ConsumerField {
         kind: "setting",
         path: "name",
         disclosure: PUBLIC,
