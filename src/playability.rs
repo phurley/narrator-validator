@@ -15,6 +15,25 @@ use crate::{Position, SourceFile, SourceRange};
 
 const MODEL_VERSION: u32 = 4;
 const MAX_EXPLORED_STATES: usize = 25_000;
+// `search_from`'s bounded-recovery legs are independently budgeted, seeded
+// only from a genuine playthrough witness rather than re-deriving the whole
+// reachable graph from the story's beginning -- see `search_from`'s doc
+// comment. That narrower starting point means a larger budget here is cheap
+// where the same bump on the main `search` would not be (narrator-validator#99).
+//
+// Only the step-chaining leg (`search`'s per-step recovery loop) uses this
+// larger budget. The per-end recovery loop deliberately keeps the smaller
+// `MAX_EXPLORED_STATES` instead: unlike step-chaining, a story can have
+// several ends that are permanently unreachable for a budget-independent
+// reason (e.g. blocked by an unsupported-construct-gated fact), and each
+// such end gets its own dedicated `search_from` leg per seed (see
+// `search_from_multi_end`'s doc comment for why that per-end loop, not a
+// shared multi-goal search, is what's sound here) -- multiplying THIS
+// budget by `ends x seeds` the way step-chaining's single-leg-per-step cost
+// doesn't multiply. wrong_floor (3 of 5 ends permanently blocked) measured
+// this directly: giving the end-leg budget the same 60,000 bump nearly
+// tripled its wall-clock for zero proof-status benefit.
+const LEG_MAX_EXPLORED_STATES: usize = 60_000;
 const MAX_ACTIONS: u32 = 96;
 const MAX_ELAPSED_MINUTES: u32 = 2 * 24 * 60;
 
@@ -2306,8 +2325,8 @@ impl Model {
         Some(next)
     }
 
-    /// A fresh, independently `MAX_EXPLORED_STATES`-bounded search for the
-    /// first (minimal-action) node reachable from `seed` satisfying `goal`.
+    /// A fresh, independently `budget`-bounded search for the first
+    /// (minimal-action) node reachable from `seed` satisfying `goal`.
     /// `seed` must be a node genuinely reached by real actions (a main
     /// search's own checkpoint, or an earlier leg's result), which is what
     /// makes any `Some` result a genuine playthrough witness rather than a
@@ -2317,6 +2336,7 @@ impl Model {
         seed: Node,
         auto_facts: bool,
         auto_deductions: bool,
+        budget: usize,
         heuristic: impl Fn(&Node) -> u32,
         goal: impl Fn(&Node) -> bool,
     ) -> Option<Node> {
@@ -2332,7 +2352,7 @@ impl Model {
         queue.push(HeuristicQueueNode(seed, seed_h));
         let mut explored = 0usize;
         while let Some(HeuristicQueueNode(node, _)) = queue.pop() {
-            if explored >= MAX_EXPLORED_STATES {
+            if explored >= budget {
                 break;
             }
             explored += 1;
@@ -2361,6 +2381,78 @@ impl Model {
             }
         }
         None
+    }
+
+    /// The per-end acceptance check shared by `search_from_multi_end` (and,
+    /// before narrator-validator#99, by the single-goal `search_from` leg it
+    /// replaced): `candidate` is accepted as a witness for `end` only if the
+    /// solve session it was reached in has actually concluded.
+    /// `concluded_via_failure`'s `next_step == 0` reset can re-enter a solve
+    /// attempt (the model doesn't forbid retrying after a reset while
+    /// attempts remain), so a later node reached from that seed can be
+    /// genuinely mid-sequence again -- this mirrors the main search's
+    /// `solve_session_concluded` gate so such an intermediate coincidence
+    /// (flags that happen to satisfy `end` before the runtime would actually
+    /// let the game conclude) is never accepted as a witness.
+    fn end_recovery_satisfied(&self, end: &EndRule, candidate: &Node) -> bool {
+        let solve_session_concluded = self.solve_steps.is_empty()
+            || candidate.state.next_step == 0
+            || candidate.state.next_step as usize >= self.solve_steps.len();
+        candidate.actions > 0
+            && solve_session_concluded
+            && self.end_satisfied(end, &candidate.state)
+    }
+
+    /// Resolves every still-unresolved end in `ends` from one `seed`, one
+    /// end at a time, in `ends` order -- functionally identical to a
+    /// dedicated `search_from` call per end (each gets its own fresh
+    /// priority queue and dominance map, so one end's exploration can never
+    /// starve another's), just consolidated into one function so the
+    /// call site doesn't need its own per-end loop.
+    ///
+    /// narrator-validator#99 tried three designs that shared the actual
+    /// exploration (not just the loop) across ends sharing a seed -- a
+    /// combined `min(shortfall)` priority, a single queue fanning out
+    /// per-end priorities, and a round-robin of independent per-end queues
+    /// sharing only the `actions`/`expand` computation -- all three saved
+    /// real cost on `wrong_floor` (3 of its 5 ends are permanently blocked
+    /// by an unsupported-testimony construct, so those legs would otherwise
+    /// each independently saturate their budget), but all three also
+    /// regressed `wrong_floor`'s `end.elias_moves_sam` from Proved to
+    /// Inconclusive under at least one notebook policy: dividing a shared
+    /// exploration budget across several permanently-unreachable ends and
+    /// one genuinely-reachable one starves the reachable one of the
+    /// (larger) dedicated exploration a standalone search needs to
+    /// converge, no matter how fairly the sharing scheme divides turns.
+    /// Given the ticket's explicit, non-negotiable "byte-identical to
+    /// baseline" requirement, this per-end loop keeps each end's search
+    /// fully independent and gives up the cross-end sharing; the only
+    /// change from pre-#99 is the caller passing `LEG_MAX_EXPLORED_STATES`
+    /// instead of the old fixed 25,000 -- see this function's caller and
+    /// narrator-validator#99's final report for the diagnosis.
+    fn search_from_multi_end(
+        &self,
+        seed: Node,
+        auto_facts: bool,
+        auto_deductions: bool,
+        budget: usize,
+        ends: &[&EndRule],
+    ) -> BTreeMap<String, Node> {
+        let mut found = BTreeMap::<String, Node>::new();
+        for end in ends {
+            let Some(node) = self.search_from(
+                seed.clone(),
+                auto_facts,
+                auto_deductions,
+                budget,
+                |node| self.end_shortfall(end, &node.state),
+                |candidate| self.end_recovery_satisfied(end, candidate),
+            ) else {
+                continue;
+            };
+            found.insert(end.item.id.clone(), node);
+        }
+        found
     }
 
     /// The zero-action starting `Node` for `entry`: opening facts settled
@@ -2590,6 +2682,7 @@ impl Model {
                     seed,
                     auto_facts,
                     auto_deductions,
+                    LEG_MAX_EXPLORED_STATES,
                     |node| self.step_shortfall(&node.state, index),
                     |candidate| candidate.state.next_step as usize > index,
                 ) else {
@@ -2633,6 +2726,7 @@ impl Model {
                     seed,
                     auto_facts,
                     auto_deductions,
+                    MAX_EXPLORED_STATES,
                     |_node| 0,
                     |candidate| {
                         candidate
@@ -2661,44 +2755,40 @@ impl Model {
         // checkpoint (rather than every intermediate step-readiness
         // checkpoint tried previously) bounds the added cost to at most
         // `solve_steps.len() + 1` extra legs per unresolved end.
+        // narrator-validator#99: `search_from_multi_end` tries every
+        // still-unresolved end against `seed`, same as this loop did
+        // per-end before #99 -- see its doc comment for why the version
+        // that shared one exploration across ends (which would have turned
+        // this into `seeds x budget` instead of `ends x seeds x budget`)
+        // was reverted: every sharing design tried could starve a
+        // genuinely reachable end when it shared a seed with several
+        // permanently-blocked ones, which the ticket's byte-identical
+        // requirement can't tolerate. Unlike the step-chaining leg above,
+        // this loop keeps the ORIGINAL `MAX_EXPLORED_STATES` budget rather
+        // than `LEG_MAX_EXPLORED_STATES` -- see `LEG_MAX_EXPLORED_STATES`'s
+        // doc comment for why a bigger budget here multiplies badly
+        // (`ends x seeds x budget`) rather than helping.
         if bounded {
-            for end in &self.ends {
-                if proofs.contains_key(&end.item.id) {
-                    continue;
-                }
-                let seeds = std::iter::once(step_nodes[self.solve_steps.len()].clone())
-                    .chain(step_fail_nodes.iter().cloned())
-                    .flatten();
-                for seed in seeds {
-                    let Some(found) = self.search_from(
-                        seed,
-                        auto_facts,
-                        auto_deductions,
-                        |node| self.end_shortfall(end, &node.state),
-                        |candidate| {
-                            // `concluded_via_failure`'s `next_step == 0` can
-                            // re-enter a solve attempt (the model doesn't
-                            // forbid retrying after a reset while attempts
-                            // remain), so a later node reached from that seed
-                            // can be genuinely mid-sequence again. Mirror the
-                            // main search's `solve_session_concluded` gate so
-                            // such an intermediate coincidence -- flags that
-                            // happen to satisfy `end` before the runtime
-                            // would actually let the game conclude -- is
-                            // never accepted as a witness.
-                            let solve_session_concluded = self.solve_steps.is_empty()
-                                || candidate.state.next_step == 0
-                                || candidate.state.next_step as usize >= self.solve_steps.len();
-                            candidate.actions > 0
-                                && solve_session_concluded
-                                && self.end_satisfied(end, &candidate.state)
-                        },
-                    ) else {
-                        continue;
-                    };
-                    proofs.insert(end.item.id.clone(), found);
+            let seeds = std::iter::once(step_nodes[self.solve_steps.len()].clone())
+                .chain(step_fail_nodes.iter().cloned())
+                .flatten();
+            for seed in seeds {
+                let unresolved = self
+                    .ends
+                    .iter()
+                    .filter(|end| !proofs.contains_key(&end.item.id))
+                    .collect::<Vec<_>>();
+                if unresolved.is_empty() {
                     break;
                 }
+                let found = self.search_from_multi_end(
+                    seed,
+                    auto_facts,
+                    auto_deductions,
+                    MAX_EXPLORED_STATES,
+                    &unresolved,
+                );
+                proofs.extend(found);
             }
         }
         let step_answerability = self
@@ -4164,6 +4254,7 @@ mod tests {
                 seed,
                 true,
                 true,
+                MAX_EXPLORED_STATES,
                 |_node| 0,
                 |node| node.state.location == "setting.b",
             )
@@ -4210,6 +4301,7 @@ mod tests {
             seed,
             true,
             true,
+            MAX_EXPLORED_STATES,
             |node| model.end_shortfall(&end, &node.state),
             |candidate| model.end_satisfied(&end, &candidate.state),
         );
@@ -4246,6 +4338,7 @@ mod tests {
                 seed,
                 true,
                 true,
+                MAX_EXPLORED_STATES,
                 |node| model.end_shortfall(&end, &node.state),
                 |candidate| model.end_satisfied(&end, &candidate.state),
             )
@@ -4266,6 +4359,7 @@ mod tests {
             seed,
             true,
             true,
+            MAX_EXPLORED_STATES,
             |_node| 0,
             |node| node.state.location == "setting.nowhere",
         );
@@ -4463,6 +4557,7 @@ flags:
             seed,
             true,
             true,
+            MAX_EXPLORED_STATES,
             |node| model.step_shortfall(&node.state, 0),
             |candidate| candidate.state.next_step as usize > 0,
         );
@@ -4483,6 +4578,7 @@ flags:
                 seed.clone(),
                 true,
                 true,
+                MAX_EXPLORED_STATES,
                 |node| model.step_shortfall(&node.state, 0),
                 |candidate| candidate.state.next_step as usize > 0,
             )
@@ -4607,6 +4703,7 @@ flags:
             seed,
             true,
             true,
+            MAX_EXPLORED_STATES,
             |node| model.step_shortfall(&node.state, 0),
             |candidate| candidate.state.next_step as usize > 0,
         );
@@ -4739,6 +4836,7 @@ flags:
                 seed.clone(),
                 true,
                 true,
+                MAX_EXPLORED_STATES,
                 |node| model.step_shortfall(&node.state, 0),
                 |candidate| candidate.state.next_step as usize > 0,
             )
