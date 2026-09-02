@@ -1736,6 +1736,50 @@ impl Model {
         None
     }
 
+    /// The zero-action starting `Node` for `entry`: opening facts settled
+    /// (auto- or claimable, per `auto_facts`), initial flags applied, and
+    /// any opening deductions/point-awards already resolved. Shared by
+    /// `search`'s per-entry seeding and by whitebox tests that need a
+    /// genuine seed for `search_from` without re-deriving this setup.
+    fn opening_node(&self, entry: &str, auto_facts: bool, auto_deductions: bool) -> Node {
+        let opening_facts = self
+            .facts
+            .values()
+            .filter(|fact| fact.opening)
+            .map(|fact| fact.item.id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut state = State {
+            entry: entry.to_string(),
+            location: entry.to_string(),
+            elapsed: 0,
+            facts: auto_facts
+                .then_some(opening_facts.clone())
+                .unwrap_or_default(),
+            available_facts: (!auto_facts).then_some(opening_facts).unwrap_or_default(),
+            deductions: BTreeSet::new(),
+            flags: self.initial_flags.clone(),
+            completed: BTreeSet::new(),
+            pending: Vec::new(),
+            score: 0,
+            point_claims: BTreeMap::new(),
+            solution_solved: false,
+            next_step: 0,
+            attempts_used: 0,
+        };
+        let mut unlocks = state.facts.union(&state.available_facts).cloned().collect();
+        self.settle(&mut state, None, &mut unlocks, auto_facts, auto_deductions);
+        let opening_deductions = state.deductions.clone();
+        self.apply_deduction_point_awards(&mut state, &opening_deductions, &mut unlocks);
+        Node {
+            state,
+            actions: 0,
+            route_actions: 0,
+            wait_minutes: 0,
+            steps: Vec::new(),
+            unlocks,
+        }
+    }
+
     fn search(&self, auto_facts: bool, auto_deductions: bool) -> NotebookPolicyAnalysis {
         let mut queue = BinaryHeap::new();
         // A canonical state can be reached with fewer actions but more elapsed
@@ -1745,42 +1789,7 @@ impl Model {
         let mut best = BTreeMap::<State, Vec<(u32, u32)>>::new();
         let mut reached_states = Vec::new();
         for entry in &self.entries {
-            let opening_facts = self
-                .facts
-                .values()
-                .filter(|fact| fact.opening)
-                .map(|fact| fact.item.id.clone())
-                .collect::<BTreeSet<_>>();
-            let mut state = State {
-                entry: entry.clone(),
-                location: entry.clone(),
-                elapsed: 0,
-                facts: auto_facts
-                    .then_some(opening_facts.clone())
-                    .unwrap_or_default(),
-                available_facts: (!auto_facts).then_some(opening_facts).unwrap_or_default(),
-                deductions: BTreeSet::new(),
-                flags: self.initial_flags.clone(),
-                completed: BTreeSet::new(),
-                pending: Vec::new(),
-                score: 0,
-                point_claims: BTreeMap::new(),
-                solution_solved: false,
-                next_step: 0,
-                attempts_used: 0,
-            };
-            let mut unlocks = state.facts.union(&state.available_facts).cloned().collect();
-            self.settle(&mut state, None, &mut unlocks, auto_facts, auto_deductions);
-            let opening_deductions = state.deductions.clone();
-            self.apply_deduction_point_awards(&mut state, &opening_deductions, &mut unlocks);
-            let node = Node {
-                state,
-                actions: 0,
-                route_actions: 0,
-                wait_minutes: 0,
-                steps: Vec::new(),
-                unlocks,
-            };
+            let node = self.opening_node(entry, auto_facts, auto_deductions);
             best.entry(self.search_state_key(&node.state))
                 .or_default()
                 .push((0, 0));
