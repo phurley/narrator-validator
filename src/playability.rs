@@ -399,15 +399,21 @@ struct Model {
     /// actually generated as a take action -- see `takeable_entities`.
     portable_entities: BTreeSet<String>,
     /// The subset of `portable_entities` that actually appears in some
-    /// `precomputed_patterns` binding, a `solution_answer_rows` row, or a
-    /// `solve_steps` row's pool/cards -- i.e. an entity some trigger, fact,
-    /// or solve gate could actually care about the player carrying.
-    /// `actions()` only ever generates a `command.take` candidate for a
-    /// member of this set, never for every portable entity in the story:
-    /// an unconstrained take-for-everything model reintroduces the exact
-    /// 2^k inventory-subset state-space blowup narrator-validator#91/#94
-    /// just fixed for a different axis. Built once in `normalize()`, after
-    /// `precompute_patterns` and the solve/solution rows are available.
+    /// *trigger's* `on` binding, a `solution_answer_rows` row, or a
+    /// `solve_steps` row's pool/cards -- i.e. an entity some trigger or
+    /// solve gate could actually care about the player carrying.
+    /// Deliberately NOT sourced from the full `precomputed_patterns` set:
+    /// an owned fact's `on` pattern binds `owner`, which always resolves to
+    /// that fact's own entity, so it's satisfied by co-location with itself
+    /// wherever it currently is and never needs carrying -- see
+    /// `precompute_takeable_entities`'s doc comment for why that
+    /// distinction matters in practice. `actions()` only ever generates a
+    /// `command.take` candidate for a member of this set, never for every
+    /// portable entity in the story: an unconstrained take-for-everything
+    /// model reintroduces the exact 2^k inventory-subset state-space
+    /// blowup narrator-validator#91/#94 just fixed for a different axis.
+    /// Built once in `normalize()`, after `precompute_patterns` and the
+    /// solve/solution rows are available.
     takeable_entities: BTreeSet<String>,
 }
 
@@ -784,8 +790,7 @@ impl Model {
                         }
                     }
                 } else if section == "entities" {
-                    if map(owner, "physical")
-                        .and_then(|physical| bool_field(physical, "portable"))
+                    if map(owner, "physical").and_then(|physical| bool_field(physical, "portable"))
                         == Some(true)
                     {
                         self.portable_entities.insert(owner_id.clone());
@@ -1556,7 +1561,25 @@ impl Model {
     /// ordering dependency on the `build_*` steps that follow.
     fn precompute_takeable_entities(&mut self) {
         let mut referenced = BTreeSet::new();
-        for pattern in &self.precomputed_patterns {
+        // Deliberately trigger `on` bindings only, not every fact `on`
+        // binding (i.e. not the full `precomputed_patterns` set): an owned
+        // fact's `on` pattern binds `owner`, which resolves to the fact's
+        // own entity -- co-location with itself is automatic wherever that
+        // entity currently is, portable or not, so it never needs carrying.
+        // In quiet_kennel this distinction is the whole ballgame: every one
+        // of its 12 portable entities has a self-referential examine fact
+        // and so would appear in `precomputed_patterns`, but only the 4
+        // actually gated behind a cross-location trigger binding
+        // (`trigger.test_jo_curry_against_sedative_audit` and its
+        // siblings -- see narrator-validator#96) ever benefit from being
+        // carried. Restricting to trigger bindings keeps the take-action
+        // fan-out proportional to the real cross-room need instead of the
+        // story's total portable-entity count.
+        for pattern in self
+            .triggers
+            .values()
+            .filter_map(|trigger| trigger.on.as_ref())
+        {
             referenced.extend(pattern.bindings.values().flatten().cloned());
         }
         for row in &self.solution_answer_rows {
