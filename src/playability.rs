@@ -350,6 +350,15 @@ struct Model {
     /// Card subject ID (including `answer.*`) -> the IDs of facts/
     /// deductions that establish knowledge of it.
     subject_witnesses: BTreeMap<String, BTreeSet<String>>,
+    /// Requirement ID (a flag or trigger-established fact) -> the single
+    /// `setting.*` location a trigger's `when: [{at: ...}, ...]` pins as
+    /// necessary before that trigger can fire and produce the requirement
+    /// (via `SetFlag` or its `facts` list). Only populated when exactly one
+    /// producing trigger exists and its `when` names exactly one `at`, so
+    /// this is never used to claim more than the model actually says.
+    /// Consulted by `end_shortfall` as provenance credit -- see its doc
+    /// comment.
+    requirement_locations: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -1475,6 +1484,59 @@ impl Model {
         self.precompute_elapsed_equivalence_horizon();
         self.precompute_patterns();
         self.build_subject_witnesses();
+        self.build_requirement_locations();
+    }
+
+    /// Build `requirement_locations`: for every requirement ID produced by
+    /// exactly one trigger (via `SetFlag` or that trigger's `facts` list)
+    /// whose `when` names exactly one `at: X` predicate, record `X`. Used
+    /// by `end_shortfall` for provenance credit -- a zero/near-zero
+    /// requirement shortfall gives the heuristic nothing to climb down
+    /// until the requirement is already met, so being at the one place
+    /// that can ever produce it is a cheap, always-correct partial signal
+    /// (never wrong: the trigger genuinely cannot fire from anywhere
+    /// else).
+    fn build_requirement_locations(&mut self) {
+        let mut producers = BTreeMap::<String, BTreeSet<String>>::new();
+        for trigger in self.triggers.values() {
+            let mut produced: Vec<&str> = trigger
+                .effects
+                .iter()
+                .filter_map(|effect| match effect {
+                    Effect::SetFlag(id) => Some(id.as_str()),
+                    _ => None,
+                })
+                .collect();
+            produced.extend(trigger.facts.iter().map(String::as_str));
+            for id in produced {
+                producers
+                    .entry(id.to_string())
+                    .or_default()
+                    .insert(trigger.item.id.clone());
+            }
+        }
+        let mut locations = BTreeMap::new();
+        for (id, trigger_ids) in &producers {
+            if trigger_ids.len() != 1 {
+                continue;
+            }
+            let trigger_id = trigger_ids.iter().next().unwrap();
+            let Some(trigger) = self.triggers.get(trigger_id) else {
+                continue;
+            };
+            let at_locations: Vec<&str> = trigger
+                .when
+                .iter()
+                .filter_map(|predicate| match predicate {
+                    Predicate::At(location) => Some(location.as_str()),
+                    _ => None,
+                })
+                .collect();
+            if let [location] = at_locations[..] {
+                locations.insert(id.clone(), location.to_string());
+            }
+        }
+        self.requirement_locations = locations;
     }
 
     /// Build `subject_witnesses`: for every card subject ID (including
@@ -1595,6 +1657,41 @@ impl Model {
             .iter()
             .map(|row| self.row_shortfall(row, state))
             .sum()
+    }
+
+    /// Goal-distance estimate for `search_from`'s per-end bounded-recovery
+    /// legs: the sum of every component `end_satisfied` checks, each
+    /// reduced to a cheap shortfall so the heap can favor states that are
+    /// actually closer to the end rather than merely cheaper so far. Built
+    /// from the same fields `end_satisfied` reads, so the heuristic and the
+    /// actual goal check can never disagree about what "satisfied" means.
+    /// Not admissible (see `step_shortfall`'s doc comment for why that's
+    /// fine -- `search_from`'s soundness never depends on exploration
+    /// order, only on `goal` itself, which this heuristic never touches).
+    fn end_shortfall(&self, end: &EndRule, state: &State) -> u32 {
+        let missing_requirements = end
+            .requirements
+            .iter()
+            .filter(|id| !has(state, id))
+            .map(|id| {
+                // Provenance credit: if this requirement can only ever be
+                // produced by a trigger pinned to one location, being
+                // somewhere else is itself part of the shortfall -- see
+                // `requirement_locations`'s doc comment for why this can
+                // never overclaim.
+                let away_from_producer = self
+                    .requirement_locations
+                    .get(id)
+                    .is_some_and(|location| &state.location != location);
+                1 + u32::from(away_from_producer)
+            })
+            .sum::<u32>();
+        let solution_shortfall = u32::from(end.solution_condition && !state.solution_solved);
+        let points_shortfall = end.minimum_points.saturating_sub(state.score) as u32;
+        let time_shortfall = end.at_or_after.map_or(0, |threshold| {
+            threshold.saturating_sub(self.initial_minutes.saturating_add(state.elapsed))
+        });
+        missing_requirements + solution_shortfall + points_shortfall + time_shortfall
     }
 
     /// How far `row` still is from `row_satisfied`: the count of pool
@@ -2278,7 +2375,7 @@ impl Model {
                         seed,
                         auto_facts,
                         auto_deductions,
-                        |_node| 0,
+                        |node| self.end_shortfall(end, &node.state),
                         |candidate| {
                             // `concluded_via_failure`'s `next_step == 0` can
                             // re-enter a solve attempt (the model doesn't
@@ -3708,6 +3805,89 @@ mod tests {
             .expect("setting.b is one route hop away");
         assert_eq!(found.actions, 1);
         assert_eq!(found.state.elapsed, 5);
+    }
+
+    /// Builds a minimal `at_or_after`-bearing `EndRule` (narrator-
+    /// validator#91's `end_shortfall` heuristic exists precisely to give
+    /// this kind of goal a gradient signal instead of the flat zero the
+    /// per-end bounded-recovery leg used to search with).
+    fn timed_end(threshold: u32) -> EndRule {
+        EndRule {
+            item: LocatedItem {
+                id: "end.timed".to_string(),
+                path: "end_states.yaml".to_string(),
+                pointer: "/end_states/0".to_string(),
+                range: None,
+                map: Mapping::new(),
+                owner: None,
+            },
+            outcome: "won".to_string(),
+            requirements: Vec::new(),
+            minimum_points: 0,
+            at_or_after: Some(threshold),
+            solution_condition: false,
+        }
+    }
+
+    #[test]
+    fn end_shortfall_heuristic_does_not_manufacture_a_false_proof_for_an_unreachable_at_or_after() {
+        // No routes and no wait-capable commands: elapsed can never move
+        // past 0, so a threshold beyond that is genuinely unreachable no
+        // matter how the heuristic orders exploration.
+        let model = Model {
+            entries: vec!["setting.a".to_string()],
+            elapsed_equivalence_horizon: 50,
+            ..Model::default()
+        };
+        let end = timed_end(40);
+        let seed = empty_node("setting.a");
+        let found = model.search_from(
+            seed,
+            true,
+            true,
+            |node| model.end_shortfall(&end, &node.state),
+            |candidate| model.end_satisfied(&end, &candidate.state),
+        );
+        assert!(
+            found.is_none(),
+            "elapsed can never advance in this model; the heuristic must not \
+             hallucinate a witness for a threshold that's never reached: {:#?}",
+            found.map(|node| node.state)
+        );
+    }
+
+    #[test]
+    fn end_shortfall_heuristic_proves_and_replays_a_genuine_at_or_after_witness() {
+        let mut model = Model {
+            entries: vec!["setting.a".to_string()],
+            // Comfortably above every elapsed value this test reaches, so
+            // `search_state_key` never folds two genuinely different
+            // elapsed values into the same canonical state.
+            elapsed_equivalence_horizon: 100,
+            ..Model::default()
+        };
+        model.routes.push(Route {
+            id: "route.a_b".to_string(),
+            from: "setting.a".to_string(),
+            to: "setting.b".to_string(),
+            minutes: 13,
+            bidirectional: true,
+            requirements: Vec::new(),
+        });
+        let end = timed_end(40);
+        let seed = empty_node("setting.a");
+        let found = model
+            .search_from(
+                seed,
+                true,
+                true,
+                |node| model.end_shortfall(&end, &node.state),
+                |candidate| model.end_satisfied(&end, &candidate.state),
+            )
+            .expect("shuttling the 13-minute route four times clears the 40-minute threshold");
+        assert!(model.end_satisfied(&end, &found.state));
+        assert_eq!(found.state.elapsed, 52);
+        assert_eq!(found.actions, 4);
     }
 
     #[test]
