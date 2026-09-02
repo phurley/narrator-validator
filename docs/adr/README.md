@@ -8,3 +8,4 @@ rewrite its historical context.
 | ID | Status | Decision |
 | --- | --- | --- |
 | [0001](0001-story-format-3.1-character-presence-and-command-candidates.md) | Accepted | Story Format 3.1 character presence and command candidate selection |
+| [0002](0002-static-playability-take-only-inventory.md) | Accepted | Static playability model: take-only portable-entity inventory |
