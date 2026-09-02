@@ -373,6 +373,92 @@ fn unsupported_dynamic_effect_makes_unresolved_paths_conspicuously_inconclusive(
 }
 
 #[test]
+fn fixed_destination_move_effect_relocates_the_player_for_reachability() {
+    // A trigger's `move` effect naming a literal (non-parameterized) setting
+    // id, with `player` among its subjects, must actually relocate
+    // `state.location` -- the same way route-based movement does -- rather
+    // than being flagged `playability.unsupported_effect`. This fixture
+    // sets up a witness that is reachable *only* after such a trigger
+    // fires: the player investigates the sample at setting.lab, which
+    // fires a trigger that moves the player to setting.hidden (a room with
+    // no authored route to it at all); a second, always-available command
+    // then fires a trigger gated on `at: setting.hidden`, setting the flag
+    // the end state requires.
+    let root = std::path::Path::new("tests/fixtures/playability-analysis");
+    let mut files = std::fs::read_dir(root)
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            narrator_validator::SourceFile {
+                path: path.file_name().unwrap().to_string_lossy().into_owned(),
+                source: std::fs::read_to_string(path).unwrap(),
+            }
+        })
+        .collect::<Vec<_>>();
+    files
+        .iter_mut()
+        .find(|file| file.path == "settings.yaml")
+        .unwrap()
+        .source = files
+        .iter()
+        .find(|file| file.path == "settings.yaml")
+        .unwrap()
+        .source
+        .replace(
+            "routes:\n",
+            "  - id: setting.hidden\n    type: island\n    navigable: false\n    name: Hidden\n    description: Reachable only via a move effect, never a route.\nroutes:\n",
+        );
+    files
+        .iter_mut()
+        .find(|file| file.path == "commands.yaml")
+        .unwrap()
+        .source
+        .push_str("  - id: command.confirm\n    name: Confirm\n");
+    files
+        .iter_mut()
+        .find(|file| file.path == "flags.yaml")
+        .unwrap()
+        .source
+        .push_str(
+            "  - id: flag.reached_hidden\n    name: Reached hidden\n    description: Set once the player is confirmed at setting.hidden.\n    initial_state: false\n",
+        );
+    files
+        .iter_mut()
+        .find(|file| file.path == "triggers.yaml")
+        .unwrap()
+        .source
+        .push_str(
+            "  - id: trigger.recall_player\n    name: Recall player\n    on:\n      command: command.investigate\n      parameters: { target: entity.sample }\n    effects:\n      - operation: move\n        subjects: [player]\n        setting: setting.hidden\n  - id: trigger.confirm_hidden\n    name: Confirm hidden\n    on:\n      command: command.confirm\n    when:\n      all:\n        - at: setting.hidden\n    effects:\n      - operation: set_flag\n        flag: flag.reached_hidden\n        value: true\n",
+        );
+    files
+        .iter_mut()
+        .find(|file| file.path == "end_states.yaml")
+        .unwrap()
+        .source
+        .push_str(
+            "  - id: end.reached_hidden\n    name: Reached hidden proof\n    outcome: won\n    resolution: partial\n    requires: [flag.reached_hidden]\n    text: The player was relocated by a fixed-destination move effect.\n",
+        );
+
+    let report = narrator_validator::validate(&files);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    let terminal = report
+        .playability
+        .as_ref()
+        .unwrap()
+        .terminal_paths
+        .iter()
+        .find(|path| path.id == "end.reached_hidden")
+        .unwrap();
+    assert_eq!(
+        terminal.status,
+        narrator_validator::PlayabilityStatus::Proved,
+        "{:#?}",
+        terminal.blocker
+    );
+    assert!(terminal.lower_bound.is_some());
+}
+
+#[test]
 fn playability_never_traverses_an_unmet_authored_route_requirement() {
     let root = std::path::Path::new("tests/fixtures/playability-analysis");
     let mut files = std::fs::read_dir(root)

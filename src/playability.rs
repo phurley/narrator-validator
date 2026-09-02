@@ -276,6 +276,7 @@ enum Effect {
     AdvanceTime(u32),
     LearnFact(String),
     EstablishDeduction(String),
+    Move(String),
 }
 
 #[derive(Clone)]
@@ -1284,6 +1285,32 @@ impl Model {
                         "parameterized movement is only modeled for the built-in route command",
                     );
                 }
+                // A `move` effect naming a literal (non-parameterized)
+                // setting id whose `subjects` include `player` moves the
+                // one location `State` tracks (`state.location`), exactly
+                // like the route-move machinery does.
+                Some("move")
+                    if string(map, "setting").is_some_and(|setting| !setting.starts_with("param"))
+                        && strings(field(map, "subjects")).iter().any(|s| s == "player") =>
+                {
+                    if let Some(setting) = string(map, "setting") {
+                        result.push(Effect::Move(setting.to_string()));
+                    }
+                }
+                // A fixed-destination `move` whose subjects are *only*
+                // non-player entities (e.g. an NPC) has no effect on
+                // anything the search tracks: `subject_locations` is a
+                // fixed *initial* fact populated once at model-build time,
+                // never updated dynamically, and confirmed (see #89) to be
+                // the only per-entity location the search consults. Since
+                // no fact/deduction/predicate depends on an NPC's
+                // post-move location specifically, this is a genuine no-op
+                // rather than an unsupported construct -- flagging it would
+                // incorrectly poison the whole trigger (and its other,
+                // perfectly modeled effects) as unsupported.
+                Some("move")
+                    if string(map, "setting")
+                        .is_some_and(|setting| !setting.starts_with("param")) => {}
                 Some("describe") => {}
                 Some(operation) => self.unsupported(
                     file,
@@ -2537,7 +2564,7 @@ impl Model {
                 Effect::SetFlag(id) | Effect::LearnFact(id) | Effect::EstablishDeduction(id) => {
                     id == requirement
                 }
-                Effect::AdvanceTime(_) => false,
+                Effect::AdvanceTime(_) | Effect::Move(_) => false,
             })
         {
             return true;
@@ -3256,6 +3283,9 @@ fn apply_effect(
         }
         Effect::LearnFact(id) => {
             acquire_fact(state, id, unlocks, auto_facts);
+        }
+        Effect::Move(setting) => {
+            state.location = setting.clone();
         }
         Effect::EstablishDeduction(id) => {
             state.deductions.insert(id.clone());
