@@ -103,6 +103,20 @@ fn read_sources(root: &Path) -> Result<Vec<SourceFile>, String> {
         .collect()
 }
 
+/// Story YAML anywhere in the repository, plus Format 3.8 map SVGs, which
+/// live only in `maps/`. Both are UTF-8 text, so `SourceFile` needs no
+/// binary channel; a raster map would, which is why SVG is the only image
+/// format the story contract admits.
+fn is_story_file(relative: &Path) -> bool {
+    match relative.extension().and_then(|value| value.to_str()) {
+        Some("yaml" | "yml") => true,
+        Some("svg") => relative
+            .parent()
+            .is_some_and(|parent| parent == Path::new("maps")),
+        _ => false,
+    }
+}
+
 fn visit(root: &Path, directory: &Path, paths: &mut Vec<PathBuf>) -> Result<(), String> {
     for entry in fs::read_dir(directory)
         .map_err(|error| format!("could not read `{}`: {error}", directory.display()))?
@@ -124,12 +138,7 @@ fn visit(root: &Path, directory: &Path, paths: &mut Vec<PathBuf>) -> Result<(), 
         }
         if file_type.is_dir() {
             visit(root, &path, paths)?;
-        } else if file_type.is_file()
-            && matches!(
-                path.extension().and_then(|value| value.to_str()),
-                Some("yaml" | "yml")
-            )
-        {
+        } else if file_type.is_file() && is_story_file(relative) {
             paths.push(path);
         }
     }

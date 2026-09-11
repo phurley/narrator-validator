@@ -523,6 +523,12 @@ impl<'a> Validator<'a> {
             .is_some_and(|version| version.major == 3 && version.minor >= 7)
     }
 
+    fn is_format_3_8_or_later(&self) -> bool {
+        self.format_version
+            .as_ref()
+            .is_some_and(|version| version.major == 3 && version.minor >= 8)
+    }
+
     fn uses_step_solution_ruleset(&self) -> bool {
         self.ruleset.as_ref().is_some_and(|ruleset| {
             ruleset.id == STANDARD_MYSTERY_RULESET_ID
@@ -784,6 +790,13 @@ impl<'a> Validator<'a> {
                     None,
                     None,
                 );
+                continue;
+            }
+            // Format 3.8 snapshots also carry `maps/*.svg`. Those are story
+            // assets, not story sections: they are validated by
+            // `validate_case_map` against the variant that references them,
+            // and must never reach the YAML schema rules.
+            if !is_story_yaml_path(&file.path) {
                 continue;
             }
             if contains_yaml_anchor_or_alias(&file.source) {
@@ -1618,6 +1631,387 @@ impl<'a> Validator<'a> {
                 ),
             }
         }
+        self.validate_case_map(case);
+    }
+
+    /// Story Format 3.8 `case.map`: an optional, presentational floor plan.
+    ///
+    /// Variants use the same ordered, conjunctive `requires` contract as
+    /// `end_states` — first satisfied wins, authored order is precedence —
+    /// so the shadowing rules mirror `validate_end_state_precedence`. A map
+    /// never gates playability or reachability, so nothing here feeds the
+    /// bounded search.
+    fn validate_case_map(&mut self, case: &Item) {
+        let Some(value) = case.mapping.get(Value::String("map".to_string())) else {
+            return;
+        };
+        let pointer = format!("{}/map", case.pointer);
+        if !self.is_format_3_8_or_later() {
+            self.push(
+                Severity::Error,
+                "case.map_format_incompatible",
+                "`case.map` requires story format 3.8.0 or later".to_string(),
+                &case.path,
+                Some(pointer),
+                None,
+                Some(case.id.clone()),
+            );
+            return;
+        }
+        let Some(map) = value.as_mapping() else {
+            self.push(
+                Severity::Error,
+                "case.map_type",
+                "`case.map` must be a mapping with an optional `preamble` and an ordered `variants` sequence"
+                    .to_string(),
+                &case.path,
+                Some(pointer),
+                None,
+                Some(case.id.clone()),
+            );
+            return;
+        };
+        for key in map.keys() {
+            let Some(key) = key.as_str() else { continue };
+            if !matches!(key, "preamble" | "variants") {
+                self.push(
+                    Severity::Error,
+                    "case.map_unknown_field",
+                    format!("`{key}` is not a supported `case.map` field"),
+                    &case.path,
+                    Some(format!("{pointer}/{}", escape_pointer(key))),
+                    locate_scalar(&case.source, key),
+                    Some(case.id.clone()),
+                );
+            }
+        }
+        if map
+            .get(Value::String("preamble".to_string()))
+            .is_some_and(|preamble| {
+                !preamble
+                    .as_str()
+                    .is_some_and(|preamble| !preamble.trim().is_empty())
+            })
+        {
+            self.push(
+                Severity::Error,
+                "case.map_preamble",
+                "`case.map.preamble` must be a non-empty string".to_string(),
+                &case.path,
+                Some(format!("{pointer}/preamble")),
+                None,
+                Some(case.id.clone()),
+            );
+        }
+        let variants_pointer = format!("{pointer}/variants");
+        let variants = match map.get(Value::String("variants".to_string())) {
+            Some(Value::Sequence(variants)) if !variants.is_empty() => variants,
+            Some(Value::Sequence(_)) => {
+                self.push(
+                    Severity::Error,
+                    "case.map_variants",
+                    "`case.map.variants` must list at least one map variant".to_string(),
+                    &case.path,
+                    Some(variants_pointer),
+                    None,
+                    Some(case.id.clone()),
+                );
+                return;
+            }
+            _ => {
+                self.push(
+                    Severity::Error,
+                    "case.map_variants",
+                    "`case.map.variants` must be an ordered sequence of map variants".to_string(),
+                    &case.path,
+                    Some(variants_pointer),
+                    None,
+                    Some(case.id.clone()),
+                );
+                return;
+            }
+        };
+
+        let mut seen_ids = HashSet::new();
+        // Authored order is the contract, so conditions are collected in that
+        // order and compared only against earlier entries.
+        let mut conditions: Vec<(String, String, Option<BTreeSet<String>>)> = Vec::new();
+        let mut svg_sources: Vec<(String, String)> = Vec::new();
+        for (index, variant) in variants.iter().enumerate() {
+            let variant_pointer = format!("{variants_pointer}/{index}");
+            let Some(variant) = variant.as_mapping() else {
+                self.push(
+                    Severity::Error,
+                    "case.map_variant_type",
+                    "each `case.map.variants` entry must be a mapping".to_string(),
+                    &case.path,
+                    Some(variant_pointer),
+                    None,
+                    Some(case.id.clone()),
+                );
+                continue;
+            };
+            for key in variant.keys() {
+                let Some(key) = key.as_str() else { continue };
+                if !matches!(key, "id" | "source" | "requires" | "preamble") {
+                    self.push(
+                        Severity::Error,
+                        "case.map_unknown_field",
+                        format!("`{key}` is not a supported `case.map.variants` field"),
+                        &case.path,
+                        Some(format!("{variant_pointer}/{}", escape_pointer(key))),
+                        locate_scalar(&case.source, key),
+                        Some(case.id.clone()),
+                    );
+                }
+            }
+
+            let id = string_field(variant, "id").unwrap_or_default();
+            let valid_variant_id = valid_id(id)
+                && id
+                    .split_once('.')
+                    .is_some_and(|(prefix, _)| prefix == "map");
+            if !valid_variant_id {
+                self.push(
+                    Severity::Error,
+                    "case.map_variant_id",
+                    "each map variant needs a canonical `map.<snake_case>` ID".to_string(),
+                    &case.path,
+                    Some(format!("{variant_pointer}/id")),
+                    locate_scalar(&case.source, id),
+                    Some(case.id.clone()),
+                );
+            } else if !seen_ids.insert(id.to_string()) {
+                self.push(
+                    Severity::Error,
+                    "case.map_variant_id_duplicate",
+                    format!("map variant `{id}` is declared more than once"),
+                    &case.path,
+                    Some(format!("{variant_pointer}/id")),
+                    locate_scalar(&case.source, id),
+                    Some(case.id.clone()),
+                );
+            }
+
+            match string_field(variant, "source") {
+                Some(source)
+                    if source.starts_with("maps/")
+                        && source.ends_with(".svg")
+                        && !source.contains("..") =>
+                {
+                    if self.files.iter().any(|file| file.path == source) {
+                        svg_sources.push((id.to_string(), source.to_string()));
+                    } else {
+                        self.push(
+                            Severity::Error,
+                            "case.map_variant_source_missing",
+                            format!(
+                                "map variant `{id}` references `{source}`, which is not committed in this story"
+                            ),
+                            &case.path,
+                            Some(format!("{variant_pointer}/source")),
+                            locate_scalar(&case.source, source),
+                            Some(case.id.clone()),
+                        );
+                    }
+                }
+                _ => self.push(
+                    Severity::Error,
+                    "case.map_variant_source",
+                    "map variant `source` must be a repository-relative `maps/<name>.svg` path"
+                        .to_string(),
+                    &case.path,
+                    Some(format!("{variant_pointer}/source")),
+                    string_field(variant, "source")
+                        .and_then(|source| locate_scalar(&case.source, source)),
+                    Some(case.id.clone()),
+                ),
+            }
+
+            if variant
+                .get(Value::String("preamble".to_string()))
+                .is_some_and(|preamble| {
+                    !preamble
+                        .as_str()
+                        .is_some_and(|preamble| !preamble.trim().is_empty())
+                })
+            {
+                self.push(
+                    Severity::Error,
+                    "case.map_preamble",
+                    "a map variant `preamble` must be a non-empty string".to_string(),
+                    &case.path,
+                    Some(format!("{variant_pointer}/preamble")),
+                    None,
+                    Some(case.id.clone()),
+                );
+            }
+
+            let requires = variant.get(Value::String("requires".to_string()));
+            let condition = match requires {
+                None => Some(BTreeSet::new()),
+                Some(requires) if is_string_sequence(requires) => {
+                    Some(string_list_field(variant, "requires").into_iter().collect())
+                }
+                Some(_) => {
+                    self.push(
+                        Severity::Error,
+                        "case.map_variant_requires_type",
+                        "map variant `requires` must be a sequence of persistent requirement IDs"
+                            .to_string(),
+                        &case.path,
+                        Some(format!("{variant_pointer}/requires")),
+                        None,
+                        Some(case.id.clone()),
+                    );
+                    None
+                }
+            };
+            conditions.push((id.to_string(), variant_pointer, condition));
+        }
+
+        self.validate_map_variant_precedence(case, &variants_pointer, &conditions);
+        for (id, source) in svg_sources {
+            self.validate_map_svg(case, &id, &source);
+        }
+    }
+
+    /// The unconditional-variant and shadowing rules. Both exist for the same
+    /// reason as their `end_states` counterparts: authored order decides, so
+    /// an earlier variant that is satisfied whenever a later one is makes the
+    /// later one dead content rather than a fallback.
+    fn validate_map_variant_precedence(
+        &mut self,
+        case: &Item,
+        variants_pointer: &str,
+        conditions: &[(String, String, Option<BTreeSet<String>>)],
+    ) {
+        let unconditional = conditions
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, _, condition))| condition.as_ref().is_some_and(BTreeSet::is_empty))
+            .map(|(index, (id, pointer, _))| (index, id.clone(), pointer.clone()))
+            .collect::<Vec<_>>();
+        match unconditional.as_slice() {
+            [] => self.push(
+                Severity::Error,
+                "case.map_unconditional_missing",
+                "`case.map.variants` must end with one unconditional variant so every player always has a map"
+                    .to_string(),
+                &case.path,
+                Some(variants_pointer.to_string()),
+                None,
+                Some(case.id.clone()),
+            ),
+            [(index, id, pointer)] => {
+                if *index != conditions.len() - 1 {
+                    self.push(
+                        Severity::Error,
+                        "case.map_unconditional_not_last",
+                        format!(
+                            "unconditional map variant `{id}` must be authored last; every variant after it is unreachable"
+                        ),
+                        &case.path,
+                        Some(pointer.clone()),
+                        None,
+                        Some(case.id.clone()),
+                    );
+                }
+            }
+            [(_, first_id, _), rest @ ..] => {
+                for (_, id, pointer) in rest {
+                    self.push(
+                        Severity::Error,
+                        "case.map_unconditional_duplicate",
+                        format!(
+                            "map variant `{id}` is unconditional, but earlier `{first_id}` already is; exactly one variant may be unconditional"
+                        ),
+                        &case.path,
+                        Some(pointer.clone()),
+                        None,
+                        Some(case.id.clone()),
+                    );
+                }
+            }
+        }
+
+        for (later_index, (later_id, later_pointer, later_condition)) in
+            conditions.iter().enumerate()
+        {
+            // Unconditional variants are governed by the position rules
+            // above; comparing them here would restate the same mistake once
+            // per following variant.
+            let Some(later_condition) = later_condition
+                .as_ref()
+                .filter(|condition| !condition.is_empty())
+            else {
+                continue;
+            };
+            for (earlier_id, earlier_pointer, earlier_condition) in &conditions[..later_index] {
+                let Some(earlier_condition) = earlier_condition
+                    .as_ref()
+                    .filter(|condition| !condition.is_empty())
+                else {
+                    continue;
+                };
+                if !earlier_condition.is_subset(later_condition) {
+                    continue;
+                }
+                let duplicate = earlier_condition == later_condition;
+                self.diagnostics.push(Diagnostic {
+                    severity: Severity::Error,
+                    code: if duplicate {
+                        "case.map_variant_duplicate_condition".to_string()
+                    } else {
+                        "case.map_variant_shadowed".to_string()
+                    },
+                    message: if duplicate {
+                        format!(
+                            "map variant `{later_id}` repeats the exact `requires` of earlier `{earlier_id}`; authored precedence would always select the earlier variant"
+                        )
+                    } else {
+                        format!(
+                            "map variant `{later_id}` is unreachable because earlier `{earlier_id}` is satisfied whenever it is; move the more specific variant earlier or make the conditions distinct"
+                        )
+                    },
+                    path: case.path.clone(),
+                    pointer: Some(later_pointer.clone()),
+                    range: None,
+                    subject_id: Some(case.id.clone()),
+                    related: vec![RelatedLocation {
+                        message: "earlier authored variant is here".to_string(),
+                        path: case.path.clone(),
+                        pointer: Some(earlier_pointer.clone()),
+                        range: None,
+                    }],
+                });
+                break;
+            }
+        }
+    }
+
+    /// The client renders whatever it is handed, so the validator is the gate
+    /// for map SVG safety. Findings are reported against the SVG's own path
+    /// with the referencing variant as the subject.
+    fn validate_map_svg(&mut self, case: &Item, variant_id: &str, source: &str) {
+        let problems = match self.files.iter().find(|file| file.path == source) {
+            Some(file) => crate::check_map_svg(&file.source),
+            None => return,
+        };
+        for problem in problems {
+            self.push(
+                Severity::Error,
+                problem.code,
+                format!(
+                    "{} (referenced by map variant `{variant_id}`)",
+                    problem.message
+                ),
+                source,
+                None,
+                None,
+                Some(case.id.clone()),
+            );
+        }
     }
 
     fn validate_features(&mut self, case: &Item) {
@@ -2338,6 +2732,11 @@ impl<'a> Validator<'a> {
             "premise",
             "opening",
             "author_notes",
+            // `map` is always accepted here so this call never duplicates the
+            // versioned `case.map_format_incompatible` diagnostic that
+            // `validate_case_map` pushes; presence under a pre-3.8 format is
+            // reported by that dedicated check instead of `unknown_field`.
+            "map",
         ];
         if self.is_format_3_2_or_later() {
             case_fields.push("features");
@@ -9209,6 +9608,7 @@ impl<'a> Validator<'a> {
             }
         }
         collect_persona_text_consumers(cases, &mut consumers);
+        collect_map_variant_text_consumers(cases, &mut consumers);
         collect_nested_command_text(commands, &mut consumers);
         collect_nested_command_text(triggers, &mut consumers);
         for file in &self.parsed {
@@ -9866,6 +10266,39 @@ fn collect_persona_text_consumers(cases: &[Item], consumers: &mut Vec<TextConsum
     }
 }
 
+/// Format 3.8 `case.map.variants[].preamble`. Registered as its own
+/// `map_variant` consumer kind because the variants are a sequence, which the
+/// dotted `case` field walk cannot address.
+fn collect_map_variant_text_consumers(cases: &[Item], consumers: &mut Vec<TextConsumer>) {
+    let disclosure = CONSUMER_FIELDS
+        .iter()
+        .find(|field| field.kind == "map_variant" && field.path == "preamble")
+        .expect("map variant prose is registered")
+        .disclosure;
+    for case in cases {
+        let Some(variants) =
+            mapping_path(&case.mapping, "map.variants").and_then(Value::as_sequence)
+        else {
+            continue;
+        };
+        for (index, variant) in variants.iter().enumerate() {
+            let Some(variant) = variant.as_mapping() else {
+                continue;
+            };
+            if let Some(text) = string_field(variant, "preamble") {
+                consumers.push(TextConsumer {
+                    owner_id: string_field(variant, "id").map(str::to_string),
+                    path: case.path.clone(),
+                    source: case.source.clone(),
+                    pointer: format!("{}/map/variants/{index}/preamble", case.pointer),
+                    authored: text.to_string(),
+                    disclosure,
+                });
+            }
+        }
+    }
+}
+
 fn collect_nested_command_text(items: &[Item], consumers: &mut Vec<TextConsumer>) {
     for item in items {
         let parameter_disclosure = CONSUMER_FIELDS
@@ -10491,6 +10924,7 @@ fn expected_kind(pointer: &str) -> Option<&'static [Kind]> {
         _ if is_character_presence_requirement_pointer(pointer) => Some(PERSISTENT_REQUIREMENTS),
         _ if is_point_requirement_pointer(pointer) => Some(PERSISTENT_REQUIREMENTS),
         _ if is_win_state_requirement_pointer(pointer) => Some(PERSISTENT_REQUIREMENTS),
+        _ if is_map_variant_requirement_pointer(pointer) => Some(PERSISTENT_REQUIREMENTS),
         _ if is_character_testimony_list_pointer(pointer, "requires") => Some(FACT_REQUIREMENTS),
         _ if is_character_testimony_list_pointer(pointer, "reveals") => Some(FACTS),
         _ if is_fact_association_pointer(pointer) => Some(FACTS),
@@ -10533,6 +10967,22 @@ fn is_win_state_requirement_pointer(pointer: &str) -> bool {
         [section, state_index, "requires", requirement_index]
             if matches!(*section, "win_states" | "end_states")
                 && state_index.parse::<usize>().is_ok()
+                && requirement_index.parse::<usize>().is_ok()
+    )
+}
+
+/// Format 3.8 `case.map.variants[].requires`. Map variants reuse the ordered
+/// conjunctive persistent-requirement vocabulary of `end_states` and routes
+/// rather than introducing a predicate dialect of their own.
+fn is_map_variant_requirement_pointer(pointer: &str) -> bool {
+    let parts = pointer
+        .trim_start_matches('/')
+        .split('/')
+        .collect::<Vec<_>>();
+    matches!(
+        parts.as_slice(),
+        ["case", "map", "variants", variant_index, "requires", requirement_index]
+            if variant_index.parse::<usize>().is_ok()
                 && requirement_index.parse::<usize>().is_ok()
     )
 }
@@ -10880,6 +11330,13 @@ fn string_list_field(mapping: &Mapping, field: &str) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Whether a snapshot path holds story YAML. Everything else in a snapshot —
+/// currently only Format 3.8 `maps/*.svg` — is a story asset checked by the
+/// section that references it.
+fn is_story_yaml_path(path: &str) -> bool {
+    path.ends_with(".yaml") || path.ends_with(".yml")
 }
 
 fn is_string_sequence(value: &Value) -> bool {

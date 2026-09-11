@@ -140,6 +140,19 @@ pub const CONSUMER_FIELDS: &[ConsumerField] = &[
         disclosure: PUBLIC,
     },
     ConsumerField {
+        kind: "case",
+        path: "map.preamble",
+        disclosure: PUBLIC,
+    },
+    // Format 3.8 `case.map.variants[].preamble`. Variants are a sequence, so
+    // these are gathered by `collect_map_variant_text_consumers` rather than
+    // by the plain `case` field walk, the same split `persona` uses.
+    ConsumerField {
+        kind: "map_variant",
+        path: "preamble",
+        disclosure: PUBLIC,
+    },
+    ConsumerField {
         kind: "persona",
         path: "description",
         disclosure: PUBLIC,
@@ -367,6 +380,10 @@ const CASE_PATHS: &[ReferencePath] = &[
     },
     ReferencePath {
         path: "opening",
+        disclosure: PUBLIC,
+    },
+    ReferencePath {
+        path: "map.preamble",
         disclosure: PUBLIC,
     },
 ];

@@ -6443,3 +6443,427 @@ fn format_3_7_answer_subjects_are_knowledge_never_world_state() {
         .iter()
         .any(|diagnostic| { diagnostic.code == "subject.answer_no_world_state" }));
 }
+
+const FORMAT_3_8_MAP_STORY: &str = include_str!("fixtures/format-3.8-map-story.yaml");
+const BRIAR_HOUSE_MAP: &str = include_str!("fixtures/maps/briar-house.svg");
+const BRIAR_HOUSE_STAIR_MAP: &str = include_str!("fixtures/maps/briar-house-stair.svg");
+
+fn format_3_8_map_story() -> String {
+    FORMAT_3_8_MAP_STORY.to_string()
+}
+
+/// Format 3.8 snapshots carry `maps/*.svg` alongside the YAML sections, so
+/// map tests cannot use the plain `report` helper.
+fn map_story_files(source: String, maps: &[(&str, &str)]) -> Vec<SourceFile> {
+    let mut files = story_files(source);
+    for (path, svg) in maps {
+        files.push(SourceFile {
+            path: (*path).to_string(),
+            source: (*svg).to_string(),
+        });
+    }
+    files
+}
+
+fn map_report(source: String) -> narrator_validator::ValidationReport {
+    validate(&map_story_files(
+        source,
+        &[
+            ("maps/briar-house.svg", BRIAR_HOUSE_MAP),
+            ("maps/briar-house-stair.svg", BRIAR_HOUSE_STAIR_MAP),
+        ],
+    ))
+}
+
+fn map_codes(source: String) -> Vec<String> {
+    map_report(source)
+        .diagnostics
+        .into_iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect()
+}
+
+#[test]
+fn format_3_8_map_story_validates_clean() {
+    let report = map_report(format_3_8_map_story());
+    assert!(report.valid, "{:#?}", report.diagnostics);
+    assert_eq!(report.format_version.as_deref(), Some("3.8.0"));
+    assert!(report.diagnostics.is_empty());
+    // A map is presentational: adding one must not change what the bounded
+    // search proves about the same story without it.
+    let with_map = report.playability.expect("format 3 playability report");
+    let without_map = validate(&story_files(
+        format_3_8_map_story()
+            .replace("maps/briar-house-stair.svg", "REMOVED")
+            .replace("maps/briar-house.svg", "REMOVED"),
+    ));
+    let baseline = without_map
+        .playability
+        .expect("format 3 playability report");
+    assert_eq!(with_map.terminal_paths, baseline.terminal_paths);
+}
+
+#[test]
+fn map_preamble_resolves_references_as_a_public_case_consumer() {
+    let report = map_report(format_3_8_map_story());
+    let resolved = report
+        .reference_text
+        .iter()
+        .find(|text| text.pointer == "/case/map/preamble")
+        .expect("case.map.preamble is a registered reference-text consumer");
+    assert_eq!(
+        resolved.disclosure,
+        narrator_validator::DisclosureClass::PlayerSafe
+    );
+    assert!(resolved
+        .resolved
+        .contains("The study where the mystery occurred."));
+    assert!(report
+        .reference_text
+        .iter()
+        .any(|text| text.pointer == "/case/map/variants/0/preamble"));
+
+    // An unknown ID in either preamble is reported like any other case
+    // narrative field rather than passed through to a client.
+    assert!(map_codes(format_3_8_map_story().replace(
+        "[[setting.study.description]]",
+        "[[setting.nowhere.description]]"
+    ),)
+    .contains(&"reference_text.unknown_id".to_string()));
+    assert!(map_codes(format_3_8_map_story().replace(
+        "preamble: The service stair now runs from the cellar to [[setting.study.description]]",
+        "preamble: The stair reaches [[setting.nowhere.description]].",
+    ))
+    .contains(&"reference_text.unknown_id".to_string()));
+}
+
+#[test]
+fn case_map_requires_format_3_8() {
+    let codes = map_codes(
+        format_3_8_map_story().replace("format_version: \"3.8.0\"", "format_version: \"3.7.0\""),
+    );
+    assert!(
+        codes.contains(&"case.map_format_incompatible".to_string()),
+        "{codes:?}"
+    );
+    // The dedicated version diagnostic replaces a generic unknown-field
+    // cascade rather than adding to it.
+    assert!(
+        !codes.contains(&"case.unknown_field".to_string()),
+        "{codes:?}"
+    );
+}
+
+#[test]
+fn case_map_rejects_every_malformed_shape_at_exact_pointers() {
+    let cases: Vec<(String, &str, &str)> = vec![
+        (
+            format_3_8_map_story().replace(
+                "  map:\n    preamble: >",
+                "  map: maps/briar-house.svg\n  unused_map:\n    preamble: >",
+            ),
+            "case.map_type",
+            "/case/map",
+        ),
+        (
+            format_3_8_map_story().replace("    preamble: >", "    caption: >"),
+            "case.map_unknown_field",
+            "/case/map/caption",
+        ),
+        (
+            format_3_8_map_story().replace("      - id: map.with_stair", "      - id: map.with_stair\n        legend: none"),
+            "case.map_unknown_field",
+            "/case/map/variants/0/legend",
+        ),
+        (
+            format_3_8_map_story().replace(
+                "    preamble: >\n      Briar House has three rooms off the parlor, and\n      [[setting.study.description]]\n",
+                "    preamble: \"  \"\n",
+            ),
+            "case.map_preamble",
+            "/case/map/preamble",
+        ),
+        (
+            format_3_8_map_story().replace(
+                "        preamble: The service stair now runs from the cellar to [[setting.study.description]]",
+                "        preamble: []",
+            ),
+            "case.map_preamble",
+            "/case/map/variants/0/preamble",
+        ),
+        (
+            format_3_8_map_story().replace("    variants:", "    variants: []\n    ignored:"),
+            "case.map_variants",
+            "/case/map/variants",
+        ),
+        (
+            format_3_8_map_story().replace("      - id: map.with_stair", "      - map.with_stair\n      - id: map.unused"),
+            "case.map_variant_type",
+            "/case/map/variants/0",
+        ),
+        (
+            format_3_8_map_story().replace("id: map.with_stair", "id: Map.WithStair"),
+            "case.map_variant_id",
+            "/case/map/variants/0/id",
+        ),
+        (
+            format_3_8_map_story().replace("id: map.with_stair", "id: route.with_stair"),
+            "case.map_variant_id",
+            "/case/map/variants/0/id",
+        ),
+        (
+            format_3_8_map_story().replace("id: map.default", "id: map.with_stair"),
+            "case.map_variant_id_duplicate",
+            "/case/map/variants/1/id",
+        ),
+        (
+            format_3_8_map_story().replace("source: maps/briar-house-stair.svg", "source: briar-house-stair.svg"),
+            "case.map_variant_source",
+            "/case/map/variants/0/source",
+        ),
+        (
+            format_3_8_map_story().replace("source: maps/briar-house-stair.svg", "source: maps/briar-house-stair.png"),
+            "case.map_variant_source",
+            "/case/map/variants/0/source",
+        ),
+        (
+            format_3_8_map_story().replace("source: maps/briar-house-stair.svg", "source: maps/../secrets/briar-house-stair.svg"),
+            "case.map_variant_source",
+            "/case/map/variants/0/source",
+        ),
+        (
+            format_3_8_map_story().replace("source: maps/briar-house-stair.svg", "source: maps/never-committed.svg"),
+            "case.map_variant_source_missing",
+            "/case/map/variants/0/source",
+        ),
+        (
+            format_3_8_map_story().replace("requires: [flag.culprit_named]", "requires: flag.culprit_named"),
+            "case.map_variant_requires_type",
+            "/case/map/variants/0/requires",
+        ),
+    ];
+    for (source, code, pointer) in cases {
+        let report = map_report(source);
+        assert!(
+            report.diagnostics.iter().any(|diagnostic| {
+                diagnostic.code == code && diagnostic.pointer.as_deref() == Some(pointer)
+            }),
+            "expected {code} at {pointer}, got {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
+fn map_variant_requires_must_name_a_persistent_id() {
+    let unknown = map_codes(format_3_8_map_story().replace(
+        "requires: [flag.culprit_named]",
+        "requires: [flag.never_declared]",
+    ));
+    assert!(
+        unknown.contains(&"reference.unknown".to_string()),
+        "{unknown:?}"
+    );
+
+    // The same persistent-requirement vocabulary as `end_states` and routes:
+    // a character is not persistent world state a map may be gated on.
+    let wrong_type = map_report(format_3_8_map_story().replace(
+        "requires: [flag.culprit_named]",
+        "requires: [character.culprit]",
+    ));
+    assert!(
+        wrong_type.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "reference.wrong_type"
+                && diagnostic.pointer.as_deref() == Some("/case/map/variants/0/requires/0")
+        }),
+        "{:#?}",
+        wrong_type.diagnostics
+    );
+}
+
+#[test]
+fn map_variants_need_exactly_one_unconditional_variant_authored_last() {
+    let missing = map_codes(format_3_8_map_story().replace(
+        "      - id: map.default\n        source: maps/briar-house.svg",
+        "      - id: map.default\n        source: maps/briar-house.svg\n        requires: [flag.weapon_location_and_method_named]",
+    ));
+    assert!(
+        missing.contains(&"case.map_unconditional_missing".to_string()),
+        "{missing:?}"
+    );
+
+    // Exactly one unconditional variant, authored first: the fallback is
+    // reachable, so every variant after it is not.
+    let not_last = map_report(
+        format_3_8_map_story()
+            .replace("        requires: [flag.culprit_named]\n", "")
+            .replace(
+                "      - id: map.default\n        source: maps/briar-house.svg",
+                "      - id: map.default\n        source: maps/briar-house.svg\n        requires: [flag.culprit_named]",
+            ),
+    );
+    assert!(
+        not_last.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "case.map_unconditional_not_last"
+                && diagnostic.pointer.as_deref() == Some("/case/map/variants/0")
+        }),
+        "{:#?}",
+        not_last.diagnostics
+    );
+
+    let duplicate = map_report(format_3_8_map_story().replace(
+        "      - id: map.default\n        source: maps/briar-house.svg",
+        "      - id: map.plain\n        source: maps/briar-house.svg\n      - id: map.default\n        source: maps/briar-house.svg",
+    ));
+    assert!(
+        duplicate.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "case.map_unconditional_duplicate"
+                && diagnostic.pointer.as_deref() == Some("/case/map/variants/2")
+        }),
+        "{:#?}",
+        duplicate.diagnostics
+    );
+}
+
+#[test]
+fn a_later_map_variant_shadowed_by_an_earlier_one_is_an_error() {
+    let duplicate = map_report(format_3_8_map_story().replace(
+        "      - id: map.default\n        source: maps/briar-house.svg",
+        "      - id: map.copy\n        source: maps/briar-house.svg\n        requires: [flag.culprit_named]\n      - id: map.default\n        source: maps/briar-house.svg",
+    ));
+    let repeat = duplicate
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "case.map_variant_duplicate_condition")
+        .unwrap_or_else(|| panic!("{:#?}", duplicate.diagnostics));
+    assert_eq!(repeat.pointer.as_deref(), Some("/case/map/variants/1"));
+    assert_eq!(
+        repeat.related[0].pointer.as_deref(),
+        Some("/case/map/variants/0")
+    );
+
+    // A broader earlier condition makes a narrower later one unreachable,
+    // exactly as it does for `end_states`.
+    let shadowed = map_report(format_3_8_map_story().replace(
+        "      - id: map.default\n        source: maps/briar-house.svg",
+        "      - id: map.both\n        source: maps/briar-house.svg\n        requires: [flag.culprit_named, flag.weapon_location_and_method_named]\n      - id: map.default\n        source: maps/briar-house.svg",
+    ));
+    assert!(
+        shadowed.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "case.map_variant_shadowed"
+                && diagnostic.pointer.as_deref() == Some("/case/map/variants/1")
+        }),
+        "{:#?}",
+        shadowed.diagnostics
+    );
+}
+
+#[test]
+fn unsafe_map_svg_is_rejected_against_the_svg_path() {
+    let cases: Vec<(String, &str)> = vec![
+        (
+            BRIAR_HOUSE_MAP.replace("<title>", "<script>fetch('/steal')</script><title>"),
+            "case.map_svg_forbidden_element",
+        ),
+        (
+            BRIAR_HOUSE_MAP.replace("<title>", "<foreignObject><b/></foreignObject><title>"),
+            "case.map_svg_forbidden_element",
+        ),
+        (
+            BRIAR_HOUSE_MAP.replace(
+                "<rect id=\"parlor\"",
+                "<rect onclick=\"steal()\" id=\"parlor\"",
+            ),
+            "case.map_svg_event_attribute",
+        ),
+        (
+            BRIAR_HOUSE_MAP.replace(
+                "<title>",
+                "<image href=\"https://example.com/plan.png\" /><title>",
+            ),
+            "case.map_svg_external_reference",
+        ),
+        (
+            BRIAR_HOUSE_MAP.replace(" viewBox=\"0 0 240 160\"", ""),
+            "case.map_svg_view_box",
+        ),
+        (
+            BRIAR_HOUSE_MAP.replace("</svg>", ""),
+            "case.map_svg_invalid",
+        ),
+    ];
+    for (svg, code) in cases {
+        let report = validate(&map_story_files(
+            format_3_8_map_story(),
+            &[
+                ("maps/briar-house.svg", svg.as_str()),
+                ("maps/briar-house-stair.svg", BRIAR_HOUSE_STAIR_MAP),
+            ],
+        ));
+        let diagnostic = report
+            .diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.code == code)
+            .unwrap_or_else(|| panic!("expected {code}, got {:#?}", report.diagnostics));
+        assert_eq!(diagnostic.path, "maps/briar-house.svg");
+        assert!(
+            diagnostic.message.contains("map variant `map.default`"),
+            "{}",
+            diagnostic.message
+        );
+    }
+}
+
+#[test]
+fn an_oversized_map_svg_hits_the_repository_wide_file_cap() {
+    // Format 3.8 requires a 256 KiB cap on maps. That is the cap the
+    // repository already enforces on every file, so a map gets it for free
+    // rather than through a second map-specific check.
+    let report = validate(&map_story_files(
+        format_3_8_map_story(),
+        &[
+            (
+                "maps/briar-house.svg",
+                BRIAR_HOUSE_MAP
+                    .replace(
+                        "<title>",
+                        &format!("<title>{}</title><title>", "x".repeat(256 * 1024)),
+                    )
+                    .as_str(),
+            ),
+            ("maps/briar-house-stair.svg", BRIAR_HOUSE_STAIR_MAP),
+        ],
+    ));
+    assert!(
+        report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "repository.file_too_large"
+                && diagnostic.path == "maps/briar-house.svg"
+        }),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn a_map_svg_never_reaches_the_yaml_schema_rules() {
+    // Before Format 3.8 every snapshot file was parsed as YAML. A committed
+    // SVG must be ignored by that path entirely rather than reported as
+    // malformed YAML or a non-canonical filename.
+    let report = validate(&map_story_files(
+        format_3_8_map_story(),
+        &[
+            ("maps/briar-house.svg", BRIAR_HOUSE_MAP),
+            ("maps/briar-house-stair.svg", BRIAR_HOUSE_STAIR_MAP),
+        ],
+    ));
+    assert!(
+        !report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.path.ends_with(".svg")
+                && diagnostic.code.starts_with("yaml.")),
+        "{:#?}",
+        report.diagnostics
+    );
+    assert!(report.valid, "{:#?}", report.diagnostics);
+}
