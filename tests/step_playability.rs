@@ -524,7 +524,7 @@ fn a_later_step_with_no_witness_stays_not_proved_even_though_the_first_step_chec
 }
 
 /// Regression for narrator-validator#85: a graded "botched it" ending
-/// (island_retreat's `end.mistaken_accusation` shape) that only becomes
+/// (a mistaken-accusation shape) that only becomes
 /// reachable when the *final* solve step is deliberately failed -- after
 /// every earlier step already succeeded -- must be found. The runtime
 /// concludes a solve session either by succeeding the last step or by

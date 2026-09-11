@@ -256,7 +256,7 @@ instead. Considered and rejected:
 - *Madness*, *insanity* — not deducible from evidence, so it makes a poor
   answer card, and the framing is one this system should not print.
 - *Thrill*, *cruelty* — a serial-killer register that is out of tone for a
-  system whose stories run down to age nine (`wrong_floor`), and unavailable
+  system whose stories run down to age nine, and unavailable
   to deduction for the same reason madness is.
 - *Mercy* — real, but rare enough not to earn a permanent slot, and it lands
   on *Fear for someone else* or *Love* in every case examined.
@@ -267,8 +267,8 @@ instead. Considered and rejected:
 
 **Accidental deaths still get a motive row.** When a death was unintended, the
 motive row should name the motive for the *deed behind* the accident, which is
-almost always the interesting answer. In `quiet_kennel`, Cal Mercer's death is
-an accident, but he was there to sabotage a champion dog for a wager: the
+almost always the interesting answer. Take a case where the dead man fell
+while sabotaging a champion dog for a wager: the death is an accident, but the
 motive is *Greed*. Omitting the motive row instead would leak the twist,
 because a step's row count is player-visible (see the disclosure boundary in
 [Story Format 3.7](story-format-3.7.md)).
@@ -295,8 +295,9 @@ a story set in a northern winter as well as a summer island.
 **Deliberately uneven resolution.** Three cards cover the twelve hours from
 sunrise to sunset and five cover the hours of darkness. That is not sloppiness:
 it is where mysteries actually happen and where alibis are actually contested.
-`island_retreat`'s death is at 21:18 (*In the evening*); `simple_mystery`'s is
-a night incident; `quiet_kennel`'s runs from night through *Before dawn*. A
+`simple_mystery`'s death is a night incident; of the cases the deck was
+designed against, one falls at 21:18 (*In the evening*) and another runs from
+night through *Before dawn*. A
 uniform 3-hour tiling would have spent slots on distinctions nobody asks about
 ("mid-morning" versus "late morning") while forcing every night case into one
 card.
@@ -333,8 +334,9 @@ whether the victim was pushed, tripped, or stepped wrong in the dark.
 there was no external physical cause at all: illness, a failing heart, or a
 case where nobody actually died. A fall, a fire, or a drowning is an external
 physical cause even when no person caused it, so an accidental death takes the
-mechanism card, not this one. Without that rule, `quiet_kennel` would have two
-defensible answers; with it, the answer is *Killed by a fall*.
+mechanism card, not this one. Without that rule, the sabotage-for-a-wager case
+in the table below would have two defensible answers; with it, the answer is
+*Killed by a fall*.
 
 **Why eleven.** The first eight (*Struck*, *Stabbed*, *Shot*, *Poisoned*,
 *Strangled*, *Drowned*, *Fall*, *Fire*) are the standard mechanisms and cover
@@ -369,20 +371,22 @@ reaches:
   (unlike the motive row, that omission spoils nothing, because "how did they
   die" only exists if someone died).
 
-## Fit against the existing stories
+## Fit against real cases
 
-The four maintained stories are the coverage test. Each true answer must fall
-inside the canon, with one obvious card rather than two defensible ones:
+The deck was designed against four cases — `simple_mystery` plus three stories
+since archived, kept here by shape because the shapes are the coverage test.
+Each true answer must fall inside the canon, with one obvious card rather than
+two defensible ones:
 
-| Story | Motive | Time | Method |
+| Case | Motive | Time | Method |
 | --- | --- | --- | --- |
 | `simple_mystery` — Lena Ortiz kills Adrian Bell over the cash ledger | *Fear of exposure* | *At night* | *Struck with something* (the brass service bell) |
-| `island_retreat` — Mara Voss kills Rowan Vale at 21:18 with a diving knife | *Fear of exposure* | *In the evening* | *Stabbed or cut* |
-| `quiet_kennel` — Cal Mercer sabotages Echo for a wager and dies in the fall | *Greed* | *Before dawn* | *Killed by a fall* |
-| `wrong_floor` — Elias conceals Sam; Ruby's aid goes to the wrong child | *Fear for someone else* | *In the evening* | *(no method row — nobody is harmed)* |
+| A deliberate stabbing at 21:18, to stop the victim talking | *Fear of exposure* | *In the evening* | *Stabbed or cut* |
+| A sabotage-for-a-wager that kills the saboteur in the fall | *Greed* | *Before dawn* | *Killed by a fall* |
+| A concealment where help reaches the wrong child and nobody is harmed | *Fear for someone else* | *In the evening* | *(no method row — nobody is harmed)* |
 
-`wrong_floor` is the deliberate negative case: a story with no killing prints
-no method deck at all, and the motive deck still has the right card for it.
+The last is the deliberate negative case: a story with no killing prints no
+method deck at all, and the motive deck still has the right card for it.
 
 ## What `narrator-validator#79` consumes from this document
 

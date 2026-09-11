@@ -2213,7 +2213,7 @@ fn rejects_older_and_newer_incompatible_story_formats_with_migration_guidance() 
 
 #[test]
 fn pre_v3_demo_layouts_fail_once_with_focused_migration_guidance() {
-    for fixture in ["simple-mystery.yaml", "island-retreat.yaml"] {
+    for fixture in ["simple-mystery.yaml", "branching-demo.yaml"] {
         let report = validate(&[SourceFile {
             path: "settings.yaml".to_string(),
             source: fs::read_to_string(format!("tests/fixtures/pre-v3/{fixture}"))
@@ -2480,12 +2480,12 @@ fn format_3_4_end_state_contract_metadata_makes_precedence_and_migration_explici
 }
 
 #[test]
-fn format_3_4_accepts_quiet_kennel_legacy_win_state_without_behavioral_reinterpretation() {
-    let legacy = fs::read_to_string("tests/fixtures/quiet-kennel-legacy-win-states.yaml")
-        .expect("Quiet Kennel legacy fixture");
+fn format_3_4_accepts_legacy_win_state_without_behavioral_reinterpretation() {
+    let legacy = fs::read_to_string("tests/fixtures/legacy-win-states.yaml")
+        .expect("legacy win-states fixture");
     let source = format_3_3_question_story()
         .replacen("format_version: \"3.3.0\"", "format_version: \"3.4.0\"", 1)
-        .replace("win_state: win.solve_case", "win_state: win.echo_safe_and_case_reconstructed")
+        .replace("win_state: win.solve_case", "win_state: win.animal_safe_and_case_reconstructed")
         .replace(
             "win_states:\n  - id: win.solve_case\n    name: Solved the case\n    text: You answer every question correctly.\n",
             &legacy,

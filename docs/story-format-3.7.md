@@ -223,8 +223,8 @@ Any other key is `solution.step_outcome_unknown_field`.
 Format 3.3–3.6 named exactly one end state as the Solve target
 (`solution.win_state`) and forbade that state from declaring `requires` or a
 positive `minimum_points` — Ruleset 5 narrowly lifted the `requires` half of
-that restriction for a persistent world-flag prerequisite (used today by
-`quiet_kennel`'s `flag.echo_recovered`).
+that restriction for a persistent world-flag prerequisite (a flag such as
+`flag.animal_recovered`, set well before the Solve and required alongside it).
 
 Format 3.7 removes `solution.win_state` and that carve-out entirely.
 Instead, because every step outcome can set an ordinary flag, an end state's
@@ -362,8 +362,8 @@ one row per legacy question, in the same order:
   `max_attempts` left unset for unlimited retries.
 - The end state formerly named by `solution.win_state` gets that new flag
   added to its `requires` list, preserving whatever `requires` it may
-  already have carried from the Ruleset 5 carve-out (see
-  `quiet_kennel` in the worked example below) — a plain conjunction, no
+  already have carried from the Ruleset 5 carve-out (see the carve-out
+  variant at the end of the worked example below) — a plain conjunction, no
   special casing.
 
 Because a legacy solution never had more than four questions and Format 3.7
@@ -439,9 +439,12 @@ Solve's cost is whatever the ruleset command default already is at
 substitute the resolved default rather than a literal `0` if a future
 ruleset ever ships a nonzero one). `max_attempts` and
 `session_timeout_minutes` are both omitted, matching the unlimited-retry
-behavior `simple_mystery` already has. `quiet_kennel`'s single question
-migrates the same way, except its migrated end state's `requires` becomes
-`[flag.echo_case_answered, flag.echo_recovered]` — the new step-outcome flag
+behavior `simple_mystery` already has.
+
+**The Ruleset 5 carve-out variant.** A single-question story that used the
+Ruleset 5 persistent-prerequisite carve-out migrates the same way, except that
+its migrated end state's `requires` becomes
+`[flag.case_answered, flag.animal_recovered]` — the new step-outcome flag
 joined, not replaced, by the persistent world flag Ruleset 5 already
 required there.
 

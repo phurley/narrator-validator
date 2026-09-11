@@ -11,7 +11,7 @@ Opt in explicitly:
 
 ```yaml
 case:
-  id: case.quiet_kennel
+  id: case.simple_mystery
   format_version: "3.2.0"
   features:
     - reference_text_v1
