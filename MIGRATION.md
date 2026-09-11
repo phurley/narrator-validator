@@ -1,5 +1,19 @@
 # Migrating story format 2 to format 3
 
+## Moving from Format 3.7 to 3.8 maps
+
+`case.map` is optional and purely additive. A Format 3.7 story becomes a
+Format 3.8 story by setting `case.format_version: "3.8.0"` and changing
+nothing else — there is no new required field, no ruleset change
+(`ruleset.standard_mystery@7.0.0` is still the current ruleset), and no
+removed or renamed field. Every other 3.7 rule carries over unchanged.
+
+To add a map, commit `maps/<name>.svg` and reference it from `case.map`.
+See [Story Format 3.8](docs/story-format-3.8.md) for the variant contract,
+the ordering and shadowing rules, and the SVG safety checks. Nothing about a
+map affects playability, so adding one cannot change what the bounded search
+proves about a story.
+
 ## Moving from Format 3.6 to 3.7 multi-step Solve
 
 Update the validator, backend, authoring WASM, and story CI together, then
