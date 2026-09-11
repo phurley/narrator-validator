@@ -30,9 +30,10 @@ const MAX_EXPLORED_STATES: usize = 25_000;
 // `search_from_multi_end`'s doc comment for why that per-end loop, not a
 // shared multi-goal search, is what's sound here) -- multiplying THIS
 // budget by `ends x seeds` the way step-chaining's single-leg-per-step cost
-// doesn't multiply. wrong_floor (3 of 5 ends permanently blocked) measured
-// this directly: giving the end-leg budget the same 60,000 bump nearly
-// tripled its wall-clock for zero proof-status benefit.
+// doesn't multiply. A story with 3 of its 5 ends permanently blocked
+// measured this directly (narrator-validator#99, on a story since
+// archived): giving the end-leg budget the same 60,000 bump nearly tripled
+// its wall-clock for zero proof-status benefit.
 const LEG_MAX_EXPLORED_STATES: usize = 60_000;
 const MAX_ACTIONS: u32 = 96;
 const MAX_ELAPSED_MINUTES: u32 = 2 * 24 * 60;
@@ -1585,13 +1586,12 @@ impl Model {
         // fact's `on` pattern binds `owner`, which resolves to the fact's
         // own entity -- co-location with itself is automatic wherever that
         // entity currently is, portable or not, so it never needs carrying.
-        // In quiet_kennel this distinction is the whole ballgame: every one
-        // of its 12 portable entities has a self-referential examine fact
-        // and so would appear in `precomputed_patterns`, but only the 4
-        // actually gated behind a cross-location trigger binding
-        // (`trigger.test_jo_curry_against_sedative_audit` and its
-        // siblings -- see narrator-validator#96) ever benefit from being
-        // carried. Restricting to trigger bindings keeps the take-action
+        // On the story narrator-validator#96 was measured against this
+        // distinction is the whole ballgame: every one of its 12 portable
+        // entities has a self-referential examine fact and so would appear
+        // in `precomputed_patterns`, but only the 4 actually gated behind a
+        // cross-location trigger binding ever benefit from being carried.
+        // Restricting to trigger bindings keeps the take-action
         // fan-out proportional to the real cross-room need instead of the
         // story's total portable-entity count.
         for pattern in self
@@ -2415,10 +2415,11 @@ impl Model {
     /// combined `min(shortfall)` priority, a single queue fanning out
     /// per-end priorities, and a round-robin of independent per-end queues
     /// sharing only the `actions`/`expand` computation -- all three saved
-    /// real cost on `wrong_floor` (3 of its 5 ends are permanently blocked
-    /// by an unsupported-testimony construct, so those legs would otherwise
-    /// each independently saturate their budget), but all three also
-    /// regressed `wrong_floor`'s `end.elias_moves_sam` from Proved to
+    /// real cost on the story they were measured against (3 of its 5 ends
+    /// are permanently blocked by an unsupported-testimony construct, so
+    /// those legs would otherwise each independently saturate their
+    /// budget), but all three also regressed that story's one genuinely
+    /// reachable end from Proved to
     /// Inconclusive under at least one notebook policy: dividing a shared
     /// exploration budget across several permanently-unreachable ends and
     /// one genuinely-reachable one starves the reachable one of the
@@ -2539,8 +2540,8 @@ impl Model {
         let mut step_nodes = vec![None::<Node>; self.solve_steps.len() + 1];
         // A Format 3.7 solve session can also conclude by *failing* a step
         // (see `solve_step_fail`'s `next_step = 0` reset in `apply_action`),
-        // which is how a graded "botched it" ending like island_retreat's
-        // `end.mistaken_accusation` becomes reachable. That reset collides
+        // which is how a graded "botched it" ending -- a mistaken
+        // accusation, say -- becomes reachable. That reset collides
         // on `next_step == 0` with the story's very first, pre-any-action
         // state, which `step_nodes[0]` already records -- so a
         // failure-concluded state is never captured there. Derived (not
@@ -2744,8 +2745,8 @@ impl Model {
         // originally tried here: `step_nodes[solve_steps.len()]` only ever
         // captures a session concluded by *succeeding* the final step, but
         // `solve_step_fail` on any step (see its `next_step = 0` reset in
-        // `apply_action`) concludes it too, and island_retreat's
-        // `end.mistaken_accusation` requires exactly that "botched it"
+        // `apply_action`) concludes it too, and a graded mistaken-accusation
+        // end requires exactly that "botched it"
         // path. `step_fail_nodes` (tracked above) are the seeds for that
         // case, one per step. Every seed here is a genuine
         // `MAX_EXPLORED_STATES`-bounded leg from a real playthrough
@@ -4877,8 +4878,8 @@ flags:
     /// Two rooms, a `command.investigate` trigger whose `on` pattern binds
     /// one entity present in each room (`entity.item` at `setting.room_a`,
     /// `entity.device` fixed at `setting.room_b`), gated `when: at
-    /// setting.room_b` -- the exact shape narrator-validator#96 exists for
-    /// (quiet_kennel's `trigger.test_jo_curry_against_sedative_audit`).
+    /// setting.room_b` -- the exact shape narrator-validator#96 exists for:
+    /// a trigger that tests one carried entity against a fixed one.
     /// `portable` toggles `entity.item`'s `physical.portable`, so the same
     /// builder produces both the take-only-inventory fixture and its
     /// portable:false control.

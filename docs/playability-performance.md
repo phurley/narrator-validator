@@ -8,7 +8,8 @@ reported boundary. Chromium and Firefox used Playwright 1.62.0.
 
 The parent-equivalent package was the checked-in `narrator-author` validator
 package. Its playability source is unchanged from parent `2217efe`. The
-optimized package was built from `aea9a6a`. `island_retreat` was pinned at
+optimized package was built from `aea9a6a`. The full story checkout measured
+below (a story since archived) was pinned at
 `1351d55ab450332dc6df4749d7826597a707329e`.
 
 ## Exact author save fixture
@@ -31,18 +32,18 @@ than parsing, schema, references, or serialization.
 An earlier harness setup run included two non-YAML metadata files. Those
 numbers are invalid evidence and are intentionally omitted from the comparison.
 
-## Maintained story
+## Full story checkout
 
 | engine | parent samples (ms) | parent median | optimized samples (ms) | optimized median |
 |---|---:|---:|---:|---:|
 | Chromium | 9537.7, 9468.3, 9469.6 | 9469.6 | 9713.2, 9652.5, 9655.0 | 9655.0 |
 | Firefox | 80025, 79995, 80164 | 80025 | 77635, 78322, 77797 | 77797 |
 
-Both versions explored `[25000, 25000, 25000, 25000]`: the maintained story's
+Both versions explored `[25000, 25000, 25000, 25000]`: that story's
 100,000-state cost is genuine combinatorics unrelated to redundant clock loops.
 The optimization is neutral within normal run variance there. Structural-only
 medians were 26.4ms in Chromium and 159ms in Firefox, so the state-space search
-accounts for more than 99.7% of total maintained-story time.
+accounts for more than 99.7% of its total time.
 
 ## Conclusion
 
@@ -55,6 +56,6 @@ pending triggers by remaining duration and retaining the Pareto frontier of
 action/elapsed costs. It still evaluates all four notebook policies, all
 actions, predicates, timers, terminal paths, and resource bounds.
 
-The maintained story shows the limit of this change: it still reaches the
+The full story checkout shows the limit of this change: it still reaches the
 25,000-state cap in every policy and needs separate evidence before any further
 optimization.

@@ -39,7 +39,7 @@ entry, in the same authored order:
 See [Story Format 3.7](docs/story-format-3.7.md) for the complete row-match,
 attempts/cancel/timeout, graded-ending, and `answer.*` deck contract,
 including a full worked migration of `simple_mystery`'s three-question
-solution and a note on `quiet_kennel`'s persistent-prerequisite end state.
+solution and a note on persistent-prerequisite end states.
 
 `answer.motive.*`, `answer.time.*`, and `answer.method.*` are new
 ruleset-owned card subjects a story may optionally bind in `deck.yaml` to
@@ -71,18 +71,19 @@ its inputs become known:
    `playability.notebook_policies`. An older ruleset without Claim makes the
    manual-fact path explicitly inconclusive.
 
-Maintained story guidance:
+Guidance by story shape:
 
-- **Simple Mystery:** replace any single final “culprit + weapon + location”
-  deduction with separate evidence-backed intermediate notes, then express the
-  final answer only through authored solution questions.
-- **Island Retreat:** audit branching alibi, method, and access chains for
-  automatic fan-out; keep each note useful on its own and remove any terminal
-  deduction that merely repeats the complete solution row.
-- **Quiet Kennel:** preserve its useful non-murder intermediate deductions,
-  but decide explicitly whether the final kennel conclusion is an ordinary
-  generic ending or a graded Solve result. Do not model the same terminal truth
-  in both a deduction and the solution contract.
+- **A single terminal deduction** (`simple_mystery`'s shape): replace any
+  single final “culprit + weapon + location” deduction with separate
+  evidence-backed intermediate notes, then express the final answer only
+  through authored solution questions.
+- **Branching alibi, method, and access chains:** audit them for automatic
+  fan-out; keep each note useful on its own and remove any terminal deduction
+  that merely repeats the complete solution row.
+- **Useful non-murder intermediate deductions:** preserve them, but decide
+  explicitly whether the story's final conclusion is an ordinary generic
+  ending or a graded Solve result. Do not model the same terminal truth in
+  both a deduction and the solution contract.
 
 See [Automatic deductions and notebook safety](docs/automatic-deductions.md)
 for the normative notebook semantics and Case Health expectations.

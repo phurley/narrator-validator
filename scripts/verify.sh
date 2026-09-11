@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Mirrors .github/workflows/ci.yml. CI pins toolchain 1.80.0.
 #
-# NOTE: this crate has four downstream consumers (backend Cargo dependency,
+# NOTE: this crate has downstream consumers (backend Cargo dependency,
 # the checked-in WASM package in narrator-author, and the action pinned by
-# island_retreat). Passing here is necessary but NOT sufficient for a
+# simple_mystery). Passing here is necessary but NOT sufficient for a
 # validator change — see "Validator release coordination" in ~/narrator/AGENTS.md.
 #
 # Usage: scripts/verify.sh [--quick]   (--quick skips wasm + web package)

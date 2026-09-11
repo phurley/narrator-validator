@@ -1,0 +1,4 @@
+win_states:
+  - id: win.animal_safe_and_case_reconstructed
+    name: The animal is safe and the case is solved
+    text: The dog is safe, and the complete truth has been reconstructed.
