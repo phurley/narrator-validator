@@ -588,6 +588,12 @@ impl Model {
     fn from_files(files: &[SourceFile]) -> Self {
         let mut model = Self::default();
         for file in files {
+            // Format 3.8 snapshots carry `maps/*.svg` alongside the YAML.
+            // Maps are presentational and never affect reachability, so the
+            // bounded search does not look at them at all.
+            if !(file.path.ends_with(".yaml") || file.path.ends_with(".yml")) {
+                continue;
+            }
             let Ok(root) = serde_yaml::from_str::<Value>(&file.source) else {
                 continue;
             };

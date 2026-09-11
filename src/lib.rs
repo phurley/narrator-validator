@@ -10,6 +10,7 @@ mod reference_text;
 mod ruleset;
 mod scanner_control;
 mod solution;
+mod svg;
 mod validator;
 
 pub use diagnostic::{
@@ -49,6 +50,7 @@ pub use solution::{
     SolutionContractMetadata, MAX_SOLUTION_ANSWER_CARDS, MAX_SOLUTION_QUESTIONS,
     MIN_SOLUTION_ANSWER_CARDS, MIN_SOLUTION_QUESTIONS, SOLUTION_STORY_FORMAT_VERSION,
 };
+pub use svg::{check_map_svg, MapSvgProblem};
 pub use validator::{
     validate, validate_with_supported_features, validate_without_playability,
     validate_without_playability_with_features,
@@ -56,7 +58,7 @@ pub use validator::{
 
 pub const VALIDATOR_VERSION: &str = env!("CARGO_PKG_VERSION");
 /// Latest story format authored by this release.
-pub const STORY_FORMAT_VERSION: &str = "3.7.0";
+pub const STORY_FORMAT_VERSION: &str = "3.8.0";
 /// Semantic-version range this release can structurally validate. Format 3.2+
 /// features still require successful `case.features` negotiation, while the
 /// Format 3.3 Solve contract is selected by its exact ruleset version.

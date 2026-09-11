@@ -165,6 +165,16 @@ format-1 validation path remains for legacy repositories, while format-2
 repositories stop with focused migration
 guidance before the strict format-3 schema runs.
 
+Format 3.8 adds an optional `case.map`: a presentational floor plan with a
+narratable, reference-aware `preamble` and an ordered list of variants, each
+binding a committed `maps/*.svg` to the same conjunctive `requires` contract
+`end_states` uses, so the plan a player sees changes with world state. Maps
+never affect playability or reachability, and every referenced SVG is parsed
+and rejected if it carries scripting, embedded foreign markup, event
+handlers, a DTD, or a reference that leaves the document. Format 3.8 is
+otherwise identical to 3.7: a 3.7 story bumps its version with no other
+change. See [Story Format 3.8](docs/story-format-3.8.md).
+
 Format 3.7 replaces the single-commit `solution.questions`/`solution.win_state`
 contract with `solution.steps`, an ordered sequence of independently-committed
 Solve steps, each with positional `n_of_m`/`ordered` rows, a time cost, and
@@ -204,7 +214,8 @@ privacy decisions are recorded in
 [Story Format 3.4](docs/story-format-3.4.md),
 [Story Format 3.5](docs/story-format-3.5.md),
 [Story Format 3.6](docs/story-format-3.6.md),
-[Story Format 3.7](docs/story-format-3.7.md), and
+[Story Format 3.7](docs/story-format-3.7.md),
+[Story Format 3.8](docs/story-format-3.8.md), and
 [ADR 0001](docs/adr/0001-story-format-3.1-character-presence-and-command-candidates.md).
 The [ADR index](docs/adr/README.md) is the discovery point for architecture
 decisions shared by validator consumers.

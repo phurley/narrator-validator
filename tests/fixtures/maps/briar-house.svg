@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 160">
+  <title>Briar House, ground floor</title>
+  <rect id="parlor" x="10" y="10" width="100" height="60" fill="none" stroke="#333" />
+  <rect id="study" x="130" y="10" width="100" height="60" fill="none" stroke="#333" />
+  <rect id="cellar" x="10" y="90" width="220" height="60" fill="none" stroke="#333" />
+  <text x="20" y="45">Parlor</text>
+  <text x="140" y="45">Study</text>
+  <text x="20" y="125">Cellar</text>
+</svg>

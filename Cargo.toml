@@ -31,6 +31,7 @@ wasm-bindgen = { version = "=0.2.100", optional = true }
 # that Cargo 1.80 cannot parse. Keep the validator aligned with the backend's
 # declared MSRV until both projects intentionally upgrade.
 indexmap = "=2.11.4"
+roxmltree = "0.20"
 
 [profile.release]
 opt-level = "s"
