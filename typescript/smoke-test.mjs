@@ -29,15 +29,16 @@ assert.match(VALIDATOR_SOURCE_COMMIT, /^[0-9a-f]{40}$/)
 
 assert.deepEqual(
   STANDARD_MYSTERY_RULESETS.map((ruleset) => ruleset.version),
-  ['1.0.0', '2.0.0', '3.0.0', '4.0.0', '5.0.0', '6.0.0', '7.0.0'],
+  ['1.0.0', '2.0.0', '3.0.0', '4.0.0', '5.0.0', '6.0.0', '7.0.0', '8.0.0'],
 )
-assert.equal(STANDARD_MYSTERY_RULESET.version, '7.0.0')
+assert.equal(STANDARD_MYSTERY_RULESET.version, '8.0.0')
 
-// Only ruleset.standard_mystery@7.0.0 defines an answer-deck catalog
+// Rulesets 7 and 8 define an answer-deck catalog
 // (Story Format 3.7); earlier versions carry no `answers` field at all.
-for (const ruleset of STANDARD_MYSTERY_RULESETS.slice(0, -1)) {
+for (const ruleset of STANDARD_MYSTERY_RULESETS.slice(0, 6)) {
   assert.equal(ruleset.answers, undefined)
 }
+assert.deepEqual(STANDARD_MYSTERY_RULESETS[6].answers, STANDARD_MYSTERY_RULESET.answers)
 assert.equal(STANDARD_MYSTERY_RULESET.answers.length, 29)
 assert.deepEqual(STANDARD_MYSTERY_RULESET.answers[0], {
   id: 'answer.motive.greed',

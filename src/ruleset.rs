@@ -12,8 +12,9 @@ pub const STANDARD_MYSTERY_RULESET_VERSION_4: &str = "4.0.0";
 pub const STANDARD_MYSTERY_RULESET_VERSION_5: &str = "5.0.0";
 pub const STANDARD_MYSTERY_RULESET_VERSION_6: &str = "6.0.0";
 pub const STANDARD_MYSTERY_RULESET_VERSION_7: &str = "7.0.0";
+pub const STANDARD_MYSTERY_RULESET_VERSION_8: &str = "8.0.0";
 /// Latest standard mystery ruleset authored by this validator release.
-pub const STANDARD_MYSTERY_RULESET_VERSION: &str = STANDARD_MYSTERY_RULESET_VERSION_7;
+pub const STANDARD_MYSTERY_RULESET_VERSION: &str = STANDARD_MYSTERY_RULESET_VERSION_8;
 
 /// tagStandard41h12 IDs 2000 through 2112 inclusive, immediately below the
 /// scanner-control reservation at 2113/2114, are permanently reserved for
@@ -56,10 +57,10 @@ pub struct RulesetCommandCapability {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RulesetError {
-    #[error("unknown ruleset `{id}`; supported rulesets: ruleset.standard_mystery@1.0.0, @2.0.0, @3.0.0, @4.0.0, @5.0.0, @6.0.0, and @7.0.0")]
+    #[error("unknown ruleset `{id}`; supported rulesets: ruleset.standard_mystery@1.0.0, @2.0.0, @3.0.0, @4.0.0, @5.0.0, @6.0.0, @7.0.0, and @8.0.0")]
     Unknown { id: String },
     #[error(
-        "ruleset `{id}` does not support version `{version}`; use version 1.0.0, 2.0.0, 3.0.0, 4.0.0, 5.0.0, 6.0.0, or 7.0.0"
+        "ruleset `{id}` does not support version `{version}`; use version 1.0.0, 2.0.0, 3.0.0, 4.0.0, 5.0.0, 6.0.0, 7.0.0, or 8.0.0"
     )]
     IncompatibleVersion { id: String, version: String },
 }
@@ -107,6 +108,11 @@ pub fn resolve_ruleset(reference: &RulesetReference) -> Result<ResolvedRuleset, 
             // command parameter. The 6.0.0 command catalog carries over
             // unchanged.
             STANDARD_MYSTERY_COMMANDS_6_0_YAML,
+            RECONCILIATION_COMMAND_CAPABILITIES,
+            Some(STANDARD_MYSTERY_ANSWERS_7_0_YAML),
+        ),
+        STANDARD_MYSTERY_RULESET_VERSION_8 => (
+            standard_mystery_commands_8_0_yaml(),
             RECONCILIATION_COMMAND_CAPABILITIES,
             Some(STANDARD_MYSTERY_ANSWERS_7_0_YAML),
         ),
@@ -677,6 +683,25 @@ const STANDARD_MYSTERY_COMMANDS_6_0_YAML: &str = r#"commands:
     default_cost_minutes: 0
 "#;
 
+// Immutable 8.0.0 derives from 7.0.0's unchanged 6.0.0 command catalog,
+// following the earlier catalog derivations. Only Open/Search have this shape.
+fn standard_mystery_commands_8_0_yaml() -> &'static str {
+    const ROOM_TARGET: &str = "types: [entity, setting]\n        min: 1\n        max: 1\n        candidates:\n          from: [current_location]";
+    const ROOM_OR_INVENTORY_TARGET: &str = "types: [entity, setting]\n        min: 1\n        max: 1\n        candidates:\n          from: [current_location, inventory]";
+    static CATALOG: OnceLock<String> = OnceLock::new();
+    CATALOG
+        .get_or_init(|| {
+            assert_eq!(
+                STANDARD_MYSTERY_COMMANDS_6_0_YAML
+                    .matches(ROOM_TARGET)
+                    .count(),
+                2
+            );
+            STANDARD_MYSTERY_COMMANDS_6_0_YAML.replace(ROOM_TARGET, ROOM_OR_INVENTORY_TARGET)
+        })
+        .as_str()
+}
+
 // This is the immutable 7.0.0 answer-deck catalog: 29 cards (10 motive, 8
 // time, 11 method), verbatim from docs/answer-deck-vocabulary.md, the
 // authoritative source. `tag_id`s are assigned descending from 2112 and
@@ -1206,6 +1231,8 @@ mod tests {
             STANDARD_MYSTERY_RULESET_VERSION_4,
             STANDARD_MYSTERY_RULESET_VERSION_5,
             STANDARD_MYSTERY_RULESET_VERSION_6,
+            STANDARD_MYSTERY_RULESET_VERSION_7,
+            STANDARD_MYSTERY_RULESET_VERSION_8,
         ] {
             let resolved = resolve_ruleset(&RulesetReference {
                 id: STANDARD_MYSTERY_RULESET_ID.to_string(),
@@ -1230,14 +1257,14 @@ mod tests {
     }
 
     #[test]
-    fn unknown_version_error_names_7_0_0() {
+    fn unknown_version_error_names_8_0_0() {
         let error = resolve_ruleset(&RulesetReference {
             id: STANDARD_MYSTERY_RULESET_ID.to_string(),
-            version: "8.0.0".to_string(),
+            version: "9.0.0".to_string(),
         })
         .expect_err("unpublished version must error");
         assert!(matches!(error, RulesetError::IncompatibleVersion { .. }));
-        assert!(error.to_string().contains("7.0.0"));
+        assert!(error.to_string().contains("8.0.0"));
 
         let unknown_id_error = resolve_ruleset(&RulesetReference {
             id: "ruleset.unknown".to_string(),
@@ -1245,16 +1272,58 @@ mod tests {
         })
         .expect_err("unknown ruleset id must error");
         assert!(matches!(unknown_id_error, RulesetError::Unknown { .. }));
-        assert!(unknown_id_error.to_string().contains("7.0.0"));
+        assert!(unknown_id_error.to_string().contains("8.0.0"));
     }
 
     #[test]
-    fn ruleset_version_constant_points_at_7_0_0() {
-        assert_eq!(STANDARD_MYSTERY_RULESET_VERSION, "7.0.0");
+    fn ruleset_version_constant_points_at_8_0_0() {
+        assert_eq!(STANDARD_MYSTERY_RULESET_VERSION, "8.0.0");
         assert_eq!(
             STANDARD_MYSTERY_RULESET_VERSION,
-            STANDARD_MYSTERY_RULESET_VERSION_7
+            STANDARD_MYSTERY_RULESET_VERSION_8
         );
+    }
+
+    #[test]
+    fn standard_catalog_8_0_only_adds_inventory_to_open_and_search() {
+        // Compare against the immutable predecessor, including costs, requirements,
+        // effects, types and candidate filters; empty searches stay unrestricted.
+        let resolve = |version: &str| {
+            resolve_ruleset(&RulesetReference {
+                id: STANDARD_MYSTERY_RULESET_ID.to_string(),
+                version: version.to_string(),
+            })
+            .expect("published ruleset")
+        };
+        let previous = resolve("7.0.0");
+        let current = resolve("8.0.0");
+        assert_eq!(current.answers_yaml, previous.answers_yaml);
+        assert_eq!(current.command_capabilities, previous.command_capabilities);
+        let mut expected: serde_yaml::Value = serde_yaml::from_str(previous.commands_yaml).unwrap();
+        let mut changed = 0;
+        for command in expected["commands"].as_sequence_mut().unwrap() {
+            if matches!(
+                command["id"].as_str(),
+                Some("command.open" | "command.search")
+            ) {
+                let parameter = &mut command["parameters"][0];
+                assert_eq!(
+                    parameter["types"],
+                    serde_yaml::from_str::<serde_yaml::Value>("[entity, setting]").unwrap()
+                );
+                assert_eq!(
+                    parameter["candidates"],
+                    serde_yaml::from_str::<serde_yaml::Value>("{from: [current_location]}")
+                        .unwrap()
+                );
+                parameter["candidates"]["from"] =
+                    serde_yaml::from_str("[current_location, inventory]").unwrap();
+                changed += 1;
+            }
+        }
+        assert_eq!(changed, 2);
+        let actual: serde_yaml::Value = serde_yaml::from_str(current.commands_yaml).unwrap();
+        assert_eq!(actual, expected);
     }
 
     #[test]

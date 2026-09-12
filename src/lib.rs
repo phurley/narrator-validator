@@ -39,6 +39,7 @@ pub use ruleset::{
     STANDARD_MYSTERY_RULESET_VERSION_2, STANDARD_MYSTERY_RULESET_VERSION_3,
     STANDARD_MYSTERY_RULESET_VERSION_4, STANDARD_MYSTERY_RULESET_VERSION_5,
     STANDARD_MYSTERY_RULESET_VERSION_6, STANDARD_MYSTERY_RULESET_VERSION_7,
+    STANDARD_MYSTERY_RULESET_VERSION_8,
 };
 pub use scanner_control::{
     reserved_scanner_control_tags, scanner_control_dart_source, scanner_control_manifest_json,

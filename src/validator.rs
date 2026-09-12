@@ -13,8 +13,9 @@ use crate::{
     MIN_SOLUTION_QUESTIONS, REFERENCE_TEXT_FEATURE, STANDARD_MYSTERY_RULESET_ID,
     STANDARD_MYSTERY_RULESET_VERSION_2, STANDARD_MYSTERY_RULESET_VERSION_3,
     STANDARD_MYSTERY_RULESET_VERSION_4, STANDARD_MYSTERY_RULESET_VERSION_5,
-    STANDARD_MYSTERY_RULESET_VERSION_6, STANDARD_MYSTERY_RULESET_VERSION_7, STORY_FORMAT_VERSION,
-    SUPPORTED_FEATURES, VALIDATOR_VERSION,
+    STANDARD_MYSTERY_RULESET_VERSION_6, STANDARD_MYSTERY_RULESET_VERSION_7,
+    STANDARD_MYSTERY_RULESET_VERSION_8, STORY_FORMAT_VERSION, SUPPORTED_FEATURES,
+    VALIDATOR_VERSION,
 };
 
 const MAX_REPOSITORY_FILES: usize = 512;
@@ -105,7 +106,7 @@ enum Kind {
     /// standard `id.invalid`/`id.wrong_prefix`/`id.duplicate` machinery.
     SolutionStep,
     /// An `answer.<deck>.<card>` subject supplied by the resolved ruleset's
-    /// answer-deck catalog (Format 3.7, `ruleset.standard_mystery@7.0.0`),
+    /// answer-deck catalog (Format 3.7, `ruleset.standard_mystery@7.0.0` and later),
     /// merged into a story's definitions the same way `Kind::Command` is.
     /// Never authored by the story itself.
     Answer,
@@ -330,7 +331,7 @@ struct Validator<'a> {
     reference_text: Vec<ResolvedReferenceText>,
     /// `answer.*` ID -> its ruleset-assigned `tag_id`, populated by
     /// `merge_ruleset_answers`. Empty unless the resolved ruleset publishes
-    /// an answer-deck catalog (`ruleset.standard_mystery@7.0.0`).
+    /// an answer-deck catalog (`ruleset.standard_mystery@7.0.0` and later).
     answer_tag_ids: BTreeMap<String, i64>,
 }
 
@@ -532,7 +533,10 @@ impl<'a> Validator<'a> {
     fn uses_step_solution_ruleset(&self) -> bool {
         self.ruleset.as_ref().is_some_and(|ruleset| {
             ruleset.id == STANDARD_MYSTERY_RULESET_ID
-                && ruleset.version == STANDARD_MYSTERY_RULESET_VERSION_7
+                && matches!(
+                    ruleset.version.as_str(),
+                    STANDARD_MYSTERY_RULESET_VERSION_7 | STANDARD_MYSTERY_RULESET_VERSION_8
+                )
         })
     }
 
@@ -2179,13 +2183,16 @@ impl<'a> Validator<'a> {
             return;
         }
         if reference.id == STANDARD_MYSTERY_RULESET_ID
-            && reference.version == STANDARD_MYSTERY_RULESET_VERSION_7
+            && matches!(
+                reference.version.as_str(),
+                STANDARD_MYSTERY_RULESET_VERSION_7 | STANDARD_MYSTERY_RULESET_VERSION_8
+            )
             && !self.is_format_3_7_or_later()
         {
             self.push(
                 Severity::Error,
                 "ruleset.format_incompatible",
-                "ruleset.standard_mystery@7.0.0 declares the Format 3.7 multi-step `solution.steps` Solve contract and the answer-deck catalog; set `case.format_version` to \"3.7.0\" or select an earlier ruleset version"
+                "ruleset.standard_mystery@7.0.0 and @8.0.0 declare the Format 3.7 multi-step `solution.steps` Solve contract and the answer-deck catalog; set `case.format_version` to \"3.7.0\" or select an earlier ruleset version"
                     .to_string(),
                 &case.path,
                 Some(format!("{pointer}/version")),
@@ -3251,7 +3258,7 @@ impl<'a> Validator<'a> {
             self.push(
                 Severity::Error,
                 "solution.missing_step_contract",
-                "ruleset.standard_mystery@7.0.0 requires a `solution` block with `steps`"
+                "ruleset.standard_mystery@7.0.0 and @8.0.0 require a `solution` block with `steps`"
                     .to_string(),
                 "case.yaml",
                 Some("/solution".to_string()),
@@ -3370,7 +3377,7 @@ impl<'a> Validator<'a> {
             self.push(
                 Severity::Error,
                 "solution.ruleset_incompatible",
-                "authored solve steps require `case.ruleset` ruleset.standard_mystery@7.0.0"
+                "authored solve steps require `case.ruleset` ruleset.standard_mystery@7.0.0 or @8.0.0"
                     .to_string(),
                 path,
                 Some("/solution".to_string()),
