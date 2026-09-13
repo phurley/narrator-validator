@@ -183,6 +183,13 @@ fn check_raster(
         ));
         return;
     }
+    if !raster_has_complete_container(format, &data) {
+        out.push(problem(
+            "case.map_svg_image_invalid",
+            "embedded artwork is truncated before its image container is complete",
+        ));
+        return;
+    }
     let (w, h) = match ImageReader::with_format(Cursor::new(&data), format).into_dimensions() {
         Ok(x) => x,
         Err(_) => {
@@ -236,6 +243,33 @@ fn raster_header_matches(format: ImageFormat, data: &[u8]) -> bool {
     match format {
         ImageFormat::Png => data.starts_with(b"\x89PNG\r\n\x1a\n"),
         ImageFormat::Jpeg => data.starts_with(&[0xff, 0xd8]),
+        _ => false,
+    }
+}
+fn raster_has_complete_container(format: ImageFormat, data: &[u8]) -> bool {
+    match format {
+        ImageFormat::Png => {
+            let mut offset: usize = 8;
+            while offset.checked_add(12).is_some_and(|end| end <= data.len()) {
+                let length =
+                    u32::from_be_bytes(data[offset..offset + 4].try_into().unwrap()) as usize;
+                let Some(end) = offset
+                    .checked_add(12)
+                    .and_then(|end| end.checked_add(length))
+                else {
+                    return false;
+                };
+                if end > data.len() {
+                    return false;
+                }
+                if &data[offset + 4..offset + 8] == b"IEND" {
+                    return length == 0 && end == data.len();
+                }
+                offset = end;
+            }
+            false
+        }
+        ImageFormat::Jpeg => data.ends_with(&[0xff, 0xd9]),
         _ => false,
     }
 }
@@ -455,6 +489,21 @@ mod tests {
             codes(&format!(
                 r#"<svg viewBox="0 0 1 1"><image href="data:image/png;base64,{}"/></svg>"#,
                 STANDARD.encode(&png[..png.len() / 2])
+            )),
+            ["case.map_svg_image_invalid"]
+        );
+        assert_eq!(
+            codes(&format!(
+                r#"<svg viewBox="0 0 1 1"><image href="data:image/png;base64,{}"/></svg>"#,
+                STANDARD.encode(&png[..png.len() - 2])
+            )),
+            ["case.map_svg_image_invalid"]
+        );
+        let jpeg = jpeg_with_orientation(1);
+        assert_eq!(
+            codes(&format!(
+                r#"<svg viewBox="0 0 1 1"><image href="data:image/jpeg;base64,{}"/></svg>"#,
+                STANDARD.encode(&jpeg[..jpeg.len() - 2])
             )),
             ["case.map_svg_image_invalid"]
         );
