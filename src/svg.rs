@@ -272,6 +272,7 @@ fn exif_orientation(t: &[u8]) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::{DynamicImage, ImageBuffer, Rgba};
     fn codes(source: &str) -> Vec<&'static str> {
         check_map_svg(source).into_iter().map(|p| p.code).collect()
     }
@@ -325,5 +326,24 @@ mod tests {
         );
         assert_eq!(problems[0].code, "case.map_svg_image_data");
         assert!(!problems[0].message.contains("aGVsbG8"));
+    }
+    #[test]
+    fn decodes_valid_png_and_jpeg_embedded_artwork() {
+        for (mime, format) in [
+            ("image/png", ImageFormat::Png),
+            ("image/jpeg", ImageFormat::Jpeg),
+        ] {
+            let image =
+                DynamicImage::ImageRgba8(ImageBuffer::from_pixel(1, 1, Rgba([0, 0, 0, 255])));
+            let mut bytes = Cursor::new(Vec::new());
+            image
+                .write_to(&mut bytes, format)
+                .expect("test image encodes");
+            let source = format!(
+                r#"<svg viewBox="0 0 1 1"><image href="data:{mime};base64,{}"/></svg>"#,
+                STANDARD.encode(bytes.into_inner())
+            );
+            assert!(check_map_svg(&source).is_empty(), "{mime}");
+        }
     }
 }
