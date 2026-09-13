@@ -33,7 +33,7 @@ wasm-bindgen = { version = "=0.2.100", optional = true }
 indexmap = "=2.11.4"
 roxmltree = "0.20"
 base64 = "0.22"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+image = { version = "=0.25.5", default-features = false, features = ["jpeg", "png"] }
 
 [profile.release]
 opt-level = "s"
