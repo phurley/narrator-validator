@@ -6637,6 +6637,60 @@ fn format_3_8_map_story_validates_clean() {
 }
 
 #[test]
+fn map_room_anchors_accept_negative_viewbox_boundaries_and_reject_bad_entries() {
+    let anchored = format_3_8_map_story().replace(
+        "      - id: map.default\n        source: maps/briar-house.svg",
+        "      - id: map.default\n        source: maps/briar-house.svg\n        rooms:\n          - setting: setting.study\n            anchor: { x: -100, y: 620 }",
+    );
+    let map = BRIAR_HOUSE_MAP.replace("viewBox=\"0 0 240 160\"", "viewBox=\"-100 20 800 600\"");
+    let report = validate(&map_story_files(
+        anchored.clone(),
+        &[
+            ("maps/briar-house.svg", &map),
+            ("maps/briar-house-stair.svg", BRIAR_HOUSE_STAIR_MAP),
+        ],
+    ));
+    assert!(report.valid, "{:#?}", report.diagnostics);
+
+    for (source, code, pointer) in [
+        (
+            anchored.replace(
+                "        rooms:\n          - setting: setting.study\n            anchor: { x: -100, y: 620 }",
+                "        rooms: null",
+            ),
+            "case.map_rooms_type",
+            "/case/map/variants/1/rooms",
+        ),
+        (
+            anchored.replace("setting: setting.study", "setting: setting.nowhere"),
+            "case.map_room_setting",
+            "/case/map/variants/1/rooms/0/setting",
+        ),
+        (
+            anchored.replace("x: -100", "x: 701"),
+            "case.map_room_anchor_bounds",
+            "/case/map/variants/1/rooms/0/anchor",
+        ),
+    ] {
+        let report = validate(&map_story_files(
+            source,
+            &[
+                ("maps/briar-house.svg", &map),
+                ("maps/briar-house-stair.svg", BRIAR_HOUSE_STAIR_MAP),
+            ],
+        ));
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == code && d.pointer.as_deref() == Some(pointer)),
+            "{code}: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
 fn map_preamble_resolves_references_as_a_public_case_consumer() {
     let report = map_report(format_3_8_map_story());
     let resolved = report

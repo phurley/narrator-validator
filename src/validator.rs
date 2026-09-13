@@ -593,6 +593,11 @@ impl<'a> Validator<'a> {
         let clues = self.items("clues", Kind::Clue, true);
         let deductions = self.items("deductions", Kind::Deduction, true);
         let flags = self.items("flags", Kind::Flag, true);
+        // Room anchors resolve authored settings; wait until all section IDs
+        // have been registered before checking the map contract.
+        for case in &cases {
+            self.validate_case_map(case);
+        }
         let local_commands = self.items("commands", Kind::Command, true);
         self.validate_command_migration(&local_commands);
         let commands = self.merge_ruleset_commands(local_commands);
@@ -1665,7 +1670,6 @@ impl<'a> Validator<'a> {
                 ),
             }
         }
-        self.validate_case_map(case);
     }
 
     /// Story Format 3.8 `case.map`: an optional, presentational floor plan.
