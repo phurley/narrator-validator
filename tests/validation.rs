@@ -6652,6 +6652,27 @@ fn map_room_anchors_accept_negative_viewbox_boundaries_and_reject_bad_entries() 
     ));
     assert!(report.valid, "{:#?}", report.diagnostics);
 
+    let bad_viewport = map.replace(
+        "<svg",
+        "<svg preserveAspectRatio=\"xMinYMin slice\" width=\"240\" height=\"160\"",
+    );
+    let report = validate(&map_story_files(
+        anchored.clone(),
+        &[
+            ("maps/briar-house.svg", &bad_viewport),
+            ("maps/briar-house-stair.svg", BRIAR_HOUSE_STAIR_MAP),
+        ],
+    ));
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "case.map_room_viewport"
+                && d.pointer.as_deref() == Some("/case/map/variants/1")),
+        "{:#?}",
+        report.diagnostics
+    );
+
     for (source, code, pointer) in [
         (
             anchored.replace(
