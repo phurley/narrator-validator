@@ -538,6 +538,12 @@ impl<'a> Validator<'a> {
             .is_some_and(|version| version.major == 3 && version.minor >= 8)
     }
 
+    fn is_format_3_9_or_later(&self) -> bool {
+        self.format_version
+            .as_ref()
+            .is_some_and(|version| version.major == 3 && version.minor >= 9)
+    }
+
     fn uses_step_solution_ruleset(&self) -> bool {
         self.ruleset.as_ref().is_some_and(|ruleset| {
             ruleset.id == STANDARD_MYSTERY_RULESET_ID
@@ -1865,6 +1871,20 @@ impl<'a> Validator<'a> {
             let svg_source = string_field(variant, "source")
                 .and_then(|source| self.files.iter().find(|file| file.path == source))
                 .map(|file| file.source.clone());
+            if variant.contains_key(Value::String("rooms".to_string()))
+                && !self.is_format_3_9_or_later()
+            {
+                self.push(
+                    Severity::Error,
+                    "case.map_rooms_format_incompatible",
+                    "`case.map.variants[].rooms` requires story format 3.9.0 or later".to_string(),
+                    &case.path,
+                    Some(format!("{variant_pointer}/rooms")),
+                    None,
+                    Some(case.id.clone()),
+                );
+                continue;
+            }
             let view_box = svg_source.as_deref().and_then(crate::map_view_box);
             self.validate_map_variant_rooms(
                 case,
