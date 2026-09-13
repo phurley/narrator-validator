@@ -6712,6 +6712,68 @@ fn map_room_anchors_accept_negative_viewbox_boundaries_and_reject_bad_entries() 
 }
 
 #[test]
+fn map_room_anchors_are_unique_per_variant_and_have_an_exact_shape() {
+    let anchored = format_3_8_map_story()
+        .replace(
+            "      - id: map.with_stair\n        source: maps/briar-house-stair.svg",
+            "      - id: map.with_stair\n        source: maps/briar-house-stair.svg\n        rooms:\n          - setting: setting.study\n            anchor: { x: 5, y: 5 }",
+        )
+        .replace(
+            "      - id: map.default\n        source: maps/briar-house.svg",
+            "      - id: map.default\n        source: maps/briar-house.svg\n        rooms:\n          - setting: setting.study\n            anchor: { x: 6, y: 6 }",
+        );
+    let report = map_report(anchored.clone());
+    assert!(report.valid, "{:#?}", report.diagnostics);
+
+    for (source, code, pointer) in [
+        (
+            anchored.replace(
+                "          - setting: setting.study\n            anchor: { x: 6, y: 6 }",
+                "          - setting: setting.study\n            anchor: { x: 6, y: 6 }\n          - setting: setting.study\n            anchor: { x: 7, y: 7 }",
+            ),
+            "case.map_room_duplicate",
+            "/case/map/variants/1/rooms/1/setting",
+        ),
+        (
+            anchored.replace("anchor: { x: 6, y: 6 }", "anchor: { x: nope, y: 6 }"),
+            "case.map_room_anchor",
+            "/case/map/variants/1/rooms/0/anchor",
+        ),
+        (
+            anchored.replace("setting: setting.study", "setting: setting.world"),
+            "case.map_room_setting",
+            "/case/map/variants/0/rooms/0/setting",
+        ),
+        (
+            anchored.replace(
+                "anchor: { x: 6, y: 6 }",
+                "anchor: { x: 6, y: 6 }\n            shade: red",
+            ),
+            "case.map_room_unknown_field",
+            "/case/map/variants/1/rooms/0/shade",
+        ),
+        (
+            anchored.replace(
+                "          - setting: setting.study\n            anchor: { x: 6, y: 6 }",
+                "          - setting.study",
+            ),
+            "case.map_room_type",
+            "/case/map/variants/1/rooms/0",
+        ),
+    ] {
+        let report = map_report(source);
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == code && d.pointer.as_deref() == Some(pointer)),
+            "{code}: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
 fn map_preamble_resolves_references_as_a_public_case_consumer() {
     let report = map_report(format_3_8_map_story());
     let resolved = report
