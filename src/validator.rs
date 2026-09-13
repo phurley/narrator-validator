@@ -1828,11 +1828,7 @@ impl<'a> Validator<'a> {
             }
 
             match string_field(variant, "source") {
-                Some(source)
-                    if source.starts_with("maps/")
-                        && source.ends_with(".svg")
-                        && !source.contains("..") =>
-                {
+                Some(source) if is_canonical_map_svg_path(source) => {
                     if self.files.iter().any(|file| file.path == source) {
                         svg_sources.push((id.to_string(), source.to_string()));
                     } else {
@@ -11798,7 +11794,8 @@ fn is_story_yaml_path(path: &str) -> bool {
 
 /// Canonical map assets alone receive ADR-015's larger source allowance.
 pub fn is_canonical_map_svg_path(path: &str) -> bool {
-    path.starts_with("maps/") && path.ends_with(".svg")
+    path.strip_prefix("maps/")
+        .is_some_and(|name| !name.is_empty() && !name.contains('/') && name.ends_with(".svg"))
 }
 
 fn is_string_sequence(value: &Value) -> bool {
@@ -12172,6 +12169,13 @@ mod resource_cap_boundary_tests {
 
     fn report(files: Vec<SourceFile>) -> ValidationReport {
         validate_without_playability(&files)
+    }
+
+    #[test]
+    fn only_direct_canonical_map_paths_receive_map_allowances() {
+        assert!(is_canonical_map_svg_path("maps/house.svg"));
+        assert!(!is_canonical_map_svg_path("maps/floors/house.svg"));
+        assert!(!is_canonical_map_svg_path("assets/house.svg"));
     }
 
     fn invalid_yaml_of_len(len: usize) -> String {
