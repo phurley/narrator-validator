@@ -7798,6 +7798,27 @@ impl<'a> Validator<'a> {
         let known = parameter_types.iter().flatten().collect::<Vec<_>>();
         let valid = match command.id.as_str() {
             "command.claim" | "command.deduce" => known.is_empty(),
+            "command.use" => match parameter_types {
+                [Some(item)] => {
+                    command_parameter_name(command, 0) == Some("item")
+                        && item.types == [CommandParameterType::Entity]
+                        && item.min == 1
+                        && item.max == 1
+                }
+                [Some(item), Some(target)] => {
+                    command_parameter_name(command, 0) == Some("item")
+                        && item.types == [CommandParameterType::Entity]
+                        && item.min == 1
+                        && item.max == 1
+                        && command_parameter_name(command, 1) == Some("target")
+                        && target.types.len() == 2
+                        && target.types.contains(&CommandParameterType::Entity)
+                        && target.types.contains(&CommandParameterType::Setting)
+                        && target.min == 0
+                        && target.max == 1
+                }
+                _ => false,
+            },
             "command.move" => {
                 matches!(known.as_slice(), [shape] if shape.types == [CommandParameterType::Setting] && shape.min == 1 && shape.max == 1)
             }
@@ -7822,6 +7843,9 @@ impl<'a> Validator<'a> {
                     }
                     "command.move" => {
                         "`command.move` must declare exactly one setting parameter".to_string()
+                    }
+                    "command.use" => {
+                        "`command.use` must declare required entity `item` and optional entity-or-setting `target` parameters".to_string()
                     }
                     "command.solve" => {
                         if self.uses_question_solution_ruleset() {
@@ -8457,6 +8481,17 @@ impl<'a> Validator<'a> {
         }
         if let Some(actor) = on.get(Value::String("actor".to_string())) {
             let actor_pointer = format!("{pointer}/actor");
+            if item.kind == Kind::Trigger && command_id == Some("command.use") {
+                self.push(
+                    Severity::Error,
+                    "trigger.use_actor_forbidden",
+                    "a `command.use` trigger must not declare `on.actor`".to_string(),
+                    &item.path,
+                    Some(actor_pointer.clone()),
+                    None,
+                    Some(item.id.clone()),
+                );
+            }
             let Some(actor) = actor.as_str().filter(|id| !id.trim().is_empty()) else {
                 self.push(
                     Severity::Error,
@@ -8497,6 +8532,18 @@ impl<'a> Validator<'a> {
         };
         let bindings_pointer = format!("{pointer}/parameters");
         let Some(bindings) = raw_bindings.as_mapping() else {
+            if item.kind == Kind::Trigger && command_id == Some("command.use") {
+                self.push(
+                    Severity::Error,
+                    "trigger.use_parameters_type",
+                    "a `command.use` trigger must map required `item` and optional `target` to authored IDs".to_string(),
+                    &item.path,
+                    Some(bindings_pointer.clone()),
+                    None,
+                    Some(item.id.clone()),
+                );
+                return;
+            }
             self.push(
                 Severity::Error,
                 "action_match.parameters_type",
@@ -8509,6 +8556,7 @@ impl<'a> Validator<'a> {
             return;
         };
         self.validate_standard_use_trigger_bindings(item, command_id, Some(bindings), &pointer);
+        let standard_use_trigger = item.kind == Kind::Trigger && command_id == Some("command.use");
         let parameter_shapes = command_id
             .and_then(|id| commands.iter().find(|command| command.id == id))
             .map(|command| {
@@ -8545,6 +8593,9 @@ impl<'a> Validator<'a> {
                 continue;
             };
             let binding_pointer = format!("{bindings_pointer}/{}", escape_pointer(name));
+            if standard_use_trigger && !matches!(name, "item" | "target") {
+                continue;
+            }
             let Some(shape) = parameter_shapes.get(name) else {
                 self.push(
                     Severity::Error,
@@ -8703,6 +8754,24 @@ impl<'a> Validator<'a> {
             );
             return;
         };
+
+        for (raw_name, _) in bindings {
+            let Some(name) = raw_name.as_str() else {
+                continue;
+            };
+            if matches!(name, "item" | "target") {
+                continue;
+            }
+            self.push(
+                Severity::Error,
+                "trigger.use_parameter_forbidden",
+                format!("`command.use` trigger binding `{name}` is not allowed; use only `item` and optional `target`"),
+                &item.path,
+                Some(format!("{bindings_pointer}/{}", escape_pointer(name))),
+                None,
+                Some(item.id.clone()),
+            );
+        }
 
         for name in ["item", "target"] {
             let matched = bindings
@@ -11460,6 +11529,16 @@ fn command_parameter_types(command: &Item) -> Vec<Option<CommandParameterShape>>
             })
         })
         .collect()
+}
+
+fn command_parameter_name(command: &Item, index: usize) -> Option<&str> {
+    command
+        .mapping
+        .get(Value::String("parameters".to_string()))
+        .and_then(Value::as_sequence)
+        .and_then(|parameters| parameters.get(index))
+        .and_then(Value::as_mapping)
+        .and_then(|parameter| string_field(parameter, "name"))
 }
 
 fn string_field<'a>(mapping: &'a Mapping, field: &str) -> Option<&'a str> {
