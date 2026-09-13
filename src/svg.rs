@@ -275,6 +275,30 @@ mod tests {
     fn codes(source: &str) -> Vec<&'static str> {
         check_map_svg(source).into_iter().map(|p| p.code).collect()
     }
+    const SAFE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60"><rect id="parlor"/><use href="#parlor"/></svg>"##;
+    #[test]
+    fn retains_existing_svg_safety_guards() {
+        assert!(check_map_svg(SAFE).is_empty());
+        assert_eq!(codes("<svg viewBox=\"0 0 1 1\">"), ["case.map_svg_invalid"]);
+        assert_eq!(
+            codes(
+                r#"<!DOCTYPE svg [<!ENTITY a "x">]><svg viewBox="0 0 1 1"><title>&a;</title></svg>"#
+            ),
+            ["case.map_svg_invalid"]
+        );
+        assert_eq!(
+            codes(&SAFE.replace("<rect", "<script>x</script><rect")),
+            ["case.map_svg_forbidden_element"]
+        );
+        assert_eq!(
+            codes(&SAFE.replace("<rect", "<rect onclick=\"x()\"")),
+            ["case.map_svg_event_attribute"]
+        );
+        assert_eq!(
+            codes(&SAFE.replace("href=\"#parlor\"", "href=\"https://example.test/a.svg\"")),
+            ["case.map_svg_external_reference"]
+        );
+    }
     #[test]
     fn accepts_negative_origin_and_svg_separators() {
         assert_eq!(
