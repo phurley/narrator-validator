@@ -47,7 +47,9 @@ The validator applies these limits before decoding raster pixels:
 
 `maps/nested/house.svg` is not a canonical map source and therefore receives
 the ordinary non-map limits. These constants are exported by the validator for
-consumers that need to present the same authored limits.
+consumers that need to present the same authored limits. Browser consumers use
+the WASM `map_contract_limits_json_export()` metadata export rather than
+duplicating these values.
 
 An omitted entry inherits the command defaults; `false` disallows the subject;
 `true` permits consideration under those same defaults. Reset removes the entry.
