@@ -158,6 +158,13 @@ fn check_raster(
             return;
         }
     };
+    if !raster_header_matches(format, &data) {
+        out.push(problem(
+            "case.map_svg_image_invalid",
+            "embedded artwork does not match its declared image type",
+        ));
+        return;
+    }
     if *total_bytes > MAX_RASTER_BYTES.saturating_sub(data.len()) {
         out.push(problem(
             "case.map_svg_image_bytes",
@@ -210,6 +217,13 @@ fn check_raster(
     }
     *total_bytes += data.len();
     *total_pixels += count;
+}
+fn raster_header_matches(format: ImageFormat, data: &[u8]) -> bool {
+    match format {
+        ImageFormat::Png => data.starts_with(b"\x89PNG\r\n\x1a\n"),
+        ImageFormat::Jpeg => data.starts_with(&[0xff, 0xd8]),
+        _ => false,
+    }
 }
 fn jpeg_has_nonidentity_orientation(b: &[u8]) -> bool {
     if b.get(..2) != Some(&[0xff, 0xd8]) {
@@ -275,6 +289,15 @@ mod tests {
     use image::{DynamicImage, ImageBuffer, Rgba};
     fn codes(source: &str) -> Vec<&'static str> {
         check_map_svg(source).into_iter().map(|p| p.code).collect()
+    }
+    fn encoded_png(width: u32, height: u32) -> Vec<u8> {
+        let image =
+            DynamicImage::ImageRgba8(ImageBuffer::from_pixel(width, height, Rgba([0, 0, 0, 255])));
+        let mut bytes = Cursor::new(Vec::new());
+        image
+            .write_to(&mut bytes, ImageFormat::Png)
+            .expect("test image encodes");
+        bytes.into_inner()
     }
     const SAFE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60"><rect id="parlor"/><use href="#parlor"/></svg>"##;
     #[test]
@@ -345,5 +368,38 @@ mod tests {
             );
             assert!(check_map_svg(&source).is_empty(), "{mime}");
         }
+    }
+    #[test]
+    fn rejects_mismatched_truncated_and_oversized_embedded_artwork() {
+        let png = encoded_png(1, 1);
+        let encoded = STANDARD.encode(&png);
+        assert_eq!(
+            codes(&format!(
+                r#"<svg viewBox="0 0 1 1"><image href="data:image/jpeg;base64,{encoded}"/></svg>"#
+            )),
+            ["case.map_svg_image_invalid"]
+        );
+        assert_eq!(
+            codes(&format!(
+                r#"<svg viewBox="0 0 1 1"><image href="data:image/png;base64,{}"/></svg>"#,
+                STANDARD.encode(&png[..png.len() / 2])
+            )),
+            ["case.map_svg_image_invalid"]
+        );
+        let mut problems = Vec::new();
+        check_raster(
+            &format!("data:image/png;base64,{encoded}"),
+            &mut (MAX_RASTER_BYTES - png.len() + 1),
+            &mut 0,
+            &mut problems,
+        );
+        assert_eq!(problems[0].code, "case.map_svg_image_bytes");
+        assert_eq!(
+            codes(&format!(
+                r#"<svg viewBox="0 0 1 1"><image href="data:image/png;base64,{}"/></svg>"#,
+                STANDARD.encode(encoded_png(MAX_RASTER_DIMENSION + 1, 1))
+            )),
+            ["case.map_svg_image_dimensions"]
+        );
     }
 }
