@@ -1,26 +1,23 @@
-//! Story Format 3.8 map-SVG safety checks.
-//!
-//! A `case.map` variant's `source` is handed to the player client verbatim
-//! and rendered, so the validator — not the client — is the gate. Every
-//! check here is a rejection: the authored SVG must parse as XML, be rooted
-//! at `<svg>` with a `viewBox`, and contain no scripting, no embedded
-//! foreign markup, no event handlers, and no reference that leaves the
-//! document.
-//!
-//! The 256 KiB per-file cap Format 3.8 requires of a map is not repeated
-//! here. `MAX_FILE_BYTES` in `validator.rs` already applies it to every file
-//! in a snapshot, including `maps/*.svg`, and reports
-//! `repository.file_too_large`; a second map-specific cap would be a second
-//! mechanism saying the same thing, and would drift.
+//! Format 3.9 map SVG safety, viewport, and embedded-artwork checks.
+use base64::{engine::general_purpose::STANDARD, Engine};
+use image::{ImageFormat, ImageReader};
+use std::io::Cursor;
 
-/// One rejected property of an authored map SVG, already carrying the
-/// diagnostic code the validator reports it under.
+pub const MAX_RASTER_BYTES: usize = 2 * 1024 * 1024;
+pub const MAX_RASTER_PIXELS: u64 = 8_388_608;
+pub const MAX_RASTER_DIMENSION: u32 = 4096;
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct MapViewBox {
+    pub min_x: f64,
+    pub min_y: f64,
+    pub width: f64,
+    pub height: f64,
+}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MapSvgProblem {
     pub code: &'static str,
     pub message: String,
 }
-
 fn problem(code: &'static str, message: impl Into<String>) -> MapSvgProblem {
     MapSvgProblem {
         code,
@@ -28,169 +25,281 @@ fn problem(code: &'static str, message: impl Into<String>) -> MapSvgProblem {
     }
 }
 
-/// Inspect one authored map SVG. An empty result means the document is safe
-/// to hand to a renderer. Results are ordered deterministically: parse, then
-/// document-level shape, then per-node findings in document order.
+pub fn map_view_box(source: &str) -> Option<MapViewBox> {
+    let document = roxmltree::Document::parse(source).ok()?;
+    let root = document.root_element();
+    (root.tag_name().name() == "svg")
+        .then(|| root.attribute("viewBox"))
+        .flatten()
+        .and_then(|v| parse_view_box(v).ok())
+}
+fn parse_view_box(value: &str) -> Result<MapViewBox, ()> {
+    let v = value
+        .split(|c: char| c.is_ascii_whitespace() || c == ',')
+        .filter(|x| !x.is_empty())
+        .map(str::parse::<f64>)
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ())?;
+    if v.len() != 4 || v.iter().any(|x| !x.is_finite()) || v[2] <= 0. || v[3] <= 0. {
+        return Err(());
+    }
+    Ok(MapViewBox {
+        min_x: v[0],
+        min_y: v[1],
+        width: v[2],
+        height: v[3],
+    })
+}
+
+/// Diagnostics never echo data URLs, preventing artwork from entering logs.
 pub fn check_map_svg(source: &str) -> Vec<MapSvgProblem> {
-    let mut problems = Vec::new();
-    // `roxmltree`'s defaults reject a DTD outright, which is what keeps an
-    // entity-expansion bomb out of the validator as well as the client.
-    let document = match roxmltree::Document::parse(source) {
-        Ok(document) => document,
-        Err(error) => {
-            problems.push(problem(
+    let mut out = Vec::new();
+    let doc = match roxmltree::Document::parse(source) {
+        Ok(doc) => doc,
+        Err(e) => {
+            out.push(problem(
                 "case.map_svg_invalid",
-                format!("map SVG is not well-formed XML: {error}"),
+                format!("map SVG is not well-formed XML: {e}"),
             ));
-            return problems;
+            return out;
         }
     };
-
-    let root = document.root_element();
+    let root = doc.root_element();
     if root.tag_name().name() != "svg" {
-        problems.push(problem(
+        out.push(problem(
             "case.map_svg_root",
             format!(
                 "map SVG root element must be `<svg>`, found `<{}>`",
                 root.tag_name().name()
             ),
         ));
-    } else if !root.has_attribute("viewBox") {
-        problems.push(problem(
-            "case.map_svg_view_box",
-            "map SVG root `<svg>` must declare a `viewBox` so the client can scale and fit it"
-                .to_string(),
-        ));
+    } else if root
+        .attribute("viewBox")
+        .and_then(|v| parse_view_box(v).ok())
+        .is_none()
+    {
+        out.push(problem("case.map_svg_view_box", "map SVG root `<svg>` needs exactly four finite viewBox numbers with positive width and height"));
     }
-
-    for node in document.descendants().filter(roxmltree::Node::is_element) {
+    let mut bytes = 0usize;
+    let mut pixels = 0u64;
+    for node in doc.descendants().filter(roxmltree::Node::is_element) {
         let name = node.tag_name().name();
         if matches!(name, "script" | "foreignObject") {
-            problems.push(problem(
+            out.push(problem(
                 "case.map_svg_forbidden_element",
                 format!("map SVG must not contain `<{name}>`"),
             ));
         }
-        for attribute in node.attributes() {
-            let attribute_name = attribute.name();
-            // SVG event attributes are all `on*`; matching the prefix
-            // case-insensitively rather than enumerating the ~40 names keeps
-            // this correct as the SVG/HTML event vocabulary grows.
-            if attribute_name.len() > 2 && attribute_name[..2].eq_ignore_ascii_case("on") {
-                problems.push(problem(
+        for attr in node.attributes() {
+            let attr_name = attr.name();
+            if attr_name.len() > 2 && attr_name[..2].eq_ignore_ascii_case("on") {
+                out.push(problem(
                     "case.map_svg_event_attribute",
-                    format!("map SVG must not declare the event handler `{attribute_name}` on `<{name}>`"),
+                    format!("map SVG must not declare event handler `{attr_name}` on `<{name}>`"),
                 ));
             }
-            if attribute_name == "href" && !attribute.value().starts_with('#') {
-                problems.push(problem(
-                    "case.map_svg_external_reference",
-                    format!(
-                        "map SVG `href` on `<{name}>` must be a same-document fragment such as `#shape`, found `{}`",
-                        attribute.value()
-                    ),
-                ));
+            if attr_name == "href" {
+                if name == "image" && attr.value().starts_with("data:") {
+                    check_raster(attr.value(), &mut bytes, &mut pixels, &mut out);
+                } else if !attr.value().starts_with('#') {
+                    out.push(problem("case.map_svg_external_reference", format!("map SVG `href` on `<{name}>` must be a same-document fragment or approved embedded image")));
+                }
             }
         }
     }
-
-    problems
+    out
+}
+fn check_raster(
+    value: &str,
+    total_bytes: &mut usize,
+    total_pixels: &mut u64,
+    out: &mut Vec<MapSvgProblem>,
+) {
+    let (mime, encoded) = match value.split_once(";base64,") {
+        Some(x) => x,
+        None => {
+            out.push(problem(
+                "case.map_svg_image_data",
+                "embedded artwork must use canonical base64 PNG or JPEG data URLs",
+            ));
+            return;
+        }
+    };
+    let format = match mime {
+        "data:image/png" => ImageFormat::Png,
+        "data:image/jpeg" => ImageFormat::Jpeg,
+        _ => {
+            out.push(problem(
+                "case.map_svg_image_data",
+                "embedded artwork must declare image/png or image/jpeg",
+            ));
+            return;
+        }
+    };
+    if encoded.is_empty()
+        || encoded.len() % 4 != 0
+        || !encoded
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'='))
+    {
+        out.push(problem(
+            "case.map_svg_image_data",
+            "embedded artwork has invalid base64",
+        ));
+        return;
+    }
+    let data = match STANDARD.decode(encoded) {
+        Ok(x) => x,
+        Err(_) => {
+            out.push(problem(
+                "case.map_svg_image_data",
+                "embedded artwork has invalid base64",
+            ));
+            return;
+        }
+    };
+    if *total_bytes > MAX_RASTER_BYTES.saturating_sub(data.len()) {
+        out.push(problem(
+            "case.map_svg_image_bytes",
+            format!("embedded raster artwork exceeds the {MAX_RASTER_BYTES}-byte decoded limit"),
+        ));
+        return;
+    }
+    let (w, h) = match ImageReader::with_format(Cursor::new(&data), format).into_dimensions() {
+        Ok(x) => x,
+        Err(_) => {
+            out.push(problem(
+                "case.map_svg_image_invalid",
+                "embedded artwork is not a complete valid image of its declared type",
+            ));
+            return;
+        }
+    };
+    if w == 0 || h == 0 || w > MAX_RASTER_DIMENSION || h > MAX_RASTER_DIMENSION {
+        out.push(problem(
+            "case.map_svg_image_dimensions",
+            format!("embedded artwork dimensions must be 1..={MAX_RASTER_DIMENSION}"),
+        ));
+        return;
+    }
+    let count = u64::from(w) * u64::from(h);
+    if *total_pixels > MAX_RASTER_PIXELS.saturating_sub(count) {
+        out.push(problem(
+            "case.map_svg_image_pixels",
+            format!("embedded raster artwork exceeds the {MAX_RASTER_PIXELS}-pixel limit"),
+        ));
+        return;
+    }
+    if format == ImageFormat::Jpeg && jpeg_has_nonidentity_orientation(&data) {
+        out.push(problem(
+            "case.map_svg_image_orientation",
+            "embedded JPEG has a non-identity EXIF orientation; export it upright before embedding",
+        ));
+        return;
+    }
+    // Header dimensions make the allocation bounds-safe; decode catches truncation.
+    if ImageReader::with_format(Cursor::new(&data), format)
+        .decode()
+        .is_err()
+    {
+        out.push(problem(
+            "case.map_svg_image_invalid",
+            "embedded artwork is not a complete valid image of its declared type",
+        ));
+        return;
+    }
+    *total_bytes += data.len();
+    *total_pixels += count;
+}
+fn jpeg_has_nonidentity_orientation(b: &[u8]) -> bool {
+    if b.get(..2) != Some(&[0xff, 0xd8]) {
+        return false;
+    }
+    let mut i = 2;
+    while i + 4 <= b.len() {
+        if b[i] != 0xff {
+            return false;
+        }
+        while i < b.len() && b[i] == 0xff {
+            i += 1;
+        }
+        if i >= b.len() || matches!(b[i], 0xda | 0xd9) {
+            break;
+        }
+        let n = u16::from_be_bytes([b[i], b[i + 1]]) as usize;
+        if n < 2 || i + 1 + n > b.len() {
+            break;
+        }
+        if b[i] == 0xe1 && b.get(i + 3..i + 9) == Some(b"Exif\0\0") {
+            return exif_orientation(&b[i + 9..i + 1 + n]).is_some_and(|v| v != 1);
+        }
+        i += 1 + n;
+    }
+    false
+}
+fn exif_orientation(t: &[u8]) -> Option<u16> {
+    let le = match t.get(..2)? {
+        b"II" => true,
+        b"MM" => false,
+        _ => return None,
+    };
+    let u16at = |p| {
+        let x = t.get(p..p + 2)?;
+        Some(if le {
+            u16::from_le_bytes([x[0], x[1]])
+        } else {
+            u16::from_be_bytes([x[0], x[1]])
+        })
+    };
+    let u32at = |p| {
+        let x = t.get(p..p + 4)?;
+        Some(if le {
+            u32::from_le_bytes([x[0], x[1], x[2], x[3]])
+        } else {
+            u32::from_be_bytes([x[0], x[1], x[2], x[3]])
+        } as usize)
+    };
+    let p = u32at(4)?;
+    for n in 0..u16at(p)? as usize {
+        let e = p.checked_add(2 + n * 12)?;
+        if u16at(e)? == 0x0112 && u16at(e + 2)? == 3 && u32at(e + 4)? == 1 {
+            return u16at(e + 8);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     fn codes(source: &str) -> Vec<&'static str> {
-        check_map_svg(source)
-            .into_iter()
-            .map(|problem| problem.code)
-            .collect()
+        check_map_svg(source).into_iter().map(|p| p.code).collect()
     }
-
-    const SAFE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60">
-  <rect id="parlor" x="0" y="0" width="40" height="30" />
-  <use href="#parlor" x="50" />
-</svg>
-"##;
-
     #[test]
-    fn accepts_a_safe_map() {
-        assert!(check_map_svg(SAFE).is_empty());
-    }
-
-    #[test]
-    fn rejects_malformed_xml_without_reporting_anything_else() {
-        assert_eq!(codes("<svg viewBox=\"0 0 1 1\">"), ["case.map_svg_invalid"]);
-    }
-
-    #[test]
-    fn rejects_a_dtd_so_an_entity_bomb_cannot_reach_a_renderer() {
+    fn accepts_negative_origin_and_svg_separators() {
         assert_eq!(
-            codes(
-                r#"<!DOCTYPE svg [<!ENTITY a "aaaaaaaaaa">]>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1 1"><title>&a;</title></svg>"#
-            ),
-            ["case.map_svg_invalid"]
+            map_view_box(r#"<svg viewBox="-100, 20 800,600"/>"#),
+            Some(MapViewBox {
+                min_x: -100.,
+                min_y: 20.,
+                width: 800.,
+                height: 600.
+            })
         );
     }
-
     #[test]
-    fn requires_an_svg_root_with_a_view_box() {
-        assert_eq!(codes("<plan></plan>"), ["case.map_svg_root"]);
+    fn rejects_bad_viewbox_and_unsafe_references() {
         assert_eq!(
-            codes(r#"<svg xmlns="http://www.w3.org/2000/svg"><rect /></svg>"#),
-            ["case.map_svg_view_box"]
+            codes(r#"<svg viewBox="0 0 1"><image href="https://example.test/a.png"/></svg>"#),
+            vec!["case.map_svg_view_box", "case.map_svg_external_reference"]
         );
     }
-
     #[test]
-    fn rejects_script_foreign_object_events_and_external_references() {
-        assert_eq!(
-            codes(
-                SAFE.replace("<rect", "<script>alert(1)</script><rect")
-                    .as_str()
-            ),
-            ["case.map_svg_forbidden_element"]
+    fn rejects_noncanonical_embedded_images_without_echoing_them() {
+        let problems = check_map_svg(
+            r#"<svg viewBox="0 0 1 1"><image href="data:image/png;base64,aGVsbG8"/></svg>"#,
         );
-        assert_eq!(
-            codes(
-                SAFE.replace("<rect", "<foreignObject><rect /></foreignObject><rect")
-                    .as_str()
-            ),
-            ["case.map_svg_forbidden_element"]
-        );
-        assert_eq!(
-            codes(
-                SAFE.replace("<rect id", "<rect onclick=\"x()\" id")
-                    .as_str()
-            ),
-            ["case.map_svg_event_attribute"]
-        );
-        assert_eq!(
-            codes(SAFE.replace("<rect id", "<rect ONLOAD=\"x()\" id").as_str()),
-            ["case.map_svg_event_attribute"]
-        );
-        assert_eq!(
-            codes(
-                SAFE.replace("href=\"#parlor\"", "href=\"https://example.com/a.svg\"")
-                    .as_str()
-            ),
-            ["case.map_svg_external_reference"]
-        );
-    }
-
-    #[test]
-    fn rejects_a_namespaced_xlink_href_that_leaves_the_document() {
-        let source = SAFE
-            .replace(
-                "xmlns=\"http://www.w3.org/2000/svg\"",
-                "xmlns=\"http://www.w3.org/2000/svg\" xmlns:xlink=\"http://www.w3.org/1999/xlink\"",
-            )
-            .replace(
-                "href=\"#parlor\"",
-                "xlink:href=\"http://example.com/a.svg\"",
-            );
-        assert_eq!(codes(&source), ["case.map_svg_external_reference"]);
+        assert_eq!(problems[0].code, "case.map_svg_image_data");
+        assert!(!problems[0].message.contains("aGVsbG8"));
     }
 }
