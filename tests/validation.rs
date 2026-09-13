@@ -4546,6 +4546,44 @@ fn validates_runtime_command_signatures_and_unique_parameter_names() {
         "    description: Learn that the knife is present.\n    parameters:\n      - name: target\n        types: [entity]\n        min: 1\n        max: 1\n    effects:",
     ));
     assert!(reserved.contains(&"command.runtime_signature".to_string()));
+
+    let use_command = |parameters: &str| {
+        VALID_FORMAT_3_STORY.replace(
+            "commands:\n",
+            &format!(
+                "commands:\n  - id: command.use\n    name: Use\n    description: Use an item.\n{parameters}"
+            ),
+        )
+    };
+    let accepted = report(use_command(
+        "    parameters:\n      - name: item\n        types: [entity]\n        min: 1\n        max: 1\n      - name: target\n        types: [entity, setting]\n        min: 0\n        max: 1\n",
+    ));
+    assert!(accepted.valid, "{:#?}", accepted.diagnostics);
+    let reversed_target_types = report(use_command(
+        "    parameters:\n      - name: item\n        types: [entity]\n        min: 1\n        max: 1\n      - name: target\n        types: [setting, entity]\n        min: 0\n        max: 1\n",
+    ));
+    assert!(
+        reversed_target_types.valid,
+        "{:#?}",
+        reversed_target_types.diagnostics
+    );
+    for parameters in [
+        "",
+        "    parameters:\n      - name: item\n        types: [entity]\n        min: 0\n        max: 1\n",
+        "    parameters:\n      - name: target\n        types: [entity]\n        min: 1\n        max: 1\n",
+        "    parameters:\n      - name: item\n        types: [entity]\n        min: 1\n        max: 1\n      - name: target\n        types: [entity]\n        min: 0\n        max: 1\n",
+        "    parameters:\n      - name: item\n        types: [entity]\n        min: 1\n        max: 1\n      - name: target\n        types: [entity, setting]\n        min: 0\n        max: 1\n      - name: extra\n        types: [entity]\n        min: 0\n        max: 1\n",
+    ] {
+        let invalid = report(use_command(parameters));
+        assert!(
+            invalid
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "command.runtime_signature"),
+            "{:#?}",
+            invalid.diagnostics
+        );
+    }
 }
 
 #[test]
@@ -6347,8 +6385,9 @@ fn standard_use_trigger_requires_an_authored_singular_item_and_optional_target()
         ),
         (
             "      parameters:\n        item: entity.knife\n        extra: setting.study\n",
-            "action_match.parameter_unknown",
+            "trigger.use_parameter_forbidden",
         ),
+        ("      parameters: []\n", "trigger.use_parameters_type"),
     ] {
         let result = report(story(parameters));
         assert!(
@@ -6360,6 +6399,30 @@ fn standard_use_trigger_requires_an_authored_singular_item_and_optional_target()
             result.diagnostics
         );
     }
+
+    let actor = report(story(
+        "      actor: character.culprit\n      parameters:\n        item: entity.knife\n",
+    ));
+    assert!(
+        actor
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "trigger.use_actor_forbidden"),
+        "{:#?}",
+        actor.diagnostics
+    );
+
+    let non_mapping = report(story("      parameters: []\n"));
+    assert_eq!(
+        non_mapping
+            .diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.pointer.as_deref() == Some("/triggers/0/on/parameters"))
+            .count(),
+        1,
+        "{:#?}",
+        non_mapping.diagnostics
+    );
 }
 
 #[test]
