@@ -33,6 +33,21 @@ origins and all boundaries. Anchored SVGs must use centered `meet` fitting (or
 omit `preserveAspectRatio`) and either omit both dimensions or provide matching
 unitless/px dimensions. SVG images may use only canonical base64
 `data:image/png` or `data:image/jpeg` URLs; external assets are not allowed.
+The declared MIME type must match a complete decoded PNG or JPEG. JPEGs must be
+exported upright (EXIF orientation 1).
+
+The validator applies these limits before decoding raster pixels:
+
+- Each embedded raster is 1..=4096 pixels in each dimension.
+- Repeated image elements count separately, up to 2 MiB decoded raster bytes
+  and 8,388,608 pixels per SVG.
+- A direct `maps/<name>.svg` source is at most 4 MiB; all such map sources are
+  at most 16 MiB together.
+- Every other repository file is at most 256 KiB, with a 1 MiB aggregate cap.
+
+`maps/nested/house.svg` is not a canonical map source and therefore receives
+the ordinary non-map limits. These constants are exported by the validator for
+consumers that need to present the same authored limits.
 
 An omitted entry inherits the command defaults; `false` disallows the subject;
 `true` permits consideration under those same defaults. Reset removes the entry.
