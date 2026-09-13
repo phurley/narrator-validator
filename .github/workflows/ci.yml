@@ -1,9 +1,8 @@
 name: CI
 
+# Manual only (owner direction 2026-09-13): nothing runs on push or PR. Dispatch
+# explicitly when a hosted WASM/CI pass is wanted.
 on:
-  push:
-    branches: [main]
-  pull_request:
   workflow_dispatch:
 
 concurrency:
@@ -30,10 +29,10 @@ jobs:
       - name: Test release-tag gate
         run: bash scripts/test-check-release-tag.sh
       - name: Fetch release tags
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main'
         run: git fetch --force origin 'refs/tags/*:refs/tags/*'
       - name: Require an exact release tag for a version bump on main
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        if: github.ref == 'refs/heads/main'
         run: bash scripts/check-release-tag.sh
       - uses: dtolnay/rust-toolchain@1.80.0
         with:
