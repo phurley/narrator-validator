@@ -6637,6 +6637,174 @@ fn format_3_8_map_story_validates_clean() {
 }
 
 #[test]
+fn map_room_anchors_accept_negative_viewbox_boundaries_and_reject_bad_entries() {
+    let anchored = format_3_8_map_story()
+        .replace("format_version: \"3.8.0\"", "format_version: \"3.9.0\"")
+        .replace(
+            "      - id: map.default\n        source: maps/briar-house.svg",
+            "      - id: map.default\n        source: maps/briar-house.svg\n        rooms:\n          - setting: setting.study\n            anchor: { x: -100, y: 620 }",
+        );
+    let map = BRIAR_HOUSE_MAP.replace("viewBox=\"0 0 240 160\"", "viewBox=\"-100 20 800 600\"");
+    let report = validate(&map_story_files(
+        anchored.clone(),
+        &[
+            ("maps/briar-house.svg", &map),
+            ("maps/briar-house-stair.svg", BRIAR_HOUSE_STAIR_MAP),
+        ],
+    ));
+    assert!(report.valid, "{:#?}", report.diagnostics);
+
+    let bad_viewport = map.replace(
+        "<svg",
+        "<svg preserveAspectRatio=\"xMinYMin slice\" width=\"240\" height=\"160\"",
+    );
+    let report = validate(&map_story_files(
+        anchored.clone(),
+        &[
+            ("maps/briar-house.svg", &bad_viewport),
+            ("maps/briar-house-stair.svg", BRIAR_HOUSE_STAIR_MAP),
+        ],
+    ));
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|d| d.code == "case.map_room_viewport"
+                && d.pointer.as_deref() == Some("/case/map/variants/1")),
+        "{:#?}",
+        report.diagnostics
+    );
+
+    for (source, code, pointer) in [
+        (
+            anchored.replace(
+                "        rooms:\n          - setting: setting.study\n            anchor: { x: -100, y: 620 }",
+                "        rooms: null",
+            ),
+            "case.map_rooms_type",
+            "/case/map/variants/1/rooms",
+        ),
+        (
+            anchored.replace("setting: setting.study", "setting: setting.nowhere"),
+            "case.map_room_setting",
+            "/case/map/variants/1/rooms/0/setting",
+        ),
+        (
+            anchored.replace("x: -100", "x: 701"),
+            "case.map_room_anchor_bounds",
+            "/case/map/variants/1/rooms/0/anchor",
+        ),
+    ] {
+        let report = validate(&map_story_files(
+            source,
+            &[
+                ("maps/briar-house.svg", &map),
+                ("maps/briar-house-stair.svg", BRIAR_HOUSE_STAIR_MAP),
+            ],
+        ));
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == code && d.pointer.as_deref() == Some(pointer)),
+            "{code}: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
+fn map_room_anchors_are_unique_per_variant_and_have_an_exact_shape() {
+    let anchored = format_3_8_map_story()
+        .replace("format_version: \"3.8.0\"", "format_version: \"3.9.0\"")
+        .replace(
+            "      - id: map.with_stair\n        source: maps/briar-house-stair.svg",
+            "      - id: map.with_stair\n        source: maps/briar-house-stair.svg\n        rooms:\n          - setting: setting.study\n            anchor: { x: 5, y: 5 }",
+        )
+        .replace(
+            "      - id: map.default\n        source: maps/briar-house.svg",
+            "      - id: map.default\n        source: maps/briar-house.svg\n        rooms:\n          - setting: setting.study\n            anchor: { x: 6, y: 6 }",
+        );
+    let report = map_report(anchored.clone());
+    assert!(report.valid, "{:#?}", report.diagnostics);
+
+    for (source, code, pointer) in [
+        (
+            anchored.replace(
+                "          - setting: setting.study\n            anchor: { x: 6, y: 6 }",
+                "          - setting: setting.study\n            anchor: { x: 6, y: 6 }\n          - setting: setting.study\n            anchor: { x: 7, y: 7 }",
+            ),
+            "case.map_room_duplicate",
+            "/case/map/variants/1/rooms/1/setting",
+        ),
+        (
+            anchored.replace("anchor: { x: 6, y: 6 }", "anchor: { x: nope, y: 6 }"),
+            "case.map_room_anchor",
+            "/case/map/variants/1/rooms/0/anchor",
+        ),
+        (
+            anchored.replace("setting: setting.study", "setting: setting.world"),
+            "case.map_room_setting",
+            "/case/map/variants/0/rooms/0/setting",
+        ),
+        (
+            anchored.replace(
+                "anchor: { x: 6, y: 6 }",
+                "anchor: { x: 6, y: 6 }\n            shade: red",
+            ),
+            "case.map_room_unknown_field",
+            "/case/map/variants/1/rooms/0/shade",
+        ),
+        (
+            anchored.replace(
+                "anchor: { x: 6, y: 6 }",
+                "anchor: { x: 6, y: 6 }\n            0: extra",
+            ),
+            "case.map_room_unknown_field",
+            "/case/map/variants/1/rooms/0",
+        ),
+        (
+            anchored.replace(
+                "anchor: { x: 6, y: 6 }",
+                "anchor: { x: 6, y: 6, 0: extra }",
+            ),
+            "case.map_room_anchor_unknown_field",
+            "/case/map/variants/1/rooms/0/anchor",
+        ),
+        (
+            anchored.replace(
+                "          - setting: setting.study\n            anchor: { x: 6, y: 6 }",
+                "          - setting.study",
+            ),
+            "case.map_room_type",
+            "/case/map/variants/1/rooms/0",
+        ),
+    ] {
+        let report = map_report(source);
+        assert!(
+            report
+                .diagnostics
+                .iter()
+                .any(|d| d.code == code && d.pointer.as_deref() == Some(pointer)),
+            "{code}: {:#?}",
+            report.diagnostics
+        );
+    }
+}
+
+#[test]
+fn map_room_anchors_require_format_3_9() {
+    let report = map_report(format_3_8_map_story().replace(
+        "      - id: map.default\n        source: maps/briar-house.svg",
+        "      - id: map.default\n        source: maps/briar-house.svg\n        rooms: []",
+    ));
+    assert!(report.diagnostics.iter().any(|d| {
+        d.code == "case.map_rooms_format_incompatible"
+            && d.pointer.as_deref() == Some("/case/map/variants/1/rooms")
+    }));
+}
+
+#[test]
 fn map_preamble_resolves_references_as_a_public_case_consumer() {
     let report = map_report(format_3_8_map_story());
     let resolved = report
@@ -6948,10 +7116,8 @@ fn unsafe_map_svg_is_rejected_against_the_svg_path() {
 }
 
 #[test]
-fn an_oversized_map_svg_hits_the_repository_wide_file_cap() {
-    // Format 3.8 requires a 256 KiB cap on maps. That is the cap the
-    // repository already enforces on every file, so a map gets it for free
-    // rather than through a second map-specific check.
+fn an_oversized_map_svg_hits_the_adr_015_map_file_cap() {
+    // ADR-015 gives only canonical map SVGs a 4 MiB source allowance.
     let report = validate(&map_story_files(
         format_3_8_map_story(),
         &[
@@ -6960,7 +7126,7 @@ fn an_oversized_map_svg_hits_the_repository_wide_file_cap() {
                 BRIAR_HOUSE_MAP
                     .replace(
                         "<title>",
-                        &format!("<title>{}</title><title>", "x".repeat(256 * 1024)),
+                        &format!("<title>{}</title><title>", "x".repeat(4 * 1024 * 1024)),
                     )
                     .as_str(),
             ),

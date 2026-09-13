@@ -51,10 +51,14 @@ pub use solution::{
     SolutionContractMetadata, MAX_SOLUTION_ANSWER_CARDS, MAX_SOLUTION_QUESTIONS,
     MIN_SOLUTION_ANSWER_CARDS, MIN_SOLUTION_QUESTIONS, SOLUTION_STORY_FORMAT_VERSION,
 };
-pub use svg::{check_map_svg, MapSvgProblem};
+pub use svg::{
+    check_map_svg, map_view_box, MapSvgProblem, MapViewBox, MAX_RASTER_BYTES, MAX_RASTER_DIMENSION,
+    MAX_RASTER_PIXELS,
+};
 pub use validator::{
-    validate, validate_with_supported_features, validate_without_playability,
-    validate_without_playability_with_features,
+    is_canonical_map_svg_path, validate, validate_with_supported_features,
+    validate_without_playability, validate_without_playability_with_features, MAX_MAP_SVG_BYTES,
+    MAX_MAP_SVG_TOTAL_BYTES, MAX_NON_MAP_FILE_BYTES, MAX_NON_MAP_TOTAL_BYTES,
 };
 
 pub const VALIDATOR_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -65,12 +69,41 @@ pub const STORY_FORMAT_VERSION: &str = "3.9.0";
 /// Format 3.3 Solve contract is selected by its exact ruleset version.
 pub const SUPPORTED_STORY_FORMATS: &str = ">=1.0.0, <2.0.0 or >=3.0.0, <4.0.0";
 
+/// JSON contract consumed by browser clients that need to prevent a map edit
+/// from exceeding the validator's authoritative source or artwork limits.
+pub fn map_contract_limits_json() -> String {
+    serde_json::json!({
+        "canonicalMapPath": "maps/<name>.svg",
+        "maxMapSvgBytes": MAX_MAP_SVG_BYTES,
+        "maxMapSvgTotalBytes": MAX_MAP_SVG_TOTAL_BYTES,
+        "maxNonMapFileBytes": MAX_NON_MAP_FILE_BYTES,
+        "maxNonMapTotalBytes": MAX_NON_MAP_TOTAL_BYTES,
+        "maxRasterBytes": MAX_RASTER_BYTES,
+        "maxRasterPixels": MAX_RASTER_PIXELS,
+        "maxRasterDimension": MAX_RASTER_DIMENSION,
+    })
+    .to_string()
+}
+
+#[cfg(test)]
+mod map_contract_limit_tests {
+    use super::*;
+
+    #[test]
+    fn metadata_uses_the_exported_authoritative_limits() {
+        let limits: serde_json::Value = serde_json::from_str(&map_contract_limits_json()).unwrap();
+        assert_eq!(limits["canonicalMapPath"], "maps/<name>.svg");
+        assert_eq!(limits["maxMapSvgBytes"], MAX_MAP_SVG_BYTES);
+        assert_eq!(limits["maxRasterPixels"], MAX_RASTER_PIXELS);
+    }
+}
+
 #[cfg(all(feature = "wasm", target_arch = "wasm32"))]
 mod wasm {
     use wasm_bindgen::prelude::*;
 
     use crate::{
-        end_state_contract_metadata_json, parse_reference_text_result,
+        end_state_contract_metadata_json, map_contract_limits_json, parse_reference_text_result,
         reference_text_metadata_json, solution_answer_matches, solution_contract_metadata_json,
         validate, validate_with_supported_features, validate_without_playability_with_features,
         SourceFile,
@@ -138,6 +171,11 @@ mod wasm {
     #[wasm_bindgen]
     pub fn end_state_contract_metadata_json_export() -> String {
         end_state_contract_metadata_json()
+    }
+
+    #[wasm_bindgen]
+    pub fn map_contract_limits_json_export() -> String {
+        map_contract_limits_json()
     }
 
     #[wasm_bindgen]

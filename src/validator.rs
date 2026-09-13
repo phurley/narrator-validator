@@ -19,8 +19,15 @@ use crate::{
 };
 
 const MAX_REPOSITORY_FILES: usize = 512;
-const MAX_REPOSITORY_BYTES: usize = 1024 * 1024;
-const MAX_FILE_BYTES: usize = 256 * 1024;
+/// Source limits shared by the backend and Author map import paths (ADR-015).
+pub const MAX_MAP_SVG_BYTES: usize = 4 * 1024 * 1024;
+pub const MAX_MAP_SVG_TOTAL_BYTES: usize = 16 * 1024 * 1024;
+pub const MAX_NON_MAP_FILE_BYTES: usize = 256 * 1024;
+pub const MAX_NON_MAP_TOTAL_BYTES: usize = 1024 * 1024;
+#[cfg(test)]
+const MAX_FILE_BYTES: usize = MAX_NON_MAP_FILE_BYTES;
+#[cfg(test)]
+const MAX_REPOSITORY_BYTES: usize = MAX_NON_MAP_TOTAL_BYTES;
 const MAX_YAML_DEPTH: usize = 64;
 const MAX_YAML_NODES: usize = 100_000;
 // tagStandard41h12 defines 2,115 codes, numbered from zero.
@@ -230,6 +237,7 @@ impl Kind {
 #[derive(Debug, Clone)]
 struct Definition {
     kind: Kind,
+    is_room: bool,
     path: String,
     pointer: String,
     range: Option<SourceRange>,
@@ -530,6 +538,12 @@ impl<'a> Validator<'a> {
             .is_some_and(|version| version.major == 3 && version.minor >= 8)
     }
 
+    fn is_format_3_9_or_later(&self) -> bool {
+        self.format_version
+            .as_ref()
+            .is_some_and(|version| version.major == 3 && version.minor >= 9)
+    }
+
     fn uses_step_solution_ruleset(&self) -> bool {
         self.ruleset.as_ref().is_some_and(|ruleset| {
             ruleset.id == STANDARD_MYSTERY_RULESET_ID
@@ -585,6 +599,11 @@ impl<'a> Validator<'a> {
         let clues = self.items("clues", Kind::Clue, true);
         let deductions = self.items("deductions", Kind::Deduction, true);
         let flags = self.items("flags", Kind::Flag, true);
+        // Room anchors resolve authored settings; wait until all section IDs
+        // have been registered before checking the map contract.
+        for case in &cases {
+            self.validate_case_map(case);
+        }
         let local_commands = self.items("commands", Kind::Command, true);
         self.validate_command_migration(&local_commands);
         let commands = self.merge_ruleset_commands(local_commands);
@@ -749,32 +768,46 @@ impl<'a> Validator<'a> {
                 None,
             );
         }
-        let total = self
+        let map_total = self
             .files
             .iter()
+            .filter(|file| is_canonical_map_svg_path(&file.path))
             .fold(0usize, |sum, file| sum.saturating_add(file.source.len()));
-        if total > MAX_REPOSITORY_BYTES {
+        let non_map_total = self
+            .files
+            .iter()
+            .filter(|file| !is_canonical_map_svg_path(&file.path))
+            .fold(0usize, |sum, file| sum.saturating_add(file.source.len()));
+        if map_total > MAX_MAP_SVG_TOTAL_BYTES {
             within_bounds = false;
             self.push(
                 Severity::Error,
                 "repository.too_large",
-                format!("repository is {total} bytes; the limit is {MAX_REPOSITORY_BYTES}"),
+                format!(
+                    "map SVG source is {map_total} bytes; the limit is {MAX_MAP_SVG_TOTAL_BYTES}"
+                ),
                 "",
                 None,
                 None,
                 None,
             );
         }
+        if non_map_total > MAX_NON_MAP_TOTAL_BYTES {
+            within_bounds = false;
+            self.push(Severity::Error, "repository.too_large", format!("non-map source is {non_map_total} bytes; the limit is {MAX_NON_MAP_TOTAL_BYTES}"), "", None, None, None);
+        }
         for file in self.files {
-            if file.source.len() > MAX_FILE_BYTES {
+            let limit = if is_canonical_map_svg_path(&file.path) {
+                MAX_MAP_SVG_BYTES
+            } else {
+                MAX_NON_MAP_FILE_BYTES
+            };
+            if file.source.len() > limit {
                 within_bounds = false;
                 self.push(
                     Severity::Error,
                     "repository.file_too_large",
-                    format!(
-                        "file is {} bytes; the limit is {MAX_FILE_BYTES}",
-                        file.source.len()
-                    ),
+                    format!("file is {} bytes; the limit is {limit}", file.source.len()),
                     &file.path,
                     None,
                     None,
@@ -1183,6 +1216,8 @@ impl<'a> Validator<'a> {
                 }
                 let definition = Definition {
                     kind,
+                    is_room: kind == Kind::Setting
+                        && string_field(&mapping, "type") == Some("room"),
                     path: path.clone(),
                     pointer: pointer.clone(),
                     range,
@@ -1292,6 +1327,7 @@ impl<'a> Validator<'a> {
                     }
                     let definition = Definition {
                         kind: Kind::Fact,
+                        is_room: false,
                         path: owner.path.clone(),
                         pointer: pointer.clone(),
                         range,
@@ -1405,6 +1441,7 @@ impl<'a> Validator<'a> {
                 }
                 let definition = Definition {
                     kind: Kind::Testimony,
+                    is_room: false,
                     path: character.path.clone(),
                     pointer: pointer.clone(),
                     range,
@@ -1639,7 +1676,6 @@ impl<'a> Validator<'a> {
                 ),
             }
         }
-        self.validate_case_map(case);
     }
 
     /// Story Format 3.8 `case.map`: an optional, presentational floor plan.
@@ -1761,7 +1797,7 @@ impl<'a> Validator<'a> {
             };
             for key in variant.keys() {
                 let Some(key) = key.as_str() else { continue };
-                if !matches!(key, "id" | "source" | "requires" | "preamble") {
+                if !matches!(key, "id" | "source" | "requires" | "preamble" | "rooms") {
                     self.push(
                         Severity::Error,
                         "case.map_unknown_field",
@@ -1802,11 +1838,7 @@ impl<'a> Validator<'a> {
             }
 
             match string_field(variant, "source") {
-                Some(source)
-                    if source.starts_with("maps/")
-                        && source.ends_with(".svg")
-                        && !source.contains("..") =>
-                {
+                Some(source) if is_canonical_map_svg_path(source) => {
                     if self.files.iter().any(|file| file.path == source) {
                         svg_sources.push((id.to_string(), source.to_string()));
                     } else {
@@ -1835,6 +1867,32 @@ impl<'a> Validator<'a> {
                     Some(case.id.clone()),
                 ),
             }
+
+            let svg_source = string_field(variant, "source")
+                .and_then(|source| self.files.iter().find(|file| file.path == source))
+                .map(|file| file.source.clone());
+            if variant.contains_key(Value::String("rooms".to_string()))
+                && !self.is_format_3_9_or_later()
+            {
+                self.push(
+                    Severity::Error,
+                    "case.map_rooms_format_incompatible",
+                    "`case.map.variants[].rooms` requires story format 3.9.0 or later".to_string(),
+                    &case.path,
+                    Some(format!("{variant_pointer}/rooms")),
+                    None,
+                    Some(case.id.clone()),
+                );
+                continue;
+            }
+            let view_box = svg_source.as_deref().and_then(crate::map_view_box);
+            self.validate_map_variant_rooms(
+                case,
+                variant,
+                &variant_pointer,
+                view_box,
+                svg_source.as_deref(),
+            );
 
             if variant
                 .get(Value::String("preamble".to_string()))
@@ -1881,6 +1939,201 @@ impl<'a> Validator<'a> {
         self.validate_map_variant_precedence(case, &variants_pointer, &conditions);
         for (id, source) in svg_sources {
             self.validate_map_svg(case, &id, &source);
+        }
+    }
+
+    fn validate_map_variant_rooms(
+        &mut self,
+        case: &Item,
+        variant: &Mapping,
+        pointer: &str,
+        view_box: Option<crate::MapViewBox>,
+        svg_source: Option<&str>,
+    ) {
+        let Some(value) = variant.get(Value::String("rooms".to_string())) else {
+            return;
+        };
+        let Some(rooms) = value.as_sequence() else {
+            self.push(
+                Severity::Error,
+                "case.map_rooms_type",
+                "map variant `rooms` must be a sequence of room-anchor mappings".to_string(),
+                &case.path,
+                Some(format!("{pointer}/rooms")),
+                None,
+                Some(case.id.clone()),
+            );
+            return;
+        };
+        if rooms.is_empty() {
+            return;
+        }
+        self.validate_anchored_map_viewport(case, pointer, view_box, svg_source);
+        let mut seen = HashSet::new();
+        for (index, entry) in rooms.iter().enumerate() {
+            let entry_pointer = format!("{pointer}/rooms/{index}");
+            let Some(entry) = entry.as_mapping() else {
+                self.push(
+                    Severity::Error,
+                    "case.map_room_type",
+                    "each map room entry must be a mapping with `setting` and `anchor`".to_string(),
+                    &case.path,
+                    Some(entry_pointer),
+                    None,
+                    Some(case.id.clone()),
+                );
+                continue;
+            };
+            for key in entry.keys() {
+                match key.as_str() {
+                    Some("setting" | "anchor") => {}
+                    Some(key) => self.push(
+                        Severity::Error,
+                        "case.map_room_unknown_field",
+                        format!("`{key}` is not supported in a map room entry"),
+                        &case.path,
+                        Some(format!("{entry_pointer}/{}", escape_pointer(key))),
+                        None,
+                        Some(case.id.clone()),
+                    ),
+                    None => self.push(
+                        Severity::Error,
+                        "case.map_room_unknown_field",
+                        "map room entries may use only string field names".to_string(),
+                        &case.path,
+                        Some(entry_pointer.clone()),
+                        None,
+                        Some(case.id.clone()),
+                    ),
+                }
+            }
+            let setting = string_field(entry, "setting");
+            match setting.and_then(|id| self.definitions.get(id)) {
+                Some(definition) if definition.kind == Kind::Setting && definition.is_room => {}
+                _ => self.push(
+                    Severity::Error,
+                    "case.map_room_setting",
+                    "map room `setting` must reference an existing setting of type `room`"
+                        .to_string(),
+                    &case.path,
+                    Some(format!("{entry_pointer}/setting")),
+                    None,
+                    Some(case.id.clone()),
+                ),
+            }
+            if let Some(setting) = setting {
+                if !seen.insert(setting) {
+                    self.push(
+                        Severity::Error,
+                        "case.map_room_duplicate",
+                        format!("room `{setting}` appears more than once in this map variant"),
+                        &case.path,
+                        Some(format!("{entry_pointer}/setting")),
+                        None,
+                        Some(case.id.clone()),
+                    );
+                }
+            }
+            let Some(anchor) = entry
+                .get(Value::String("anchor".to_string()))
+                .and_then(Value::as_mapping)
+            else {
+                self.push(
+                    Severity::Error,
+                    "case.map_room_anchor",
+                    "map room `anchor` must be a mapping with finite numeric `x` and `y`"
+                        .to_string(),
+                    &case.path,
+                    Some(format!("{entry_pointer}/anchor")),
+                    None,
+                    Some(case.id.clone()),
+                );
+                continue;
+            };
+            for key in anchor.keys() {
+                match key.as_str() {
+                    Some("x" | "y") => {}
+                    Some(key) => self.push(
+                        Severity::Error,
+                        "case.map_room_anchor_unknown_field",
+                        format!("`{key}` is not supported in a map room anchor"),
+                        &case.path,
+                        Some(format!("{entry_pointer}/anchor/{}", escape_pointer(key))),
+                        None,
+                        Some(case.id.clone()),
+                    ),
+                    None => self.push(
+                        Severity::Error,
+                        "case.map_room_anchor_unknown_field",
+                        "map room anchors may use only string field names".to_string(),
+                        &case.path,
+                        Some(format!("{entry_pointer}/anchor")),
+                        None,
+                        Some(case.id.clone()),
+                    ),
+                }
+            }
+            let x = anchor
+                .get(Value::String("x".to_string()))
+                .and_then(Value::as_f64);
+            let y = anchor
+                .get(Value::String("y".to_string()))
+                .and_then(Value::as_f64);
+            if !x.is_some_and(f64::is_finite) || !y.is_some_and(f64::is_finite) {
+                self.push(
+                    Severity::Error,
+                    "case.map_room_anchor",
+                    "map room anchor `x` and `y` must be finite numbers".to_string(),
+                    &case.path,
+                    Some(format!("{entry_pointer}/anchor")),
+                    None,
+                    Some(case.id.clone()),
+                );
+                continue;
+            }
+            if let Some(box_) = view_box {
+                if x.unwrap() < box_.min_x
+                    || x.unwrap() > box_.min_x + box_.width
+                    || y.unwrap() < box_.min_y
+                    || y.unwrap() > box_.min_y + box_.height
+                {
+                    self.push(Severity::Error, "case.map_room_anchor_bounds", "map room anchor must be inside the SVG root viewBox (including its boundary)".to_string(), &case.path, Some(format!("{entry_pointer}/anchor")), None, Some(case.id.clone()));
+                }
+            }
+        }
+    }
+
+    fn validate_anchored_map_viewport(
+        &mut self,
+        case: &Item,
+        pointer: &str,
+        view_box: Option<crate::MapViewBox>,
+        svg_source: Option<&str>,
+    ) {
+        let Some(source) = svg_source else {
+            return;
+        };
+        let document = match roxmltree::Document::parse(source) {
+            Ok(document) => document,
+            Err(_) => return,
+        };
+        let root = document.root_element();
+        if view_box.is_none() {
+            return;
+        }
+        let preserve = root.attribute("preserveAspectRatio");
+        if preserve.is_some_and(|value| value.trim() != "xMidYMid meet") {
+            self.push(Severity::Error, "case.map_room_viewport", "anchored maps require preserveAspectRatio to be absent or `xMidYMid meet`; export with centered meet fitting".to_string(), &case.path, Some(pointer.to_string()), None, Some(case.id.clone()));
+        }
+        match (root.attribute("width"), root.attribute("height")) {
+            (None, None) => {},
+            (Some(width), Some(height)) => {
+                let parse_length = |value: &str| value.strip_suffix("px").unwrap_or(value).parse::<f64>().ok().filter(|value| value.is_finite() && *value > 0.0);
+                let valid_units = |value: &str| value.chars().all(|c| c.is_ascii_digit() || matches!(c, '.' | '+' | '-' | 'e' | 'E')) || value.strip_suffix("px").is_some_and(|v| v.chars().all(|c| c.is_ascii_digit() || matches!(c, '.' | '+' | '-' | 'e' | 'E')));
+                let ratio_ok = parse_length(width).zip(parse_length(height)).zip(view_box).is_some_and(|((w, h), b)| ((w / h) - (b.width / b.height)).abs() <= 1e-6 * (b.width / b.height).abs());
+                if !valid_units(width) || !valid_units(height) || !ratio_ok { self.push(Severity::Error, "case.map_room_viewport", "anchored maps require positive unitless/px width and height matching the viewBox aspect ratio; export with `preserveAspectRatio=\"xMidYMid meet\"`".to_string(), &case.path, Some(pointer.to_string()), None, Some(case.id.clone())); }
+            }
+            _ => self.push(Severity::Error, "case.map_room_viewport", "anchored maps must omit both width/height or provide both as positive unitless/px lengths matching the viewBox; re-export the SVG".to_string(), &case.path, Some(pointer.to_string()), None, Some(case.id.clone())),
         }
     }
 
@@ -2263,6 +2516,7 @@ impl<'a> Validator<'a> {
                 id.clone(),
                 Definition {
                     kind: Kind::Command,
+                    is_room: false,
                     path: source_name.clone(),
                     pointer: pointer.clone(),
                     range: None,
@@ -2321,6 +2575,7 @@ impl<'a> Validator<'a> {
                 id.clone(),
                 Definition {
                     kind: Kind::Answer,
+                    is_room: false,
                     path: source_name.clone(),
                     pointer: pointer.clone(),
                     range: None,
@@ -2536,6 +2791,7 @@ impl<'a> Validator<'a> {
                 // elsewhere), so no other definition can collide with it.
                 self.definitions.entry(id).or_insert(Definition {
                     kind: Kind::Player,
+                    is_room: false,
                     path: case.path.clone(),
                     pointer: pointer.clone(),
                     range: None,
@@ -2677,6 +2933,7 @@ impl<'a> Validator<'a> {
                     id.clone(),
                     Definition {
                         kind: Kind::Persona,
+                        is_room: false,
                         path: case.path.clone(),
                         pointer: pointer.clone(),
                         range,
@@ -3554,6 +3811,7 @@ impl<'a> Validator<'a> {
                         id.clone(),
                         Definition {
                             kind: Kind::SolutionStep,
+                            is_room: false,
                             path: path.to_string(),
                             pointer: pointer.to_string(),
                             range,
@@ -11578,6 +11836,12 @@ fn is_story_yaml_path(path: &str) -> bool {
     path.ends_with(".yaml") || path.ends_with(".yml")
 }
 
+/// Canonical map assets alone receive ADR-015's larger source allowance.
+pub fn is_canonical_map_svg_path(path: &str) -> bool {
+    path.strip_prefix("maps/")
+        .is_some_and(|name| !name.is_empty() && !name.contains('/') && name.ends_with(".svg"))
+}
+
 fn is_string_sequence(value: &Value) -> bool {
     value
         .as_sequence()
@@ -11949,6 +12213,13 @@ mod resource_cap_boundary_tests {
 
     fn report(files: Vec<SourceFile>) -> ValidationReport {
         validate_without_playability(&files)
+    }
+
+    #[test]
+    fn only_direct_canonical_map_paths_receive_map_allowances() {
+        assert!(is_canonical_map_svg_path("maps/house.svg"));
+        assert!(!is_canonical_map_svg_path("maps/floors/house.svg"));
+        assert!(!is_canonical_map_svg_path("assets/house.svg"));
     }
 
     fn invalid_yaml_of_len(len: usize) -> String {
