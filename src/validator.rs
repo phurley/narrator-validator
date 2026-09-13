@@ -1984,9 +1984,10 @@ impl<'a> Validator<'a> {
                 );
                 continue;
             };
-            for key in entry.keys().filter_map(Value::as_str) {
-                if !matches!(key, "setting" | "anchor") {
-                    self.push(
+            for key in entry.keys() {
+                match key.as_str() {
+                    Some("setting" | "anchor") => {}
+                    Some(key) => self.push(
                         Severity::Error,
                         "case.map_room_unknown_field",
                         format!("`{key}` is not supported in a map room entry"),
@@ -1994,7 +1995,16 @@ impl<'a> Validator<'a> {
                         Some(format!("{entry_pointer}/{}", escape_pointer(key))),
                         None,
                         Some(case.id.clone()),
-                    );
+                    ),
+                    None => self.push(
+                        Severity::Error,
+                        "case.map_room_unknown_field",
+                        "map room entries may use only string field names".to_string(),
+                        &case.path,
+                        Some(entry_pointer.clone()),
+                        None,
+                        Some(case.id.clone()),
+                    ),
                 }
             }
             let setting = string_field(entry, "setting");
@@ -2040,9 +2050,10 @@ impl<'a> Validator<'a> {
                 );
                 continue;
             };
-            for key in anchor.keys().filter_map(Value::as_str) {
-                if !matches!(key, "x" | "y") {
-                    self.push(
+            for key in anchor.keys() {
+                match key.as_str() {
+                    Some("x" | "y") => {}
+                    Some(key) => self.push(
                         Severity::Error,
                         "case.map_room_anchor_unknown_field",
                         format!("`{key}` is not supported in a map room anchor"),
@@ -2050,7 +2061,16 @@ impl<'a> Validator<'a> {
                         Some(format!("{entry_pointer}/anchor/{}", escape_pointer(key))),
                         None,
                         Some(case.id.clone()),
-                    );
+                    ),
+                    None => self.push(
+                        Severity::Error,
+                        "case.map_room_anchor_unknown_field",
+                        "map room anchors may use only string field names".to_string(),
+                        &case.path,
+                        Some(format!("{entry_pointer}/anchor")),
+                        None,
+                        Some(case.id.clone()),
+                    ),
                 }
             }
             let x = anchor

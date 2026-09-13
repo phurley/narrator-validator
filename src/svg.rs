@@ -34,6 +34,13 @@ pub fn map_view_box(source: &str) -> Option<MapViewBox> {
         .and_then(|v| parse_view_box(v).ok())
 }
 fn parse_view_box(value: &str) -> Result<MapViewBox, ()> {
+    let comma_shape = value
+        .chars()
+        .filter(|c| !c.is_ascii_whitespace())
+        .collect::<String>();
+    if comma_shape.starts_with(',') || comma_shape.ends_with(',') || comma_shape.contains(",,") {
+        return Err(());
+    }
     let v = value
         .split(|c: char| c.is_ascii_whitespace() || c == ',')
         .filter(|x| !x.is_empty())
@@ -165,7 +172,11 @@ fn check_raster(
         ));
         return;
     }
-    if *total_bytes > MAX_RASTER_BYTES.saturating_sub(data.len()) {
+    if exceeds_limit(
+        *total_bytes as u64,
+        data.len() as u64,
+        MAX_RASTER_BYTES as u64,
+    ) {
         out.push(problem(
             "case.map_svg_image_bytes",
             format!("embedded raster artwork exceeds the {MAX_RASTER_BYTES}-byte decoded limit"),
@@ -190,7 +201,7 @@ fn check_raster(
         return;
     }
     let count = u64::from(w) * u64::from(h);
-    if *total_pixels > MAX_RASTER_PIXELS.saturating_sub(count) {
+    if exceeds_limit(*total_pixels, count, MAX_RASTER_PIXELS) {
         out.push(problem(
             "case.map_svg_image_pixels",
             format!("embedded raster artwork exceeds the {MAX_RASTER_PIXELS}-pixel limit"),
@@ -217,6 +228,9 @@ fn check_raster(
     }
     *total_bytes += data.len();
     *total_pixels += count;
+}
+fn exceeds_limit(total: u64, incoming: u64, limit: u64) -> bool {
+    total.checked_add(incoming).map_or(true, |sum| sum > limit)
 }
 fn raster_header_matches(format: ImageFormat, data: &[u8]) -> bool {
     match format {
@@ -391,6 +405,10 @@ mod tests {
             codes(r#"<svg viewBox="0 0 1"><image href="https://example.test/a.png"/></svg>"#),
             vec!["case.map_svg_view_box", "case.map_svg_external_reference"]
         );
+        assert_eq!(
+            codes(r#"<svg viewBox=",0,,0,1,1,"/>"#),
+            vec!["case.map_svg_view_box"]
+        );
     }
     #[test]
     fn rejects_noncanonical_embedded_images_without_echoing_them() {
@@ -464,6 +482,34 @@ mod tests {
             )),
             ["case.map_svg_image_dimensions"]
         );
+    }
+    #[test]
+    fn aggregate_raster_bounds_reject_an_oversized_first_image() {
+        assert!(!exceeds_limit(
+            0,
+            MAX_RASTER_BYTES as u64,
+            MAX_RASTER_BYTES as u64
+        ));
+        assert!(exceeds_limit(
+            0,
+            MAX_RASTER_BYTES as u64 + 1,
+            MAX_RASTER_BYTES as u64
+        ));
+        assert!(!exceeds_limit(0, MAX_RASTER_PIXELS, MAX_RASTER_PIXELS));
+        assert!(exceeds_limit(0, MAX_RASTER_PIXELS + 1, MAX_RASTER_PIXELS));
+
+        // The byte gate runs before image parsing, so this fixture proves a
+        // first oversized image cannot reach a decoder allocation.
+        let mut image = vec![0; MAX_RASTER_BYTES + 1];
+        image[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        let mut problems = Vec::new();
+        check_raster(
+            &format!("data:image/png;base64,{}", STANDARD.encode(image)),
+            &mut 0,
+            &mut 0,
+            &mut problems,
+        );
+        assert_eq!(problems[0].code, "case.map_svg_image_bytes");
     }
     #[test]
     fn rejects_nonidentity_jpeg_exif_orientation() {

@@ -6757,6 +6757,22 @@ fn map_room_anchors_are_unique_per_variant_and_have_an_exact_shape() {
         ),
         (
             anchored.replace(
+                "anchor: { x: 6, y: 6 }",
+                "anchor: { x: 6, y: 6 }\n            0: extra",
+            ),
+            "case.map_room_unknown_field",
+            "/case/map/variants/1/rooms/0",
+        ),
+        (
+            anchored.replace(
+                "anchor: { x: 6, y: 6 }",
+                "anchor: { x: 6, y: 6, 0: extra }",
+            ),
+            "case.map_room_anchor_unknown_field",
+            "/case/map/variants/1/rooms/0/anchor",
+        ),
+        (
+            anchored.replace(
                 "          - setting: setting.study\n            anchor: { x: 6, y: 6 }",
                 "          - setting.study",
             ),
