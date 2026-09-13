@@ -444,6 +444,15 @@ mod tests {
             &mut problems,
         );
         assert_eq!(problems[0].code, "case.map_svg_image_bytes");
+        let mut problems = Vec::new();
+        let mut pixels = MAX_RASTER_PIXELS;
+        check_raster(
+            &format!("data:image/png;base64,{encoded}"),
+            &mut 0,
+            &mut pixels,
+            &mut problems,
+        );
+        assert_eq!(problems[0].code, "case.map_svg_image_pixels");
         assert_eq!(
             codes(&format!(
                 r#"<svg viewBox="0 0 1 1"><image href="data:image/png;base64,{}"/></svg>"#,
