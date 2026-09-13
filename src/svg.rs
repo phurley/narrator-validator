@@ -240,7 +240,7 @@ fn jpeg_has_nonidentity_orientation(b: &[u8]) -> bool {
         if i >= b.len() || matches!(b[i], 0xda | 0xd9) {
             break;
         }
-        let n = u16::from_be_bytes([b[i], b[i + 1]]) as usize;
+        let n = u16::from_be_bytes([b[i + 1], b[i + 2]]) as usize;
         if n < 2 || i + 1 + n > b.len() {
             break;
         }
@@ -298,6 +298,56 @@ mod tests {
             .write_to(&mut bytes, ImageFormat::Png)
             .expect("test image encodes");
         bytes.into_inner()
+    }
+    fn jpeg_with_orientation(orientation: u8) -> Vec<u8> {
+        let image = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(1, 1, Rgba([0, 0, 0, 255])));
+        let mut encoded = Cursor::new(Vec::new());
+        image
+            .write_to(&mut encoded, ImageFormat::Jpeg)
+            .expect("test image encodes");
+        // A minimal little-endian EXIF IFD0 containing tag 0x0112 (orientation).
+        let mut app1 = vec![
+            0xff,
+            0xe1,
+            0x00,
+            0x22,
+            b'E',
+            b'x',
+            b'i',
+            b'f',
+            0,
+            0,
+            b'I',
+            b'I',
+            42,
+            0,
+            8,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0x12,
+            0x01,
+            3,
+            0,
+            1,
+            0,
+            0,
+            0,
+            orientation,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+        ];
+        app1.extend(encoded.into_inner().split_off(2));
+        let mut jpeg = vec![0xff, 0xd8];
+        jpeg.append(&mut app1);
+        jpeg
     }
     const SAFE: &str = r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 60"><rect id="parlor"/><use href="#parlor"/></svg>"##;
     #[test]
@@ -400,6 +450,16 @@ mod tests {
                 STANDARD.encode(encoded_png(MAX_RASTER_DIMENSION + 1, 1))
             )),
             ["case.map_svg_image_dimensions"]
+        );
+    }
+    #[test]
+    fn rejects_nonidentity_jpeg_exif_orientation() {
+        assert_eq!(
+            codes(&format!(
+                r#"<svg viewBox="0 0 1 1"><image href="data:image/jpeg;base64,{}"/></svg>"#,
+                STANDARD.encode(jpeg_with_orientation(6))
+            )),
+            ["case.map_svg_image_orientation"]
         );
     }
 }
