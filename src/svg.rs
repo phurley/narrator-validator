@@ -286,7 +286,7 @@ fn exif_orientation(t: &[u8]) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{DynamicImage, ImageBuffer, Rgba};
+    use image::{DynamicImage, ImageBuffer, Rgb, Rgba};
     fn codes(source: &str) -> Vec<&'static str> {
         check_map_svg(source).into_iter().map(|p| p.code).collect()
     }
@@ -300,7 +300,7 @@ mod tests {
         bytes.into_inner()
     }
     fn jpeg_with_orientation(orientation: u8) -> Vec<u8> {
-        let image = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(1, 1, Rgba([0, 0, 0, 255])));
+        let image = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(1, 1, Rgb([0, 0, 0])));
         let mut encoded = Cursor::new(Vec::new());
         image
             .write_to(&mut encoded, ImageFormat::Jpeg)
@@ -406,8 +406,12 @@ mod tests {
             ("image/png", ImageFormat::Png),
             ("image/jpeg", ImageFormat::Jpeg),
         ] {
-            let image =
-                DynamicImage::ImageRgba8(ImageBuffer::from_pixel(1, 1, Rgba([0, 0, 0, 255])));
+            let image = match format {
+                ImageFormat::Jpeg => {
+                    DynamicImage::ImageRgb8(ImageBuffer::from_pixel(1, 1, Rgb([0, 0, 0])))
+                }
+                _ => DynamicImage::ImageRgba8(ImageBuffer::from_pixel(1, 1, Rgba([0, 0, 0, 255]))),
+            };
             let mut bytes = Cursor::new(Vec::new());
             image
                 .write_to(&mut bytes, format)
