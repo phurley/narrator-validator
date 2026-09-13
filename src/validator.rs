@@ -13,8 +13,9 @@ use crate::{
     MIN_SOLUTION_QUESTIONS, REFERENCE_TEXT_FEATURE, STANDARD_MYSTERY_RULESET_ID,
     STANDARD_MYSTERY_RULESET_VERSION_2, STANDARD_MYSTERY_RULESET_VERSION_3,
     STANDARD_MYSTERY_RULESET_VERSION_4, STANDARD_MYSTERY_RULESET_VERSION_5,
-    STANDARD_MYSTERY_RULESET_VERSION_6, STANDARD_MYSTERY_RULESET_VERSION_7, STORY_FORMAT_VERSION,
-    SUPPORTED_FEATURES, VALIDATOR_VERSION,
+    STANDARD_MYSTERY_RULESET_VERSION_6, STANDARD_MYSTERY_RULESET_VERSION_7,
+    STANDARD_MYSTERY_RULESET_VERSION_8, STORY_FORMAT_VERSION, SUPPORTED_FEATURES,
+    VALIDATOR_VERSION,
 };
 
 const MAX_REPOSITORY_FILES: usize = 512;
@@ -105,7 +106,7 @@ enum Kind {
     /// standard `id.invalid`/`id.wrong_prefix`/`id.duplicate` machinery.
     SolutionStep,
     /// An `answer.<deck>.<card>` subject supplied by the resolved ruleset's
-    /// answer-deck catalog (Format 3.7, `ruleset.standard_mystery@7.0.0`),
+    /// answer-deck catalog (Format 3.7, `ruleset.standard_mystery@7.0.0` and later),
     /// merged into a story's definitions the same way `Kind::Command` is.
     /// Never authored by the story itself.
     Answer,
@@ -330,7 +331,7 @@ struct Validator<'a> {
     reference_text: Vec<ResolvedReferenceText>,
     /// `answer.*` ID -> its ruleset-assigned `tag_id`, populated by
     /// `merge_ruleset_answers`. Empty unless the resolved ruleset publishes
-    /// an answer-deck catalog (`ruleset.standard_mystery@7.0.0`).
+    /// an answer-deck catalog (`ruleset.standard_mystery@7.0.0` and later).
     answer_tag_ids: BTreeMap<String, i64>,
 }
 
@@ -532,7 +533,10 @@ impl<'a> Validator<'a> {
     fn uses_step_solution_ruleset(&self) -> bool {
         self.ruleset.as_ref().is_some_and(|ruleset| {
             ruleset.id == STANDARD_MYSTERY_RULESET_ID
-                && ruleset.version == STANDARD_MYSTERY_RULESET_VERSION_7
+                && matches!(
+                    ruleset.version.as_str(),
+                    STANDARD_MYSTERY_RULESET_VERSION_7 | STANDARD_MYSTERY_RULESET_VERSION_8
+                )
         })
     }
 
@@ -682,6 +686,10 @@ impl<'a> Validator<'a> {
         }
         self.validate_command_values(&commands);
         self.validate_command_costs(&command_costs, &commands);
+        self.validate_command_overrides(
+            &[&settings, &characters, &entities, &events, &deductions],
+            &commands,
+        );
         self.validate_point_awards(&[
             settings.as_slice(),
             entities.as_slice(),
@@ -2179,13 +2187,16 @@ impl<'a> Validator<'a> {
             return;
         }
         if reference.id == STANDARD_MYSTERY_RULESET_ID
-            && reference.version == STANDARD_MYSTERY_RULESET_VERSION_7
+            && matches!(
+                reference.version.as_str(),
+                STANDARD_MYSTERY_RULESET_VERSION_7 | STANDARD_MYSTERY_RULESET_VERSION_8
+            )
             && !self.is_format_3_7_or_later()
         {
             self.push(
                 Severity::Error,
                 "ruleset.format_incompatible",
-                "ruleset.standard_mystery@7.0.0 declares the Format 3.7 multi-step `solution.steps` Solve contract and the answer-deck catalog; set `case.format_version` to \"3.7.0\" or select an earlier ruleset version"
+                "ruleset.standard_mystery@7.0.0 and @8.0.0 declare the Format 3.7 multi-step `solution.steps` Solve contract and the answer-deck catalog; set `case.format_version` to \"3.7.0\" or select an earlier ruleset version"
                     .to_string(),
                 &case.path,
                 Some(format!("{pointer}/version")),
@@ -2745,6 +2756,7 @@ impl<'a> Validator<'a> {
         self.validate_item_fields(
             settings,
             &[
+                "command_overrides",
                 "id",
                 "tag_id",
                 "type",
@@ -2772,6 +2784,7 @@ impl<'a> Validator<'a> {
         );
         let character_fields: &[&str] = if self.is_format_3_1_or_later() {
             &[
+                "command_overrides",
                 "id",
                 "tag_id",
                 "name",
@@ -2811,6 +2824,7 @@ impl<'a> Validator<'a> {
         self.validate_item_fields(
             entities,
             &[
+                "command_overrides",
                 "id",
                 "tag_id",
                 "type",
@@ -2827,6 +2841,7 @@ impl<'a> Validator<'a> {
         self.validate_item_fields(
             events,
             &[
+                "command_overrides",
                 "id",
                 "day",
                 "time",
@@ -2857,6 +2872,7 @@ impl<'a> Validator<'a> {
         self.validate_item_fields(
             deductions,
             &[
+                "command_overrides",
                 "id",
                 "conclusion",
                 "inputs",
@@ -3251,7 +3267,7 @@ impl<'a> Validator<'a> {
             self.push(
                 Severity::Error,
                 "solution.missing_step_contract",
-                "ruleset.standard_mystery@7.0.0 requires a `solution` block with `steps`"
+                "ruleset.standard_mystery@7.0.0 and @8.0.0 require a `solution` block with `steps`"
                     .to_string(),
                 "case.yaml",
                 Some("/solution".to_string()),
@@ -3370,7 +3386,7 @@ impl<'a> Validator<'a> {
             self.push(
                 Severity::Error,
                 "solution.ruleset_incompatible",
-                "authored solve steps require `case.ruleset` ruleset.standard_mystery@7.0.0"
+                "authored solve steps require `case.ruleset` ruleset.standard_mystery@7.0.0 or @8.0.0"
                     .to_string(),
                 path,
                 Some("/solution".to_string()),
@@ -6828,6 +6844,90 @@ impl<'a> Validator<'a> {
                 self.validate_runtime_command_signature(command, &parameter_types);
             }
             self.validate_world_effects(command, &parameter_types);
+        }
+    }
+
+    /// ADR-013: overrides constrain the first declared parameter only.
+    fn validate_command_overrides(&mut self, owners: &[&Vec<Item>], commands: &[Item]) {
+        for owner in owners.iter().flat_map(|items| items.iter()) {
+            let Some(value) = owner.mapping.get(Value::String("command_overrides".into())) else {
+                continue;
+            };
+            let pointer = format!("{}/command_overrides", owner.pointer);
+            if !self
+                .format_version
+                .as_ref()
+                .is_some_and(|version| version.major == 3 && version.minor >= 9)
+            {
+                self.push(
+                    Severity::Error,
+                    "command_overrides.format_incompatible",
+                    "`command_overrides` require story format 3.9.0 or later".into(),
+                    &owner.path,
+                    Some(pointer),
+                    None,
+                    Some(owner.id.clone()),
+                );
+                continue;
+            }
+            let Some(overrides) = value.as_mapping() else {
+                self.push(
+                    Severity::Error,
+                    "command_overrides.invalid",
+                    "`command_overrides` must be a mapping of command IDs to booleans".into(),
+                    &owner.path,
+                    Some(pointer),
+                    None,
+                    Some(owner.id.clone()),
+                );
+                continue;
+            };
+            for (key, value) in overrides {
+                let id = key.as_str().unwrap_or("");
+                let pointer = format!("{}/{}", pointer, escape_pointer(id));
+                if value.as_bool().is_none() {
+                    self.push(
+                        Severity::Error,
+                        "command_overrides.value_invalid",
+                        "command override values must be booleans".into(),
+                        &owner.path,
+                        Some(pointer.clone()),
+                        None,
+                        Some(owner.id.clone()),
+                    );
+                }
+                let Some(command) = commands.iter().find(|command| command.id == id) else {
+                    self.push(
+                        Severity::Error,
+                        "command_overrides.command_unknown",
+                        format!("unknown command `{id}`"),
+                        &owner.path,
+                        Some(pointer),
+                        None,
+                        Some(owner.id.clone()),
+                    );
+                    continue;
+                };
+                let types = command_parameter_types(command);
+                if !types
+                    .first()
+                    .and_then(Option::as_ref)
+                    .is_some_and(|shape| shape.types.iter().any(|t| t.kind() == owner.kind))
+                {
+                    self.push(
+                        Severity::Error,
+                        "command_overrides.target_kind_mismatch",
+                        format!(
+                            "`{id}` does not accept {} as its primary subject",
+                            owner.kind.name()
+                        ),
+                        &owner.path,
+                        Some(pointer),
+                        None,
+                        Some(owner.id.clone()),
+                    );
+                }
+            }
         }
     }
 

@@ -1,11 +1,30 @@
+# Format 3.9 subject command overrides
+
+Set `case.format_version: "3.9.0"` to author optional per-subject
+`command_overrides`. See [the contract](docs/story-format-3.9.md).
+Existing no-override stories retain their defaults. Ruleset 8 independently
+adds carried Open/Search targets and remains compatible with Format 3.7+.
+
 # Migrating story format 2 to format 3
+
+## Moving to ruleset 8.0.0
+
+After the coordinated validator/consumer release, set `case.ruleset.version`
+to `"8.0.0"`. Keep the story format unchanged (3.7 or later). Open and Search
+now accept inventory targets as well as current-location targets. Their types,
+visibility rules, requirements, costs and effects are unchanged. Search does
+not require hidden contents, facts or a trigger and may find nothing. Existing
+Open/Search triggers continue to own their authored discovery effects.
+
+Rulesets 1–7 remain immutable. Ruleset 8 retains 7's multi-step Solve contract,
+answer deck and command capabilities.
 
 ## Moving from Format 3.7 to 3.8 maps
 
 `case.map` is optional and purely additive. A Format 3.7 story becomes a
 Format 3.8 story by setting `case.format_version: "3.8.0"` and changing
 nothing else — there is no new required field, no ruleset change
-(`ruleset.standard_mystery@7.0.0` is still the current ruleset), and no
+(ruleset 7.0.0 or later can be retained), and no
 removed or renamed field. Every other 3.7 rule carries over unchanged.
 
 To add a map, commit `maps/<name>.svg` and reference it from `case.map`.

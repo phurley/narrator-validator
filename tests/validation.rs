@@ -1992,7 +1992,7 @@ fn rejects_unknown_and_incompatible_rulesets_with_version_guidance() {
         .expect("incompatible ruleset diagnostic");
     assert!(diagnostic
         .message
-        .contains("1.0.0, 2.0.0, 3.0.0, 4.0.0, 5.0.0, 6.0.0, or 7.0.0"));
+        .contains("1.0.0, 2.0.0, 3.0.0, 4.0.0, 5.0.0, 6.0.0, 7.0.0, or 8.0.0"));
 }
 
 #[test]
@@ -6285,6 +6285,26 @@ fn cycle_ranges_follow_the_participating_expression_not_the_first_reference() {
 }
 
 #[test]
+fn ruleset_8_preserves_step_solution_validation_and_format_gate() {
+    // Existing in-repo Format 3.7 fixture includes authored steps and answer cards.
+    let source = format_3_7_step_story().replace("version: \"7.0.0\"", "version: \"8.0.0\"");
+    assert_ne!(source, format_3_7_step_story());
+    let valid = report(source.clone());
+    assert!(valid.valid, "{:?}", valid.diagnostics);
+    let old_format =
+        report(source.replace("format_version: \"3.7.0\"", "format_version: \"3.6.0\""));
+    assert!(old_format
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "ruleset.format_incompatible"));
+    let missing_steps = report(source.replace("solution:", "unused_solution:"));
+    assert!(missing_steps
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "solution.missing_step_contract"));
+}
+
+#[test]
 fn format_3_7_step_story_validates_clean() {
     let report = report(format_3_7_step_story());
     assert!(report.valid, "{:#?}", report.diagnostics);
@@ -6866,4 +6886,111 @@ fn a_map_svg_never_reaches_the_yaml_schema_rules() {
         report.diagnostics
     );
     assert!(report.valid, "{:#?}", report.diagnostics);
+}
+
+// Existing current Solve fixture grounds the new subject field in a real story.
+fn command_override_story(value: &str) -> String {
+    format_3_7_step_story()
+        .replace("format_version: \"3.7.0\"", "format_version: \"3.9.0\"")
+        .replace(
+            "  - id: entity.knife\n",
+            &format!("  - id: entity.knife\n    command_overrides: {value}\n"),
+        )
+}
+
+#[test]
+fn command_overrides_validate_boolean_defaults_and_primary_subject_types() {
+    for value in ["{}", "{command.open: false, command.search: true}"] {
+        let result = report(command_override_story(value));
+        assert!(result.valid, "{:#?}", result.diagnostics);
+    }
+    for (value, code) in [
+        ("[]", "command_overrides.invalid"),
+        ("{command.open: no}", "command_overrides.value_invalid"),
+        (
+            "{command.missing: false}",
+            "command_overrides.command_unknown",
+        ),
+        (
+            "{command.question: false}",
+            "command_overrides.target_kind_mismatch",
+        ),
+        (
+            "{command.solve: false}",
+            "command_overrides.target_kind_mismatch",
+        ),
+    ] {
+        let result = report(command_override_story(value));
+        assert!(!result.valid);
+        assert!(
+            result.diagnostics.iter().any(|d| d.code == code),
+            "{:#?}",
+            result.diagnostics
+        );
+    }
+    let old = report(command_override_story("{}").replace("3.9.0", "3.8.0"));
+    assert!(old
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "command_overrides.format_incompatible"));
+    let duplicate = report(command_override_story(
+        "{command.open: false, command.open: true}",
+    ));
+    assert!(
+        !duplicate.valid,
+        "duplicate YAML keys must be rejected before compilation"
+    );
+}
+
+#[test]
+fn command_overrides_custom_commands_use_first_parameter_for_all_subject_kinds() {
+    for (section, id, kind) in [
+        ("settings", "setting.foyer", "setting"),
+        ("characters", "character.victim", "character"),
+        ("entities", "entity.knife", "entity"),
+        ("events", "event.murder", "event"),
+        ("deductions", "deduction.example", "deduction"),
+    ] {
+        let mut story: Value = serde_yaml::from_str(&command_override_story("{}")).unwrap();
+        let subject = serde_yaml::from_str::<Value>(&format!(
+            "id: {id}\ncommand_overrides: {{command.custom: false}}\n"
+        ))
+        .unwrap();
+        let subjects = story[section].as_sequence_mut().unwrap();
+        if let Some(existing) = subjects.iter_mut().find(|s| s["id"].as_str() == Some(id)) {
+            existing["command_overrides"] = subject["command_overrides"].clone();
+        } else {
+            subjects.push(subject);
+        }
+        story["commands"] = serde_yaml::from_str(&format!("- id: command.custom\n  name: Custom\n  parameters:\n    - name: subject\n      types: [{kind}]\n      min: 1\n      max: 1\n    - name: topic\n      types: [character]\n      min: 1\n      max: 1\n")).unwrap();
+        let allowed = report(serde_yaml::to_string(&story).unwrap());
+        assert!(allowed.valid, "{:#?}", allowed.diagnostics);
+        assert!(
+            !allowed
+                .diagnostics
+                .iter()
+                .any(|d| d.code.starts_with("command_overrides.")
+                    || d.code == format!("{kind}.unknown_field")),
+            "{:#?}",
+            allowed.diagnostics
+        );
+        story["commands"][0]["parameters"][0]["types"][0] = Value::String(
+            if kind == "entity" {
+                "setting"
+            } else {
+                "entity"
+            }
+            .into(),
+        );
+        let denied = report(serde_yaml::to_string(&story).unwrap());
+        assert!(
+            denied
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "command_overrides.target_kind_mismatch"
+                    && d.subject_id.as_deref() == Some(id)),
+            "{:#?}",
+            denied.diagnostics
+        );
+    }
 }

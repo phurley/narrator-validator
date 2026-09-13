@@ -321,6 +321,11 @@ material with no runtime projection.
 
 ## Versioned mystery ruleset
 
+The latest catalog is `ruleset.standard_mystery@8.0.0` (Format 3.7 or later).
+It adds inventory to Open and Search target candidates, retaining current-room
+candidates and every other command rule from 7.0.0. Search remains broad and
+may find nothing; authored triggers still control their discovery effects.
+
 `case.ruleset` selects an exact immutable command catalog.
 `ruleset.standard_mystery@1.0.0`, `@2.0.0`, `@3.0.0`, `@4.0.0`, and `@5.0.0`
 supply Move, Open, Search, Examine, Take, Drop, Use, Question, Deduce, and Solve
@@ -914,3 +919,5 @@ settings:
 - Delayed forensic triggers move their delay to trigger `after` and nest the
   result fact under that trigger; the one-use completion flag and fact
   requirement are removed.
+
+See [Story Format 3.9](docs/story-format-3.9.md) for optional subject command overrides.
