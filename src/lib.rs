@@ -51,10 +51,14 @@ pub use solution::{
     SolutionContractMetadata, MAX_SOLUTION_ANSWER_CARDS, MAX_SOLUTION_QUESTIONS,
     MIN_SOLUTION_ANSWER_CARDS, MIN_SOLUTION_QUESTIONS, SOLUTION_STORY_FORMAT_VERSION,
 };
-pub use svg::{check_map_svg, map_view_box, MapSvgProblem, MapViewBox};
+pub use svg::{
+    check_map_svg, map_view_box, MapSvgProblem, MapViewBox, MAX_RASTER_BYTES, MAX_RASTER_DIMENSION,
+    MAX_RASTER_PIXELS,
+};
 pub use validator::{
     validate, validate_with_supported_features, validate_without_playability,
-    validate_without_playability_with_features,
+    validate_without_playability_with_features, MAX_MAP_SVG_BYTES, MAX_MAP_SVG_TOTAL_BYTES,
+    MAX_NON_MAP_FILE_BYTES, MAX_NON_MAP_TOTAL_BYTES,
 };
 
 pub const VALIDATOR_VERSION: &str = env!("CARGO_PKG_VERSION");
