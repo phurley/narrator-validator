@@ -8492,6 +8492,7 @@ impl<'a> Validator<'a> {
             }
         }
         let Some(raw_bindings) = on.get(Value::String("parameters".to_string())) else {
+            self.validate_standard_use_trigger_bindings(item, command_id, None, &pointer);
             return;
         };
         let bindings_pointer = format!("{pointer}/parameters");
@@ -8507,6 +8508,7 @@ impl<'a> Validator<'a> {
             );
             return;
         };
+        self.validate_standard_use_trigger_bindings(item, command_id, Some(bindings), &pointer);
         let parameter_shapes = command_id
             .and_then(|id| commands.iter().find(|command| command.id == id))
             .map(|command| {
@@ -8674,6 +8676,64 @@ impl<'a> Validator<'a> {
                 None,
                 Some(item.id.clone()),
             );
+        }
+    }
+
+    fn validate_standard_use_trigger_bindings(
+        &mut self,
+        item: &Item,
+        command_id: Option<&str>,
+        bindings: Option<&Mapping>,
+        action_pointer: &str,
+    ) {
+        if item.kind != Kind::Trigger || command_id != Some("command.use") {
+            return;
+        }
+
+        let bindings_pointer = format!("{action_pointer}/parameters");
+        let Some(bindings) = bindings else {
+            self.push(
+                Severity::Error,
+                "trigger.use_item_missing",
+                "a `command.use` trigger must bind exactly one `item`".to_string(),
+                &item.path,
+                Some(format!("{bindings_pointer}/item")),
+                None,
+                Some(item.id.clone()),
+            );
+            return;
+        };
+
+        for name in ["item", "target"] {
+            let matched = bindings
+                .iter()
+                .filter(|(raw_name, _)| raw_name.as_str() == Some(name))
+                .collect::<Vec<_>>();
+            if name == "item" && matched.is_empty() {
+                self.push(
+                    Severity::Error,
+                    "trigger.use_item_missing",
+                    "a `command.use` trigger must bind exactly one `item`".to_string(),
+                    &item.path,
+                    Some(format!("{bindings_pointer}/item")),
+                    None,
+                    Some(item.id.clone()),
+                );
+                continue;
+            }
+            for (_, value) in matched {
+                if !value.as_str().is_some_and(|value| !value.trim().is_empty()) {
+                    self.push(
+                        Severity::Error,
+                        "trigger.use_parameter_singular",
+                        format!("`command.use` binding `{name}` must be one authored ID"),
+                        &item.path,
+                        Some(format!("{bindings_pointer}/{name}")),
+                        None,
+                        Some(item.id.clone()),
+                    );
+                }
+            }
         }
     }
 

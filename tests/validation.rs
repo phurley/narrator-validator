@@ -6313,6 +6313,56 @@ fn format_3_7_step_story_validates_clean() {
 }
 
 #[test]
+fn standard_use_trigger_requires_an_authored_singular_item_and_optional_target() {
+    let trigger = |parameters: &str| {
+        format!(
+            "triggers:\n  - id: trigger.use_knife\n    on:\n      command: command.use\n{parameters}    effects:\n      - operation: set_flag\n        flag: flag.culprit_named\n        value: true\n"
+        )
+    };
+    let story = |parameters: &str| {
+        format_3_7_step_story().replace("cards:\n", &format!("{}cards:\n", trigger(parameters)))
+    };
+
+    for parameters in [
+        "      parameters:\n        item: entity.knife\n",
+        "      parameters:\n        item: entity.knife\n        target: setting.study\n",
+    ] {
+        let result = report(story(parameters));
+        assert!(result.valid, "{:#?}", result.diagnostics);
+    }
+
+    for (parameters, expected) in [
+        ("", "trigger.use_item_missing"),
+        (
+            "      parameters:\n        target: setting.study\n",
+            "trigger.use_item_missing",
+        ),
+        (
+            "      parameters:\n        item: [entity.knife]\n",
+            "trigger.use_parameter_singular",
+        ),
+        (
+            "      parameters:\n        item: entity.knife\n        target: [setting.study]\n",
+            "trigger.use_parameter_singular",
+        ),
+        (
+            "      parameters:\n        item: entity.knife\n        extra: setting.study\n",
+            "action_match.parameter_unknown",
+        ),
+    ] {
+        let result = report(story(parameters));
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == expected),
+            "{expected}: {:#?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
 fn format_3_7_step_schema_rejects_every_malformed_shape_at_exact_pointers() {
     let cases: Vec<(String, &str, &str)> = vec![
         (
