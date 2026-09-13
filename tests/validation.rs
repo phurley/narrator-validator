@@ -6948,10 +6948,8 @@ fn unsafe_map_svg_is_rejected_against_the_svg_path() {
 }
 
 #[test]
-fn an_oversized_map_svg_hits_the_repository_wide_file_cap() {
-    // Format 3.8 requires a 256 KiB cap on maps. That is the cap the
-    // repository already enforces on every file, so a map gets it for free
-    // rather than through a second map-specific check.
+fn an_oversized_map_svg_hits_the_adr_015_map_file_cap() {
+    // ADR-015 gives only canonical map SVGs a 4 MiB source allowance.
     let report = validate(&map_story_files(
         format_3_8_map_story(),
         &[
@@ -6960,7 +6958,7 @@ fn an_oversized_map_svg_hits_the_repository_wide_file_cap() {
                 BRIAR_HOUSE_MAP
                     .replace(
                         "<title>",
-                        &format!("<title>{}</title><title>", "x".repeat(256 * 1024)),
+                        &format!("<title>{}</title><title>", "x".repeat(4 * 1024 * 1024)),
                     )
                     .as_str(),
             ),
