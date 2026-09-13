@@ -417,3 +417,34 @@ assert.ok(
 )
 
 console.log('browser package smoke test passed')
+
+// Same real Solve fixture and diagnostic cases as Rust validation tests.
+const overrideSource = (await readFile(new URL('../tests/fixtures/format-3.7-step-story.yaml', import.meta.url), 'utf8'))
+  .replace('format_version: "3.7.0"', 'format_version: "3.9.0"')
+const overrideFiles = (value) => {
+  const source = overrideSource.replace('  - id: entity.knife\n', `  - id: entity.knife\n    command_overrides: ${value}\n`)
+  const paths = { case: 'case', solution: 'case', settings: 'settings', routes: 'settings', cards: 'deck' }
+  const documents = new Map()
+  for (const section of source.trimStart().split(/(?=^[a-z_]+:)/m)) {
+    const key = section.match(/^([a-z_]+):/)[1]
+    const path = `${paths[key] ?? key}.yaml`
+    documents.set(path, (documents.get(path) ?? '') + section)
+  }
+  return [...documents].map(([path, source]) => ({path, source}))
+}
+for (const value of ['{}', '{command.open: false, command.search: true}']) {
+  const result = await validateRepository(overrideFiles(value))
+  assert.equal(result.valid, true, JSON.stringify(result.diagnostics))
+}
+for (const [value, code] of [
+  ['[]', 'command_overrides.invalid'],
+  ['{command.open: no}', 'command_overrides.value_invalid'],
+  ['{command.missing: false}', 'command_overrides.command_unknown'],
+  ['{command.question: false}', 'command_overrides.target_kind_mismatch'],
+  ['{command.solve: false}', 'command_overrides.target_kind_mismatch'],
+]) {
+  const result = await validateRepository(overrideFiles(value))
+  assert.equal(result.valid, false)
+  assert.ok(result.diagnostics.some(d => d.code === code), JSON.stringify(result.diagnostics))
+}
+assert.equal((await validateRepository(overrideFiles('{command.open: false, command.open: true}'))).valid, false)

@@ -686,6 +686,10 @@ impl<'a> Validator<'a> {
         }
         self.validate_command_values(&commands);
         self.validate_command_costs(&command_costs, &commands);
+        self.validate_command_overrides(
+            &[&settings, &characters, &entities, &events, &deductions],
+            &commands,
+        );
         self.validate_point_awards(&[
             settings.as_slice(),
             entities.as_slice(),
@@ -2752,6 +2756,7 @@ impl<'a> Validator<'a> {
         self.validate_item_fields(
             settings,
             &[
+                "command_overrides",
                 "id",
                 "tag_id",
                 "type",
@@ -2779,6 +2784,7 @@ impl<'a> Validator<'a> {
         );
         let character_fields: &[&str] = if self.is_format_3_1_or_later() {
             &[
+                "command_overrides",
                 "id",
                 "tag_id",
                 "name",
@@ -2818,6 +2824,7 @@ impl<'a> Validator<'a> {
         self.validate_item_fields(
             entities,
             &[
+                "command_overrides",
                 "id",
                 "tag_id",
                 "type",
@@ -2834,6 +2841,7 @@ impl<'a> Validator<'a> {
         self.validate_item_fields(
             events,
             &[
+                "command_overrides",
                 "id",
                 "day",
                 "time",
@@ -2864,6 +2872,7 @@ impl<'a> Validator<'a> {
         self.validate_item_fields(
             deductions,
             &[
+                "command_overrides",
                 "id",
                 "conclusion",
                 "inputs",
@@ -6835,6 +6844,90 @@ impl<'a> Validator<'a> {
                 self.validate_runtime_command_signature(command, &parameter_types);
             }
             self.validate_world_effects(command, &parameter_types);
+        }
+    }
+
+    /// ADR-013: overrides constrain the first declared parameter only.
+    fn validate_command_overrides(&mut self, owners: &[&Vec<Item>], commands: &[Item]) {
+        for owner in owners.iter().flat_map(|items| items.iter()) {
+            let Some(value) = owner.mapping.get(Value::String("command_overrides".into())) else {
+                continue;
+            };
+            let pointer = format!("{}/command_overrides", owner.pointer);
+            if !self
+                .format_version
+                .as_ref()
+                .is_some_and(|version| version.major == 3 && version.minor >= 9)
+            {
+                self.push(
+                    Severity::Error,
+                    "command_overrides.format_incompatible",
+                    "`command_overrides` require story format 3.9.0 or later".into(),
+                    &owner.path,
+                    Some(pointer),
+                    None,
+                    Some(owner.id.clone()),
+                );
+                continue;
+            }
+            let Some(overrides) = value.as_mapping() else {
+                self.push(
+                    Severity::Error,
+                    "command_overrides.invalid",
+                    "`command_overrides` must be a mapping of command IDs to booleans".into(),
+                    &owner.path,
+                    Some(pointer),
+                    None,
+                    Some(owner.id.clone()),
+                );
+                continue;
+            };
+            for (key, value) in overrides {
+                let id = key.as_str().unwrap_or("");
+                let pointer = format!("{}/{}", pointer, escape_pointer(id));
+                if value.as_bool().is_none() {
+                    self.push(
+                        Severity::Error,
+                        "command_overrides.value_invalid",
+                        "command override values must be booleans".into(),
+                        &owner.path,
+                        Some(pointer.clone()),
+                        None,
+                        Some(owner.id.clone()),
+                    );
+                }
+                let Some(command) = commands.iter().find(|command| command.id == id) else {
+                    self.push(
+                        Severity::Error,
+                        "command_overrides.command_unknown",
+                        format!("unknown command `{id}`"),
+                        &owner.path,
+                        Some(pointer),
+                        None,
+                        Some(owner.id.clone()),
+                    );
+                    continue;
+                };
+                let types = command_parameter_types(command);
+                if !types
+                    .first()
+                    .and_then(Option::as_ref)
+                    .is_some_and(|shape| shape.types.iter().any(|t| t.kind() == owner.kind))
+                {
+                    self.push(
+                        Severity::Error,
+                        "command_overrides.target_kind_mismatch",
+                        format!(
+                            "`{id}` does not accept {} as its primary subject",
+                            owner.kind.name()
+                        ),
+                        &owner.path,
+                        Some(pointer),
+                        None,
+                        Some(owner.id.clone()),
+                    );
+                }
+            }
         }
     }
 

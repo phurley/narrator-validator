@@ -1,3 +1,10 @@
+# Format 3.9 subject command overrides
+
+Set `case.format_version: "3.9.0"` to author optional per-subject
+`command_overrides`. See [the contract](docs/story-format-3.9.md).
+Existing no-override stories retain their defaults. Ruleset 8 independently
+adds carried Open/Search targets and remains compatible with Format 3.7+.
+
 # Migrating story format 2 to format 3
 
 ## Moving to ruleset 8.0.0

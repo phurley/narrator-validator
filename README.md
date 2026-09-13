@@ -919,3 +919,5 @@ settings:
 - Delayed forensic triggers move their delay to trigger `after` and nest the
   result fact under that trigger; the one-use completion flag and fact
   requirement are removed.
+
+See [Story Format 3.9](docs/story-format-3.9.md) for optional subject command overrides.
