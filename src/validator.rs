@@ -2862,7 +2862,7 @@ impl<'a> Validator<'a> {
             };
             self.validate_mapping_fields(
                 persona,
-                &["id", "name", "description", "narrator_guidance"],
+                &["id", "name", "description", "narrator_guidance", "location"],
                 "case.players.persona",
                 &case.path,
                 &case.source,
@@ -2951,7 +2951,7 @@ impl<'a> Validator<'a> {
                     Some(id.clone()),
                 );
             }
-            for field in ["description", "narrator_guidance"] {
+            for field in ["description", "narrator_guidance", "location"] {
                 if persona
                     .get(Value::String(field.to_string()))
                     .is_some_and(|value| value.as_str().is_none())

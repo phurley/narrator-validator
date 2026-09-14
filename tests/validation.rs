@@ -1524,6 +1524,58 @@ fn trigger_when_can_reference_a_declared_persona() {
 }
 
 #[test]
+fn persona_location_overrides_the_default_entry_setting() {
+    let source = format_3_6_players_story().replace(
+        "      - id: persona.detective\n        name: The Detective\n",
+        "      - id: persona.detective\n        name: The Detective\n        location: setting.study\n",
+    );
+    let report = report(source);
+    assert!(report.valid, "{:#?}", report.diagnostics);
+}
+
+#[test]
+fn persona_location_rejects_an_unknown_setting() {
+    let source = format_3_6_players_story().replace(
+        "      - id: persona.detective\n        name: The Detective\n",
+        "      - id: persona.detective\n        name: The Detective\n        location: setting.missing\n",
+    );
+    let report = report(source);
+    let diagnostic = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.code == "reference.unknown"
+                && diagnostic.subject_id.as_deref() == Some("setting.missing")
+        })
+        .expect("unknown persona location diagnostic");
+    assert_eq!(
+        diagnostic.pointer.as_deref(),
+        Some("/case/players/personas/0/location")
+    );
+}
+
+#[test]
+fn persona_location_rejects_a_non_setting_reference() {
+    let source = format_3_6_players_story().replace(
+        "      - id: persona.detective\n        name: The Detective\n",
+        "      - id: persona.detective\n        name: The Detective\n        location: character.victim\n",
+    );
+    let report = report(source);
+    let diagnostic = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.code == "reference.wrong_type"
+                && diagnostic.subject_id.as_deref() == Some("character.victim")
+        })
+        .expect("wrong-type persona location diagnostic");
+    assert_eq!(
+        diagnostic.pointer.as_deref(),
+        Some("/case/players/personas/0/location")
+    );
+}
+
+#[test]
 fn trigger_when_rejects_undeclared_persona() {
     let source = format_3_6_players_story().replace(
         "player: persona.detective\n    effects:",
