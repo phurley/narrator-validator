@@ -1189,7 +1189,12 @@ impl Model {
         }
     }
 
-    fn read_clock_trigger(&mut self, _file: &SourceFile, _pointer: &str, on: &Mapping) -> Option<ClockTrigger> {
+    fn read_clock_trigger(
+        &mut self,
+        _file: &SourceFile,
+        _pointer: &str,
+        on: &Mapping,
+    ) -> Option<ClockTrigger> {
         let clock_map = field(on, "clock")?.as_mapping()?;
         let day = u64_field(clock_map, "day").unwrap_or(0) as u32;
         let time_str = string(clock_map, "time")?;
@@ -1197,9 +1202,7 @@ impl Model {
         let day_minutes = day.saturating_mul(24 * 60);
         let absolute_minutes = day_minutes.saturating_add(time_minutes);
         let due_elapsed = absolute_minutes.saturating_sub(self.initial_minutes);
-        Some(ClockTrigger {
-            due_elapsed,
-        })
+        Some(ClockTrigger { due_elapsed })
     }
 
     fn read_ends(&mut self, file: &SourceFile, section: &str, values: &[Value], legacy: bool) {
@@ -2122,12 +2125,12 @@ impl Model {
                 | Predicate::TimeBefore(value) => Some(*value),
                 _ => None,
             });
-        let clock_trigger_thresholds = self
-            .triggers
-            .values()
-            .filter_map(|trigger| trigger.clock.as_ref().map(|c| {
-                self.initial_minutes.saturating_add(c.due_elapsed)
-            }));
+        let clock_trigger_thresholds = self.triggers.values().filter_map(|trigger| {
+            trigger
+                .clock
+                .as_ref()
+                .map(|c| self.initial_minutes.saturating_add(c.due_elapsed))
+        });
         let latest = predicate_thresholds
             .chain(self.ends.iter().filter_map(|end| end.at_or_after))
             .chain(clock_trigger_thresholds)
@@ -5236,7 +5239,9 @@ flags:
             TriggerRule {
                 item: item("trigger.event"),
                 on: None,
-                clock: Some(ClockTrigger { due_elapsed: 12 * 60 }),
+                clock: Some(ClockTrigger {
+                    due_elapsed: 12 * 60,
+                }),
                 when: vec![],
                 after: 0,
                 effects: vec![],
