@@ -5937,22 +5937,14 @@ impl<'a> Validator<'a> {
     }
 
     fn validate_character_voice_id(&mut self, character: &Item) {
-        let Some(voice_id) = character.mapping.get(Value::String("voice_id".to_string())) else {
-            return;
-        };
-        let valid = voice_id.as_str().is_some_and(|voice_id| {
-            !voice_id.is_empty()
-                && voice_id.len() <= 128
-                && voice_id.trim() == voice_id
-                && voice_id.chars().all(|character| {
-                    character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
-                })
-        });
-        if !valid {
+        if character
+            .mapping
+            .contains_key(Value::String("voice_id".to_string()))
+        {
             self.push(
-                Severity::Error,
-                "character.voice_id",
-                "character `voice_id` must be a 1–128 character ElevenLabs voice ID containing only ASCII letters, numbers, `-`, or `_`"
+                Severity::Warning,
+                "character.voice_id_deprecated",
+                "character `voice_id` is deprecated and ignored: narration uses a single narrator voice (ADR-020); remove it"
                     .to_string(),
                 &character.path,
                 Some(format!("{}/voice_id", character.pointer)),
