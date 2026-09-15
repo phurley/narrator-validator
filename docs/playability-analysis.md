@@ -47,6 +47,15 @@ them. Ordinary action triggers snapshot their action match and persistent
 conditions before the action's mechanic and command effects, then settle their
 effects against the authoritative post-action state.
 
+Clock triggers (Format 3.11+) are modeled as state transitions at elapsed-time
+thresholds. When the search advances the clock past a clock trigger's due time,
+the trigger is evaluated as a pending transition: if its `when` predicates hold,
+its effects apply (to any location); facts are learned only by players at the
+trigger's required `location`. A trigger whose `when` predicates fail at its due
+time is consumed and never fires on that path. A clock trigger blocking the only
+path to an essential conclusion generates the same terminal diagnostic a deadline
+would.
+
 Non-monotonic effects, nested entity inventory transitions, entity point
 awards, entity/inventory route gates, duplicate deduction input sets, and
 condition forms outside this subset are reported as `inconclusive`.
