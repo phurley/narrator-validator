@@ -3,8 +3,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use serde_yaml::{Mapping, Value};
+
 use narrator_validator::{
-    validate, Diagnostic, PlayabilityReport, PlayabilityStatus, Severity, SourceFile,
+    merge_layers, validate, Diagnostic, PlayabilityReport, PlayabilityStatus, Severity, SourceFile,
+    ValidationReport, VALIDATOR_VERSION,
 };
 
 #[derive(Clone, Copy)]
@@ -28,6 +31,9 @@ fn main() -> ExitCode {
 fn run(args: impl Iterator<Item = String>) -> Result<bool, String> {
     let mut format = Format::Text;
     let mut root = None;
+    let mut deck_dir = None;
+    let mut strip_deck_only = false;
+    let mut emit_effective = None;
     let mut args = args.peekable();
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -50,6 +56,21 @@ fn run(args: impl Iterator<Item = String>) -> Result<bool, String> {
                     _ => return Err(format!("unknown output format `{value}`")),
                 };
             }
+            "--deck-dir" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--deck-dir requires a path".to_string())?;
+                deck_dir = Some(PathBuf::from(value));
+            }
+            "--strip-deck-only" => {
+                strip_deck_only = true;
+            }
+            "--emit-effective" => {
+                let value = args
+                    .next()
+                    .ok_or_else(|| "--emit-effective requires a path".to_string())?;
+                emit_effective = Some(PathBuf::from(value));
+            }
             value if value.starts_with('-') => return Err(format!("unknown option `{value}`")),
             value => {
                 if root.replace(PathBuf::from(value)).is_some() {
@@ -60,8 +81,44 @@ fn run(args: impl Iterator<Item = String>) -> Result<bool, String> {
     }
 
     let root = root.unwrap_or_else(|| PathBuf::from("."));
-    let files = read_sources(&root)?;
+    let story_files = read_sources(&root)?;
+
+    let files = if let Some(deck_dir) = &deck_dir {
+        let mut deck_files = read_sources(deck_dir)?;
+        let mut story_files = story_files;
+        if strip_deck_only {
+            strip_deck_only_fields(&mut deck_files, &mut story_files)?;
+        }
+        match merge_layers(&deck_files, &story_files) {
+            Ok(merged) => merged,
+            Err(diagnostics) => {
+                let report = ValidationReport {
+                    validator_version: VALIDATOR_VERSION.to_string(),
+                    format_version: None,
+                    valid: false,
+                    diagnostics,
+                    features: Vec::new(),
+                    reference_text: Vec::new(),
+                    playability: None,
+                };
+                emit_report(&format, &report)?;
+                return Ok(false);
+            }
+        }
+    } else {
+        story_files
+    };
+
+    if let Some(effective_dir) = &emit_effective {
+        write_effective_set(effective_dir, &files)?;
+    }
+
     let report = validate(&files);
+    emit_report(&format, &report)?;
+    Ok(report.valid)
+}
+
+fn emit_report(format: &Format, report: &ValidationReport) -> Result<(), String> {
     match format {
         Format::Text => print_text(
             &report.diagnostics,
@@ -70,12 +127,111 @@ fn run(args: impl Iterator<Item = String>) -> Result<bool, String> {
         ),
         Format::Json => println!(
             "{}",
-            serde_json::to_string_pretty(&report)
+            serde_json::to_string_pretty(report)
                 .map_err(|error| format!("could not serialize report: {error}"))?
         ),
         Format::Github => print_github(&report.diagnostics),
     }
-    Ok(report.valid)
+    Ok(())
+}
+
+/// Moves the deck-owned `case.format_version` / `case.ruleset` fields from
+/// the story's `case.yaml` onto the deck layer's, mirroring the backend
+/// import rule (ADR-022 §6): a deck missing the field inherits the story's
+/// value, a deck already carrying the identical value is untouched, and a
+/// conflicting value is rejected naming both. This lets a checked-out story
+/// repository, which still carries both fields, validate against an empty
+/// deck directory.
+fn strip_deck_only_fields(
+    deck: &mut Vec<SourceFile>,
+    story: &mut [SourceFile],
+) -> Result<(), String> {
+    const DECK_ONLY_FIELDS: &[&str] = &["format_version", "ruleset"];
+
+    let Some(story_case) = story.iter_mut().find(|file| file.path == "case.yaml") else {
+        return Ok(());
+    };
+    let mut story_value: Value = serde_yaml::from_str(&story_case.source)
+        .map_err(|error| format!("could not parse `case.yaml`: {error}"))?;
+    let Some(story_case_mapping) = story_value
+        .as_mapping_mut()
+        .and_then(|root| root.get_mut("case"))
+        .and_then(Value::as_mapping_mut)
+    else {
+        return Ok(());
+    };
+
+    let mut moved = Vec::new();
+    for field in DECK_ONLY_FIELDS {
+        if let Some(value) = story_case_mapping.remove(*field) {
+            moved.push((*field, value));
+        }
+    }
+    if moved.is_empty() {
+        return Ok(());
+    }
+    story_case.source = serde_yaml::to_string(&story_value)
+        .map_err(|error| format!("could not serialize stripped `case.yaml`: {error}"))?;
+
+    let deck_case_index = deck.iter().position(|file| file.path == "case.yaml");
+    let mut deck_value: Value = match &deck_case_index {
+        Some(index) => serde_yaml::from_str(&deck[*index].source)
+            .map_err(|error| format!("could not parse deck `case.yaml`: {error}"))?,
+        None => Value::Mapping(Mapping::new()),
+    };
+    if deck_value.as_mapping().is_none() {
+        deck_value = Value::Mapping(Mapping::new());
+    }
+    let deck_root = deck_value.as_mapping_mut().expect("just set to a mapping");
+    if deck_root.get("case").and_then(Value::as_mapping).is_none() {
+        deck_root.insert(
+            Value::String("case".to_string()),
+            Value::Mapping(Mapping::new()),
+        );
+    }
+    let deck_case_mapping = deck_root
+        .get_mut("case")
+        .and_then(Value::as_mapping_mut)
+        .expect("just inserted");
+
+    for (field, value) in moved {
+        match deck_case_mapping.get(field) {
+            None => {
+                deck_case_mapping.insert(Value::String(field.to_string()), value);
+            }
+            Some(existing) if existing == &value => {}
+            Some(existing) => {
+                return Err(format!(
+                    "--strip-deck-only: `case.{field}` differs between the story (`{:?}`) and the deck (`{:?}`)",
+                    value, existing
+                ));
+            }
+        }
+    }
+
+    let deck_source = serde_yaml::to_string(&deck_value)
+        .map_err(|error| format!("could not serialize deck `case.yaml`: {error}"))?;
+    match deck_case_index {
+        Some(index) => deck[index].source = deck_source,
+        None => deck.push(SourceFile {
+            path: "case.yaml".to_string(),
+            source: deck_source,
+        }),
+    }
+    Ok(())
+}
+
+fn write_effective_set(directory: &Path, files: &[SourceFile]) -> Result<(), String> {
+    for file in files {
+        let path = directory.join(&file.path);
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .map_err(|error| format!("could not create `{}`: {error}", parent.display()))?;
+        }
+        fs::write(&path, &file.source)
+            .map_err(|error| format!("could not write `{}`: {error}", path.display()))?;
+    }
+    Ok(())
 }
 
 fn read_sources(root: &Path) -> Result<Vec<SourceFile>, String> {
@@ -268,8 +424,15 @@ fn print_help() {
 Usage: narrator-validator [OPTIONS] [REPOSITORY]
 
 Options:
-      --format <FORMAT>  text (default), json, or github
-  -h, --help             Print help
-  -V, --version          Print version"
+      --format <FORMAT>       text (default), json, or github
+      --deck-dir <DIR>        Overlay REPOSITORY as a story layer on top of a
+                               deck layer read from DIR before validating
+                               (ADR-022)
+      --strip-deck-only       Move case.format_version and case.ruleset from
+                               the story's case.yaml onto the deck layer
+                               before merging (requires --deck-dir)
+      --emit-effective <DIR>  Write the merged effective file set to DIR
+  -h, --help                  Print help
+  -V, --version               Print version"
     );
 }

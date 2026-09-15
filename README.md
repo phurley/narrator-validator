@@ -79,6 +79,32 @@ cargo run -- --format github /path/to/story
 Exit status is `0` for a valid repository, `1` for validation errors, and `2`
 for CLI or filesystem errors. Warnings do not make a repository invalid.
 
+`--deck-dir <DIR>` overlays the story directory on top of a deck directory
+read from `DIR`, using the same [`merge_layers`](src/layers.rs) overlay the
+backend and Author use (ADR-022), and validates the merged effective set. A
+layer diagnostic (`layer.deck_only_field`, `layer.story_only_field`,
+`layer.remove_unknown_id`, ...) is printed the same way as any other
+diagnostic and makes the run invalid.
+
+```sh
+cargo run -- --deck-dir /path/to/deck /path/to/story
+```
+
+`--strip-deck-only` moves `case.format_version` and `case.ruleset` from the
+story's `case.yaml` onto the deck layer before merging, mirroring the
+backend's import rule (ADR-022 §6). This lets a checked-out story repository,
+which still carries both fields, validate against an empty deck directory:
+
+```sh
+mkdir empty-deck
+cargo run -- --deck-dir empty-deck --strip-deck-only /path/to/story
+```
+
+`--emit-effective <DIR>` writes the file set actually validated (the merged
+effective set when `--deck-dir` is given, or the story directory unchanged
+otherwise) to `DIR`, useful for diffing a deck overlay or feeding a fixture
+to another tool.
+
 ## Rust
 
 ```rust
