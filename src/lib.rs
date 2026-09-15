@@ -5,6 +5,7 @@
 
 mod diagnostic;
 mod end_state;
+mod layers;
 mod playability;
 mod reference_text;
 mod ruleset;
@@ -20,6 +21,7 @@ pub use end_state::{
     end_state_contract_metadata, end_state_contract_metadata_json, EndStateContractMetadata,
     OutcomeResolution, END_STATE_STORY_FORMAT_VERSION,
 };
+pub use layers::merge_layers;
 pub use playability::{
     DeductionGraphAnalysis, NotebookPolicyAnalysis, PlayabilityBlocker, PlayabilityLowerBound,
     PlayabilityReport, PlayabilityRequiredWait, PlayabilityStatus, PlayabilityStep,
@@ -103,10 +105,10 @@ mod wasm {
     use wasm_bindgen::prelude::*;
 
     use crate::{
-        end_state_contract_metadata_json, map_contract_limits_json, parse_reference_text_result,
-        reference_text_metadata_json, solution_answer_matches, solution_contract_metadata_json,
-        validate, validate_with_supported_features, validate_without_playability_with_features,
-        SourceFile,
+        end_state_contract_metadata_json, map_contract_limits_json, merge_layers,
+        parse_reference_text_result, reference_text_metadata_json, solution_answer_matches,
+        solution_contract_metadata_json, validate, validate_with_supported_features,
+        validate_without_playability_with_features, SourceFile,
     };
 
     /// Validate a JSON array of `{ "path": string, "source": string }` values.
@@ -199,5 +201,31 @@ mod wasm {
         serde_json::to_string(&parse_reference_text_result(source)).map_err(|error| {
             JsValue::from_str(&format!("could not serialize parse result: {error}"))
         })
+    }
+
+    /// Overlays a deck-layer file set with a story-layer file set
+    /// (ADR-022 §2). Both inputs and the output are JSON arrays of
+    /// `{ "path": string, "source": string }` values, the same shape
+    /// `validate_json` takes; call that on the result to validate the
+    /// effective set. Returns an error with the JSON-encoded diagnostics
+    /// when the merge itself is invalid (e.g. a tombstone with no matching
+    /// deck id).
+    #[wasm_bindgen]
+    pub fn merge_layers_json(deck_json: &str, story_json: &str) -> Result<String, JsValue> {
+        let deck: Vec<SourceFile> = serde_json::from_str(deck_json).map_err(|error| {
+            JsValue::from_str(&format!("invalid deck source-file JSON: {error}"))
+        })?;
+        let story: Vec<SourceFile> = serde_json::from_str(story_json).map_err(|error| {
+            JsValue::from_str(&format!("invalid story source-file JSON: {error}"))
+        })?;
+        match merge_layers(&deck, &story) {
+            Ok(files) => serde_json::to_string(&files).map_err(|error| {
+                JsValue::from_str(&format!("could not serialize merged files: {error}"))
+            }),
+            Err(diagnostics) => Err(JsValue::from_str(
+                &serde_json::to_string(&diagnostics)
+                    .unwrap_or_else(|error| format!("could not serialize diagnostics: {error}")),
+            )),
+        }
     }
 }
