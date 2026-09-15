@@ -3783,15 +3783,34 @@ impl Model {
                 .unwrap_or(0);
             let mut chain = vec![end.item.id.clone()];
             chain.extend(self.missing_chain(id, states, &mut BTreeSet::new()));
-            (
-                "playability.missing_requirement",
-                format!(
-                    "no supported action can establish required `{id}`; blocked chain: {}",
-                    chain.join(" -> ")
-                ),
-                chain,
-                format!("{}/requires/{requirement_index}", end.item.pointer),
-            )
+            // Check if the chain includes a clock trigger
+            let clock_trigger_id = chain.iter().find(|trigger_id| {
+                self.triggers
+                    .get(*trigger_id)
+                    .map(|t| t.clock.is_some())
+                    .unwrap_or(false)
+            });
+            if let Some(trigger_id) = clock_trigger_id {
+                (
+                    "playability.route_time_blocked",
+                    format!(
+                        "clock trigger `{trigger_id}` blocks the only path to this outcome; blocked chain: {}",
+                        chain.join(" -> ")
+                    ),
+                    chain.clone(),
+                    format!("{}/requires/{requirement_index}", end.item.pointer),
+                )
+            } else {
+                (
+                    "playability.missing_requirement",
+                    format!(
+                        "no supported action can establish required `{id}`; blocked chain: {}",
+                        chain.join(" -> ")
+                    ),
+                    chain,
+                    format!("{}/requires/{requirement_index}", end.item.pointer),
+                )
+            }
         } else if end.minimum_points > states.iter().map(|state| state.score).max().unwrap_or(0) {
             (
                 "playability.insufficient_score",
@@ -3858,6 +3877,13 @@ impl Model {
                     _ => None,
                 })
                 .or_else(|| fact.on.as_ref().map(|on| on.command.clone()))
+                .or_else(|| {
+                    // If this fact is owned by a clock trigger, trace to that trigger
+                    self.triggers
+                        .iter()
+                        .find(|(_, trigger)| trigger.facts.contains(&id.to_string()))
+                        .map(|(trigger_id, _)| trigger_id.clone())
+                })
         } else if let Some(trigger) = self.triggers.get(id) {
             trigger.on.as_ref().map(|on| on.command.clone())
         } else if let Some(step) = self.solve_steps.iter().find(|step| {
@@ -5250,10 +5276,12 @@ flags:
                 location: Some("setting.elsewhere".to_string()),
             },
         );
+        let mut fact_item = item("fact.news");
+        fact_item.owner = Some("trigger.event".to_string());
         model.facts.insert(
             "fact.news".to_string(),
             FactRule {
-                item: item("fact.news"),
+                item: fact_item,
                 on: None,
                 when: vec![],
                 opening: false,
@@ -5279,7 +5307,16 @@ flags:
         assert_ne!(
             end.status,
             PlayabilityStatus::Proved,
-            "fact should not be learned if player is not at trigger's location: {end:#?}"
+            "fact owned by clock trigger at unreachable location should block the end: {end:#?}"
+        );
+        let blocker = end.blocker.as_ref().expect("a blocked end carries a blocker");
+        assert_eq!(
+            blocker.code, "playability.route_time_blocked",
+            "clock-trigger-blocked facts should report as route_time_blocked: {blocker:#?}"
+        );
+        assert!(
+            blocker.message.contains("trigger.event"),
+            "the blocker message should name the blocking clock trigger: {blocker:#?}"
         );
     }
 
