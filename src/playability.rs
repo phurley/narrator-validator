@@ -753,6 +753,34 @@ impl Model {
                 continue;
             };
             let unsupported_before = self.unsupported.len();
+            // The static subset does not execute the atomic Use-then-Move reducer.
+            // Exclude commands using the new source from command witnesses. Plain
+            // route traversal is still modeled separately with its real gates.
+            let has_adjacent = field(&item.map, "parameters")
+                .and_then(Value::as_sequence)
+                .is_some_and(|parameters| {
+                    parameters.iter().any(|parameter| {
+                        parameter
+                            .as_mapping()
+                            .and_then(|parameter| field(parameter, "candidates"))
+                            .and_then(Value::as_mapping)
+                            .and_then(|candidates| field(candidates, "from"))
+                            .and_then(Value::as_sequence)
+                            .is_some_and(|sources| {
+                                sources
+                                    .iter()
+                                    .any(|source| source.as_str() == Some("adjacent"))
+                            })
+                    })
+                });
+            let has_move_item = item.id == "command.move"
+                && field(&item.map, "parameters")
+                    .and_then(Value::as_sequence)
+                    .is_some_and(|parameters| parameters.len() > 1);
+            if has_adjacent || has_move_item {
+                self.unsupported(file, &item.pointer, "playability.unsupported_adjacent_command",
+                    "adjacent-room targeting and item-assisted movement are outside the static subset; missing paths are inconclusive");
+            }
             let effects = self.effects(file, &item.pointer, &item.map, item.id == "command.move");
             if self.unsupported.len() > unsupported_before {
                 self.unsupported_commands.insert(item.id.clone());

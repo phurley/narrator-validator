@@ -14,8 +14,8 @@ use crate::{
     STANDARD_MYSTERY_RULESET_VERSION_2, STANDARD_MYSTERY_RULESET_VERSION_3,
     STANDARD_MYSTERY_RULESET_VERSION_4, STANDARD_MYSTERY_RULESET_VERSION_5,
     STANDARD_MYSTERY_RULESET_VERSION_6, STANDARD_MYSTERY_RULESET_VERSION_7,
-    STANDARD_MYSTERY_RULESET_VERSION_8, STORY_FORMAT_VERSION, SUPPORTED_FEATURES,
-    VALIDATOR_VERSION,
+    STANDARD_MYSTERY_RULESET_VERSION_8, STANDARD_MYSTERY_RULESET_VERSION_9, STORY_FORMAT_VERSION,
+    SUPPORTED_FEATURES, VALIDATOR_VERSION,
 };
 
 const MAX_REPOSITORY_FILES: usize = 512;
@@ -134,6 +134,7 @@ enum CandidateSource {
     CurrentLocation,
     Inventory,
     Reachable,
+    Adjacent,
     Known,
     Established,
 }
@@ -185,6 +186,7 @@ impl CandidateSource {
             "current_location" => Some(Self::CurrentLocation),
             "inventory" => Some(Self::Inventory),
             "reachable" => Some(Self::Reachable),
+            "adjacent" => Some(Self::Adjacent),
             "known" => Some(Self::Known),
             "established" => Some(Self::Established),
             _ => None,
@@ -197,7 +199,7 @@ impl CandidateSource {
             Self::All | Self::Known => &[Character, Entity, Setting, Deduction, Event],
             Self::CurrentLocation => &[Setting, Entity, Character],
             Self::Inventory => &[Entity],
-            Self::Reachable => &[Setting],
+            Self::Reachable | Self::Adjacent => &[Setting],
             Self::Established => &[Deduction],
         }
     }
@@ -544,12 +546,20 @@ impl<'a> Validator<'a> {
             .is_some_and(|version| version.major == 3 && version.minor >= 9)
     }
 
+    fn is_format_3_10_or_later(&self) -> bool {
+        self.format_version
+            .as_ref()
+            .is_some_and(|version| version.major == 3 && version.minor >= 10)
+    }
+
     fn uses_step_solution_ruleset(&self) -> bool {
         self.ruleset.as_ref().is_some_and(|ruleset| {
             ruleset.id == STANDARD_MYSTERY_RULESET_ID
                 && matches!(
                     ruleset.version.as_str(),
-                    STANDARD_MYSTERY_RULESET_VERSION_7 | STANDARD_MYSTERY_RULESET_VERSION_8
+                    STANDARD_MYSTERY_RULESET_VERSION_7
+                        | STANDARD_MYSTERY_RULESET_VERSION_8
+                        | STANDARD_MYSTERY_RULESET_VERSION_9
                 )
         })
     }
@@ -2442,15 +2452,32 @@ impl<'a> Validator<'a> {
         if reference.id == STANDARD_MYSTERY_RULESET_ID
             && matches!(
                 reference.version.as_str(),
-                STANDARD_MYSTERY_RULESET_VERSION_7 | STANDARD_MYSTERY_RULESET_VERSION_8
+                STANDARD_MYSTERY_RULESET_VERSION_7
+                    | STANDARD_MYSTERY_RULESET_VERSION_8
+                    | STANDARD_MYSTERY_RULESET_VERSION_9
             )
             && !self.is_format_3_7_or_later()
         {
             self.push(
                 Severity::Error,
                 "ruleset.format_incompatible",
-                "ruleset.standard_mystery@7.0.0 and @8.0.0 declare the Format 3.7 multi-step `solution.steps` Solve contract and the answer-deck catalog; set `case.format_version` to \"3.7.0\" or select an earlier ruleset version"
+                "ruleset.standard_mystery@7.0.0, @8.0.0, and @9.0.0 declare the Format 3.7 multi-step `solution.steps` Solve contract and the answer-deck catalog; set `case.format_version` to \"3.7.0\" or select an earlier ruleset version"
                     .to_string(),
+                &case.path,
+                Some(format!("{pointer}/version")),
+                None,
+                Some(case.id.clone()),
+            );
+            return;
+        }
+        if reference.id == STANDARD_MYSTERY_RULESET_ID
+            && reference.version == STANDARD_MYSTERY_RULESET_VERSION_9
+            && !self.is_format_3_10_or_later()
+        {
+            self.push(
+                Severity::Error,
+                "ruleset.format_incompatible",
+                "ruleset.standard_mystery@9.0.0 requires story format 3.10.0 or later".into(),
                 &case.path,
                 Some(format!("{pointer}/version")),
                 None,
@@ -3524,7 +3551,7 @@ impl<'a> Validator<'a> {
             self.push(
                 Severity::Error,
                 "solution.missing_step_contract",
-                "ruleset.standard_mystery@7.0.0 and @8.0.0 require a `solution` block with `steps`"
+                "ruleset.standard_mystery@7.0.0, @8.0.0, and @9.0.0 require a `solution` block with `steps`"
                     .to_string(),
                 "case.yaml",
                 Some("/solution".to_string()),
@@ -3643,7 +3670,7 @@ impl<'a> Validator<'a> {
             self.push(
                 Severity::Error,
                 "solution.ruleset_incompatible",
-                "authored solve steps require `case.ruleset` ruleset.standard_mystery@7.0.0 or @8.0.0"
+                "authored solve steps require `case.ruleset` ruleset.standard_mystery@7.0.0, @8.0.0, or @9.0.0"
                     .to_string(),
                 path,
                 Some("/solution".to_string()),
@@ -7880,7 +7907,7 @@ impl<'a> Validator<'a> {
                         self.push(
                             Severity::Error,
                             "command.candidates_source_unknown",
-                            "candidate sources must be `all`, `current_location`, `inventory`, `reachable`, `known`, or `established`"
+                            "candidate sources must be `all`, `current_location`, `inventory`, `reachable`, `adjacent`, `known`, or `established`"
                                 .to_string(),
                             &command.path,
                             Some(item_pointer),
@@ -7893,7 +7920,7 @@ impl<'a> Validator<'a> {
                         self.push(
                             Severity::Error,
                             "command.candidates_source_unknown",
-                            format!("unknown candidate source `{source_name}`; use `all`, `current_location`, `inventory`, `reachable`, `known`, or `established`"),
+                            format!("unknown candidate source `{source_name}`; use `all`, `current_location`, `inventory`, `reachable`, `adjacent`, `known`, or `established`"),
                             &command.path,
                             Some(item_pointer),
                             None,
@@ -7901,6 +7928,18 @@ impl<'a> Validator<'a> {
                         );
                         continue;
                     };
+                    if source == CandidateSource::Adjacent && !self.is_format_3_10_or_later() {
+                        self.push(
+                            Severity::Error,
+                            "command.candidates_format_incompatible",
+                            "candidate source `adjacent` requires story format 3.10.0 or later"
+                                .into(),
+                            &command.path,
+                            Some(item_pointer.clone()),
+                            None,
+                            Some(command.id.clone()),
+                        );
+                    }
                     if !seen.insert(source) {
                         self.push(
                             Severity::Error,
@@ -8078,7 +8117,13 @@ impl<'a> Validator<'a> {
                 _ => false,
             },
             "command.move" => {
-                matches!(known.as_slice(), [shape] if shape.types == [CommandParameterType::Setting] && shape.min == 1 && shape.max == 1)
+                matches!(parameter_types, [Some(shape)] if shape.types == [CommandParameterType::Setting] && shape.min == 1 && shape.max == 1)
+                    || (self.is_format_3_10_or_later()
+                        && matches!(parameter_types, [Some(destination), Some(item)]
+                        if command_parameter_name(command, 0) == Some("destination")
+                            && destination.types == [CommandParameterType::Setting] && destination.min == 1 && destination.max == 1
+                            && command_parameter_name(command, 1) == Some("item")
+                            && item.types == [CommandParameterType::Entity] && item.min == 0 && item.max == 1))
             }
             "command.solve" => {
                 if self.uses_question_solution_ruleset() || self.uses_step_solution_ruleset() {
@@ -8100,7 +8145,7 @@ impl<'a> Validator<'a> {
                         format!("reserved `{}` must not declare parameters", command.id)
                     }
                     "command.move" => {
-                        "`command.move` must declare exactly one setting parameter".to_string()
+                        "`command.move` must declare one required setting destination and, from format 3.10, at most one optional entity item".to_string()
                     }
                     "command.use" => {
                         "`command.use` must declare required entity `item` and optional entity-or-setting `target` parameters".to_string()

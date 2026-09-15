@@ -2,7 +2,7 @@
 
 import { execFileSync } from 'node:child_process'
 import { copyFile, mkdir, readFile, writeFile } from 'node:fs/promises'
-import { homedir } from 'node:os'
+import { homedir, platform, machine } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -121,6 +121,7 @@ const standardMysteryRulesets = [
   '6.0.0',
   '7.0.0',
   '8.0.0',
+  '9.0.0',
 ].map((version) =>
   JSON.parse(
     execFileSync(
@@ -148,6 +149,12 @@ const manifest = {
   description: rustPackage.description,
   license: rustPackage.license,
   repository: rustPackage.repository,
+  narratorValidatorBuild: {
+    os: platform(),
+    arch: machine(),
+    rust: execFileSync('rustc', ['--version'], { cwd: root, encoding: 'utf8' }).trim().split(/\s+/)[1],
+    wasmBindgen: execFileSync(wasmBindgen, ['--version'], { encoding: 'utf8' }).trim().split(/\s+/)[1],
+  },
   narratorValidatorSource: {
     repository: rustPackage.repository,
     commit: sourceCommit,

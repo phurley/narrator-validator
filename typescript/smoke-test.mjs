@@ -29,9 +29,9 @@ assert.match(VALIDATOR_SOURCE_COMMIT, /^[0-9a-f]{40}$/)
 
 assert.deepEqual(
   STANDARD_MYSTERY_RULESETS.map((ruleset) => ruleset.version),
-  ['1.0.0', '2.0.0', '3.0.0', '4.0.0', '5.0.0', '6.0.0', '7.0.0', '8.0.0'],
+  ['1.0.0', '2.0.0', '3.0.0', '4.0.0', '5.0.0', '6.0.0', '7.0.0', '8.0.0', '9.0.0'],
 )
-assert.equal(STANDARD_MYSTERY_RULESET.version, '8.0.0')
+assert.equal(STANDARD_MYSTERY_RULESET.version, '9.0.0')
 
 // Rulesets 7 and 8 define an answer-deck catalog
 // (Story Format 3.7); earlier versions carry no `answers` field at all.
@@ -448,3 +448,18 @@ for (const [value, code] of [
   assert.ok(result.diagnostics.some(d => d.code === code), JSON.stringify(result.diagnostics))
 }
 assert.equal((await validateRepository(overrideFiles('{command.open: false, command.open: true}'))).valid, false)
+
+// New catalog and new-format validation run through the shipped WASM bytes.
+const move9 = STANDARD_MYSTERY_RULESET.commands.find(command => command.id === 'command.move')
+const use9 = STANDARD_MYSTERY_RULESET.commands.find(command => command.id === 'command.use')
+assert.deepEqual(move9.parameters[0].candidates.from, ['reachable', 'adjacent'])
+assert.deepEqual(move9.parameters[1].types, ['entity'])
+assert.equal(move9.parameters[1].min, 0)
+assert.equal(move9.parameters[1].max, 1)
+assert.deepEqual(move9.parameters[1].candidates.from, ['inventory'])
+assert.deepEqual(use9.parameters[1].candidates.from, ['current_location', 'inventory', 'adjacent'])
+const newFiles = overrideFiles('{}').map(file => ({...file, source: file.source.replace('3.9.0', '3.10.0').replace('version: "7.0.0"', 'version: "9.0.0"')}))
+const newReport = await validateRepository(newFiles)
+assert.equal(newReport.valid, true, JSON.stringify(newReport.diagnostics))
+const oldReport = await validateRepository(newFiles.map(file => ({...file, source: file.source.replace('3.10.0', '3.9.0')})))
+assert.ok(oldReport.diagnostics.some(d => d.code === 'ruleset.format_incompatible'))
