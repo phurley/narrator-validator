@@ -75,4 +75,33 @@ git -C "$repo" tag -d v1.1.0 >/dev/null
 git -C "$repo" tag -a v1.1.0 -m "fixture release"
 expect_pass "annotated exact tag at bump commit passes" bash scripts/check-release-tag.sh "$repo"
 
-echo "PASS: 6 release-tag gate cases"
+# Use commit-tree to create precisely controlled integration graphs, independent
+# of merge-strategy behavior and without moving the immutable release tag.
+base_sha=$(git -C "$repo" rev-parse "$bump_sha^")
+release_tree=$(git -C "$repo" rev-parse "$bump_sha^{tree}")
+merge_sha=$(printf 'integrate tagged release\n' | git -C "$repo" commit-tree "$release_tree" -p "$base_sha" -p "$bump_sha")
+expect_pass "identical-tree merge of tagged direct parent passes" \
+  bash scripts/check-release-tag.sh "$repo" "$merge_sha"
+
+# A merge that changes even unrelated tracked content is a different release.
+printf 'changed after release\n' > "$repo/extra.txt"
+git -C "$repo" add extra.txt
+changed_tree=$(git -C "$repo" write-tree)
+changed_merge=$(printf 'changed integration\n' | git -C "$repo" commit-tree "$changed_tree" -p "$base_sha" -p "$bump_sha")
+expect_fail "changed-tree merge of tagged parent fails" "identical-tree direct parent" \
+  bash scripts/check-release-tag.sh "$repo" "$changed_merge"
+
+# Equal trees alone do not authorize an unrelated/reconstructed version bump.
+unrelated=$(printf 'reconstructed release\n' | git -C "$repo" commit-tree "$release_tree" -p "$base_sha")
+expect_fail "same-tree ordinary commit cannot borrow release tag" "points at" \
+  bash scripts/check-release-tag.sh "$repo" "$unrelated"
+descendant=$(printf 'release descendant\n' | git -C "$repo" commit-tree "$release_tree" -p "$bump_sha")
+indirect_merge=$(printf 'tag only on ancestor\n' | git -C "$repo" commit-tree "$release_tree" -p "$base_sha" -p "$descendant")
+expect_fail "same-tree merge requires directly tagged parent" "points at" \
+  bash scripts/check-release-tag.sh "$repo" "$indirect_merge"
+
+git -C "$repo" tag -d v1.1.0 >/dev/null
+expect_fail "identical-tree merge without release tag fails" "exact release tag v1.1.0 does not exist" \
+  bash scripts/check-release-tag.sh "$repo" "$merge_sha"
+
+echo "PASS: 11 release-tag gate cases"
