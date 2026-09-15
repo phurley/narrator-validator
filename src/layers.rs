@@ -71,12 +71,15 @@ fn section_config(path: &str) -> Option<SectionConfig> {
         "costs.yaml" => Some(SectionConfig {
             lists: &[("command_costs", &[], &[], false)],
         }),
-        // `reference-literals.yaml` and `wait.yaml` are maps merged per
-        // top-level key with no id-listed section inside them.
-        "reference-literals.yaml" | "wait.yaml" => Some(SectionConfig { lists: &[] }),
+        // `reference-literals.yaml` is a map merged per top-level key with no
+        // id-listed section inside it.
+        "reference-literals.yaml" => Some(SectionConfig { lists: &[] }),
         // `case.yaml` (`case` and `solution`) needs its own handling for
         // `case.map`'s mixed per-key/by-id rule; see `merge_case_file`.
-        "case.yaml" => None,
+        // `wait.yaml` similarly needs its `wait` root key's own fields to
+        // merge per-key rather than being replaced whole; see
+        // `merge_wait_file`.
+        "case.yaml" | "wait.yaml" => None,
         _ => None,
     }
 }
@@ -128,7 +131,8 @@ fn merge_shared_file(
     story: &SourceFile,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> SourceFile {
-    if deck.path != "case.yaml" && section_config(&deck.path).is_none() {
+    if deck.path != "case.yaml" && deck.path != "wait.yaml" && section_config(&deck.path).is_none()
+    {
         // Not a section file this module merges: story wins whole.
         return story.clone();
     }
@@ -150,6 +154,8 @@ fn merge_shared_file(
 
     let merged_value = if deck.path == "case.yaml" {
         merge_case_file(&deck_value, &story_value, &story.path, diagnostics)
+    } else if deck.path == "wait.yaml" {
+        merge_wait_file(&deck_value, &story_value)
     } else {
         let config = section_config(&story.path).expect("checked above");
         merge_sections(
@@ -183,9 +189,10 @@ fn invalid_yaml_diagnostic(path: &str, message: &str) -> Diagnostic {
 
 /// Merges every top-level key present in either mapping. A key present in
 /// `story` wins and replaces the deck's value whole; a key only in `deck` is
-/// inherited unchanged. Mirrors ADR-022 §2's `case`/`wait` rule and doubles
-/// as the whole-file merge for sections with no id-listed content
-/// (`reference-literals.yaml`, `wait.yaml`).
+/// inherited unchanged. This is the per-key half of ADR-022 §2's `case`/`wait`
+/// rule (applied to the `case` and `wait` root keys' own inner fields by
+/// `merge_case_file`/`merge_wait_file`), and it also serves as the whole-file
+/// merge for `reference-literals.yaml`, which has no id-listed content.
 fn merge_scalar_map(deck: Option<&Mapping>, story: Option<&Mapping>) -> Mapping {
     let mut merged = Mapping::new();
     if let Some(deck) = deck {
@@ -315,6 +322,31 @@ fn merge_case_file(
         merged.insert(
             Value::String("case".to_string()),
             Value::Mapping(merged_case),
+        );
+    }
+
+    Value::Mapping(merged)
+}
+
+/// `wait.yaml` holds a `wait` root key whose own fields merge per key, the
+/// same way `case.yaml`'s `case` key does (ADR-022 §2). Any other top-level
+/// key in the file follows the generic whole-value scalar rule.
+fn merge_wait_file(deck_value: &Value, story_value: &Value) -> Value {
+    let deck_root = deck_value.as_mapping();
+    let story_root = story_value.as_mapping();
+    let mut merged = merge_scalar_map(deck_root, story_root);
+
+    let deck_wait = deck_root
+        .and_then(|m| m.get("wait"))
+        .and_then(Value::as_mapping);
+    let story_wait = story_root
+        .and_then(|m| m.get("wait"))
+        .and_then(Value::as_mapping);
+    if deck_wait.is_some() || story_wait.is_some() {
+        let merged_wait = merge_scalar_map(deck_wait, story_wait);
+        merged.insert(
+            Value::String("wait".to_string()),
+            Value::Mapping(merged_wait),
         );
     }
 
@@ -713,6 +745,46 @@ mod tests {
                 .as_i64(),
             Some(3)
         );
+    }
+
+    #[test]
+    fn wait_file_merges_per_top_level_key() {
+        let deck = vec![file(
+            "wait.yaml",
+            "wait:\n  default_minutes: 5\n  max_minutes: 30\n",
+        )];
+        let story = vec![file(
+            "wait.yaml",
+            "wait:\n  default_minutes: 10\nnotes: story-only\n",
+        )];
+        let merged = merge_layers(&deck, &story).unwrap();
+        let value = parsed(&merged, "wait.yaml");
+        let wait = value.get("wait").unwrap();
+        assert_eq!(wait.get("default_minutes").unwrap().as_i64(), Some(10));
+        assert_eq!(wait.get("max_minutes").unwrap().as_i64(), Some(30));
+        assert_eq!(value.get("notes").unwrap().as_str(), Some("story-only"));
+    }
+
+    #[test]
+    fn reference_literals_file_merges_per_top_level_key() {
+        let deck = vec![file(
+            "reference-literals.yaml",
+            "reference_literal_reviews:\n- Deck reviewed literal\ndeck_only_key: kept\n",
+        )];
+        let story = vec![file(
+            "reference-literals.yaml",
+            "reference_literal_reviews:\n- Story reviewed literal\n",
+        )];
+        let merged = merge_layers(&deck, &story).unwrap();
+        let value = parsed(&merged, "reference-literals.yaml");
+        let reviews = value
+            .get("reference_literal_reviews")
+            .unwrap()
+            .as_sequence()
+            .unwrap();
+        assert_eq!(reviews.len(), 1);
+        assert_eq!(reviews[0].as_str(), Some("Story reviewed literal"));
+        assert_eq!(value.get("deck_only_key").unwrap().as_str(), Some("kept"));
     }
 
     #[test]
