@@ -1,0 +1,13 @@
+# cargo-nextest settings for scripts/verify.sh's test step (2026-09-15).
+# One process per test from a single global queue, so the thread cap is
+# real across binaries and a hung test is killed and named instead of
+# stalling the run. Validator tests are fast and deterministic, so no
+# retries: a failure here is a failure.
+[profile.default]
+# nextest does not honour RUST_TEST_THREADS (that only caps libtest inside
+# a binary); without this it runs num-cpus tests at once. 4 matches the
+# host cargo config's libtest cap. Override with --test-threads.
+test-threads = 4
+slow-timeout = { period = "30s", terminate-after = 4 }
+retries = 0
+fail-fast = false
