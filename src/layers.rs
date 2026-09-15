@@ -88,15 +88,21 @@ fn section_config(path: &str) -> Option<SectionConfig> {
 ///
 /// Returns `Err` with every diagnostic found (never stopping at the first)
 /// when the merge itself is invalid, for example a story tombstone whose id
-/// does not exist in the deck layer (`layer.remove_unknown_id`) or a
-/// canonical section file that is not valid YAML. Otherwise returns `Ok`
-/// with the merged files; call [`crate::validate`] on them to check the
-/// *content* of the effective set.
+/// does not exist in the deck layer (`layer.remove_unknown_id`), a canonical
+/// section file that is not valid YAML, a field set in the wrong layer
+/// (`layer.deck_only_field`, `layer.story_only_field`, ADR-022 §3), or a
+/// merged section entry that still carries `remove: true`
+/// (`layer.tombstone_in_effective_set`, checked by [`crate::validate`] since
+/// it can only be observed after the merge). Otherwise returns `Ok` with the
+/// merged files; call [`crate::validate`] on them to check the *content* of
+/// the effective set.
 pub fn merge_layers(
     deck: &[SourceFile],
     story: &[SourceFile],
 ) -> Result<Vec<SourceFile>, Vec<Diagnostic>> {
     let mut diagnostics = Vec::new();
+
+    validate_layer_ownership(deck, story, &mut diagnostics);
 
     let mut order: Vec<&str> = Vec::new();
     let mut seen: HashSet<&str> = HashSet::new();
@@ -123,6 +129,119 @@ pub fn merge_layers(
         Ok(output)
     } else {
         Err(diagnostics)
+    }
+}
+
+/// Deck-owned `case` fields, per ADR-022 §3: a story `case.yaml` that sets
+/// one of these fails with `layer.deck_only_field`.
+const DECK_ONLY_CASE_FIELDS: &[&str] = &["format_version", "ruleset"];
+
+/// Story-owned `case` fields, per ADR-022 §3: a deck `case.yaml` that sets
+/// one of these fails with `layer.story_only_field`.
+const STORY_ONLY_CASE_FIELDS: &[&str] = &["id", "premise", "opening"];
+
+/// Whole files that are story-only, per ADR-022 §3: a deck layer that
+/// provides one fails with `layer.story_only_field`. `scripts/` is matched
+/// as a prefix because story tests live at `scripts/<end_state>/*.json`
+/// (ADR-021).
+const STORY_ONLY_FILES: &[&str] = &["end_states.yaml", "win_states.yaml"];
+
+/// Checks the layer-ownership rules of ADR-022 §3 that a per-file,
+/// per-section merge cannot express: fields owned by exactly one layer, and
+/// files that only ever belong to the story layer. Runs against the raw
+/// `deck`/`story` inputs rather than the merge output, so a violation is
+/// still reported even when the other layer omits the file entirely (for
+/// example a story `case.yaml`'s `ruleset` against a deck with no files at
+/// all). This never removes the offending value: the merge proceeds and
+/// story still wins on shared keys, so later `validate` diagnostics against
+/// the effective set remain meaningful.
+fn validate_layer_ownership(
+    deck: &[SourceFile],
+    story: &[SourceFile],
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    if let Some(story_case) = story.iter().find(|f| f.path == "case.yaml") {
+        if let Ok(Value::Mapping(root)) = serde_yaml::from_str::<Value>(&story_case.source) {
+            if let Some(case) = root.get("case").and_then(Value::as_mapping) {
+                for field in DECK_ONLY_CASE_FIELDS {
+                    if case.get(*field).is_some() {
+                        diagnostics.push(ownership_diagnostic(
+                            "layer.deck_only_field",
+                            &story_case.path,
+                            &format!("/case/{field}"),
+                            &format!(
+                                "`case.{field}` may only be set by the deck layer (ADR-022 §3); the story layer's `{}` must not set it",
+                                story_case.path
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    if let Some(deck_case) = deck.iter().find(|f| f.path == "case.yaml") {
+        if let Ok(Value::Mapping(root)) = serde_yaml::from_str::<Value>(&deck_case.source) {
+            if let Some(case) = root.get("case").and_then(Value::as_mapping) {
+                for field in STORY_ONLY_CASE_FIELDS {
+                    if case.get(*field).is_some() {
+                        diagnostics.push(ownership_diagnostic(
+                            "layer.story_only_field",
+                            &deck_case.path,
+                            &format!("/case/{field}"),
+                            &format!(
+                                "`case.{field}` may only be set by the story layer (ADR-022 §3); the deck layer's `{}` must not set it",
+                                deck_case.path
+                            ),
+                        ));
+                    }
+                }
+            }
+            if root.get("solution").is_some() {
+                diagnostics.push(ownership_diagnostic(
+                    "layer.story_only_field",
+                    &deck_case.path,
+                    "/solution",
+                    &format!(
+                        "`solution` may only be set by the story layer (ADR-022 §3); the deck layer's `{}` must not set it",
+                        deck_case.path
+                    ),
+                ));
+            }
+        }
+    }
+
+    for deck_file in deck {
+        let is_story_only_whole_file = STORY_ONLY_FILES.contains(&deck_file.path.as_str())
+            || deck_file.path.starts_with("scripts/");
+        if is_story_only_whole_file {
+            diagnostics.push(ownership_diagnostic(
+                "layer.story_only_field",
+                &deck_file.path,
+                "",
+                &format!(
+                    "`{}` may only be provided by the story layer (ADR-022 §3); the deck layer must not provide it",
+                    deck_file.path
+                ),
+            ));
+        }
+    }
+}
+
+fn ownership_diagnostic(code: &str, path: &str, pointer: &str, message: &str) -> Diagnostic {
+    Diagnostic {
+        severity: Severity::Error,
+        code: code.to_string(),
+        message: message.to_string(),
+        path: path.to_string(),
+        pointer: if pointer.is_empty() {
+            None
+        } else {
+            Some(pointer.to_string())
+        },
+        range: None,
+        subject_id: None,
+        related: Vec::new(),
     }
 }
 
@@ -724,7 +843,7 @@ mod tests {
     fn scalar_case_section_merges_per_top_level_key() {
         let deck = vec![file(
             "case.yaml",
-            "case:\n  id: case.deck_default\n  format_version: '3.11.0'\n  title: Deck Title\n  genre: mystery\n",
+            "case:\n  format_version: '3.11.0'\n  title: Deck Title\n  genre: mystery\n",
         )];
         let story = vec![file(
             "case.yaml",
@@ -791,7 +910,7 @@ mod tests {
     fn case_map_preamble_is_per_key_and_variants_merge_by_id() {
         let deck = vec![file(
             "case.yaml",
-            "case:\n  id: case.a\n  map:\n    preamble: Deck preamble\n    variants:\n    - id: map.default\n      source: maps/deck.svg\n    - id: map.alt\n      source: maps/deck-alt.svg\n",
+            "case:\n  map:\n    preamble: Deck preamble\n    variants:\n    - id: map.default\n      source: maps/deck.svg\n    - id: map.alt\n      source: maps/deck-alt.svg\n",
         )];
         let story = vec![file(
             "case.yaml",
@@ -883,7 +1002,7 @@ mod tests {
             ),
             file(
                 "case.yaml",
-                "case:\n  id: case.deck\n  map:\n    variants:\n    - id: map.default\n      source: maps/deck.svg\n    - id: map.alt\n      source: maps/deck-alt.svg\n",
+                "case:\n  map:\n    variants:\n    - id: map.default\n      source: maps/deck.svg\n    - id: map.alt\n      source: maps/deck-alt.svg\n",
             ),
         ];
         let story = vec![
@@ -974,5 +1093,95 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[test]
+    fn story_format_version_is_deck_only_field_even_against_an_empty_deck() {
+        let story = vec![file(
+            "case.yaml",
+            "case:\n  id: case.a\n  format_version: '3.12.0'\n",
+        )];
+        let error = merge_layers(&[], &story).unwrap_err();
+        assert_eq!(error.len(), 1);
+        assert_eq!(error[0].code, "layer.deck_only_field");
+        assert_eq!(error[0].path, "case.yaml");
+        assert_eq!(error[0].pointer.as_deref(), Some("/case/format_version"));
+    }
+
+    #[test]
+    fn story_ruleset_is_deck_only_field() {
+        let deck = vec![file("case.yaml", "case:\n  format_version: '3.12.0'\n")];
+        let story = vec![file(
+            "case.yaml",
+            "case:\n  ruleset:\n    id: ruleset.standard_mystery\n    version: '9.0.0'\n",
+        )];
+        let error = merge_layers(&deck, &story).unwrap_err();
+        assert!(error
+            .iter()
+            .any(|d| d.code == "layer.deck_only_field"
+                && d.pointer.as_deref() == Some("/case/ruleset")));
+    }
+
+    #[test]
+    fn a_field_allowed_in_both_layers_emits_no_ownership_diagnostic() {
+        let deck = vec![file("case.yaml", "case:\n  title: Deck\n")];
+        let story = vec![file("case.yaml", "case:\n  title: Story\n")];
+        let merged = merge_layers(&deck, &story).unwrap();
+        let value = parsed(&merged, "case.yaml");
+        assert_eq!(
+            value.get("case").unwrap().get("title").unwrap().as_str(),
+            Some("Story")
+        );
+    }
+
+    #[test]
+    fn deck_premise_is_story_only_field() {
+        let deck = vec![file("case.yaml", "case:\n  premise: Deck premise\n")];
+        let story = vec![file("case.yaml", "case:\n  title: Story\n")];
+        let error = merge_layers(&deck, &story).unwrap_err();
+        assert_eq!(error.len(), 1);
+        assert_eq!(error[0].code, "layer.story_only_field");
+        assert_eq!(error[0].path, "case.yaml");
+        assert_eq!(error[0].pointer.as_deref(), Some("/case/premise"));
+    }
+
+    #[test]
+    fn deck_solution_is_story_only_field() {
+        let deck = vec![file(
+            "case.yaml",
+            "case:\n  title: Deck\nsolution:\n  max_attempts: 3\n",
+        )];
+        let story = vec![file("case.yaml", "case:\n  title: Story\n")];
+        let error = merge_layers(&deck, &story).unwrap_err();
+        assert!(error.iter().any(
+            |d| d.code == "layer.story_only_field" && d.pointer.as_deref() == Some("/solution")
+        ));
+    }
+
+    #[test]
+    fn deck_end_states_file_is_story_only_field() {
+        let deck = vec![
+            file("case.yaml", "case:\n  title: Deck\n"),
+            file("end_states.yaml", "end_states: []\n"),
+        ];
+        let story = vec![file("case.yaml", "case:\n  title: Story\n")];
+        let error = merge_layers(&deck, &story).unwrap_err();
+        assert!(error
+            .iter()
+            .any(|d| d.code == "layer.story_only_field" && d.path == "end_states.yaml"));
+    }
+
+    #[test]
+    fn deck_story_test_file_under_scripts_is_story_only_field() {
+        let deck = vec![
+            file("case.yaml", "case:\n  title: Deck\n"),
+            file("scripts/end_state.a/replay.json", "{}\n"),
+        ];
+        let story = vec![file("case.yaml", "case:\n  title: Story\n")];
+        let error = merge_layers(&deck, &story).unwrap_err();
+        assert!(error
+            .iter()
+            .any(|d| d.code == "layer.story_only_field"
+                && d.path == "scripts/end_state.a/replay.json"));
     }
 }

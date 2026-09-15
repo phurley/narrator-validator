@@ -647,6 +647,20 @@ impl<'a> Validator<'a> {
         };
         let testimonies = self.nested_testimonies(&characters);
         let facts_enabled = !facts.is_empty();
+        self.validate_no_layer_tombstones(&[
+            settings.as_slice(),
+            routes.as_slice(),
+            characters.as_slice(),
+            entities.as_slice(),
+            events.as_slice(),
+            deductions.as_slice(),
+            flags.as_slice(),
+            commands.as_slice(),
+            triggers.as_slice(),
+            command_costs.as_slice(),
+            facts.as_slice(),
+            testimonies.as_slice(),
+        ]);
 
         if self.is_format_3() {
             self.validate_strict_field_contract(
@@ -2625,6 +2639,33 @@ impl<'a> Validator<'a> {
             });
         }
         merged
+    }
+
+    /// A `{ id, remove: true }` tombstone (ADR-022 §2) is only meaningful to
+    /// `crate::layers::merge_layers`, which drops it while overlaying a deck
+    /// layer. One reaching `validate` means the merge was skipped, so flag it
+    /// directly rather than let it fall through as a confusing missing- or
+    /// unknown-field error on whatever section it landed in.
+    fn validate_no_layer_tombstones(&mut self, groups: &[&[Item]]) {
+        for items in groups {
+            for item in *items {
+                if is_layer_tombstone(&item.mapping) {
+                    self.diagnostics.push(Diagnostic {
+                        severity: Severity::Error,
+                        code: "layer.tombstone_in_effective_set".to_string(),
+                        message: format!(
+                            "`{}` is a layer tombstone (`{{ id, remove: true }}`); tombstones are consumed by merging a story onto its deck and must not reach validation",
+                            item.id
+                        ),
+                        path: item.path.clone(),
+                        pointer: Some(item.pointer.clone()),
+                        range: None,
+                        subject_id: Some(item.id.clone()),
+                        related: Vec::new(),
+                    });
+                }
+            }
+        }
     }
 
     fn validate_command_migration(&mut self, commands: &[Item]) {
@@ -12330,6 +12371,20 @@ fn valid_delay(value: &str) -> bool {
 
 fn escape_pointer(value: &str) -> String {
     value.replace('~', "~0").replace('/', "~1")
+}
+
+/// Mirrors `layers::is_tombstone`: a mapping of exactly `id` and
+/// `remove: true` with no other keys.
+fn is_layer_tombstone(mapping: &Mapping) -> bool {
+    mapping.len() == 2
+        && mapping
+            .get(Value::String("id".to_string()))
+            .and_then(Value::as_str)
+            .is_some()
+        && mapping
+            .get(Value::String("remove".to_string()))
+            .and_then(Value::as_bool)
+            == Some(true)
 }
 
 fn locate_scalar(source: &str, scalar: &str) -> Option<SourceRange> {

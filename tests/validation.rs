@@ -1098,6 +1098,34 @@ fn valid_format_3_repository_has_no_diagnostics() {
     assert!(report.diagnostics.is_empty());
 }
 
+/// A `{ id, remove: true }` tombstone (ADR-022 §2) is only meaningful to
+/// `merge_layers`, which consumes it while overlaying a deck. One reaching
+/// `validate` directly means the merge was skipped.
+#[test]
+fn layer_tombstone_reaching_validate_is_flagged() {
+    let source = VALID_FORMAT_3_STORY.replace(
+        "flags:\n  - id: flag.knife_examined",
+        "flags:\n  - id: flag.tombstoned\n    remove: true\n  - id: flag.knife_examined",
+    );
+    let report = report(source);
+    assert!(report
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "layer.tombstone_in_effective_set"
+            && d.subject_id.as_deref() == Some("flag.tombstoned")));
+}
+
+/// An ordinary flag entry with no `remove` key never triggers the tombstone
+/// diagnostic.
+#[test]
+fn an_ordinary_entry_does_not_emit_the_tombstone_diagnostic() {
+    let report = report(VALID_FORMAT_3_STORY);
+    assert!(!report
+        .diagnostics
+        .iter()
+        .any(|d| d.code == "layer.tombstone_in_effective_set"));
+}
+
 fn with_standard_ruleset(source: &str) -> String {
     source.replace(
         "  format_version: \"3.0.0\"",
