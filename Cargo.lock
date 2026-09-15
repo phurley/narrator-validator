@@ -155,7 +155,7 @@ dependencies = [
 
 [[package]]
 name = "narrator-validator"
-version = "1.18.1"
+version = "1.19.0"
 dependencies = [
  "base64",
  "image",
