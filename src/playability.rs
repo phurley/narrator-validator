@@ -13,7 +13,7 @@ use serde_yaml::{Mapping, Value};
 
 use crate::{Position, SourceFile, SourceRange};
 
-const MODEL_VERSION: u32 = 4;
+const MODEL_VERSION: u32 = 5;
 const MAX_EXPLORED_STATES: usize = 25_000;
 // `search_from`'s bounded-recovery legs are independently budgeted, seeded
 // only from a genuine playthrough witness rather than re-deriving the whole
@@ -247,11 +247,18 @@ struct StepOutcome {
 struct TriggerRule {
     item: LocatedItem,
     on: Option<ActionPattern>,
+    clock: Option<ClockTrigger>,
     when: Vec<Predicate>,
     after: u32,
     effects: Vec<Effect>,
     facts: Vec<String>,
     once: bool,
+    location: Option<String>,
+}
+
+#[derive(Clone)]
+struct ClockTrigger {
+    due_elapsed: u32,
 }
 
 #[derive(Clone)]
@@ -1105,9 +1112,24 @@ impl Model {
                 continue;
             };
             let unsupported_before = self.unsupported.len();
-            let on = field(&item.map, "on")
-                .and_then(Value::as_mapping)
-                .and_then(|map| self.pattern(file, &item.pointer, map, None));
+            let on_map = field(&item.map, "on").and_then(Value::as_mapping);
+            let (on, clock) = if let Some(on_map) = on_map {
+                let has_clock = field(on_map, "clock").is_some();
+                let on_pattern = if !has_clock {
+                    self.pattern(file, &item.pointer, on_map, None)
+                } else {
+                    None
+                };
+                let clock_trigger = if has_clock {
+                    self.read_clock_trigger(file, &item.pointer, on_map)
+                } else {
+                    None
+                };
+                (on_pattern, clock_trigger)
+            } else {
+                (None, None)
+            };
+            let location = string(&item.map, "location").map(|s| s.to_string());
             let when = self.predicates(file, &item.pointer, &item.map);
             let after = string(&item.map, "after")
                 .and_then(parse_duration)
@@ -1123,17 +1145,6 @@ impl Model {
             let effects = self.effects(file, &item.pointer, &item.map, false);
             if self.unsupported.len() > unsupported_before {
                 self.unsupported_triggers.insert(item.id.clone());
-                // Unlike an unsupported command (whose entire action
-                // becomes unavailable, so it can never be part of any
-                // witness) an unsupported trigger piggybacks on whatever
-                // command matches its `on` pattern -- that command stays
-                // perfectly ordinary and available. A witness can
-                // therefore genuinely take the action that would have set
-                // this trigger off in the real game, even though the
-                // model silently drops its effect. Tag every note this
-                // trigger just raised (regardless of which specific
-                // sub-reason) so `witness_reached_by` can check whether
-                // this witness actually shadowed it.
                 for note in &mut self.unsupported[unsupported_before..] {
                     note.search_excluded = false;
                     note.witness_subject = Some(item.id.clone());
@@ -1167,13 +1178,31 @@ impl Model {
                     once: bool_field(&item.map, "once").unwrap_or(true),
                     item,
                     on,
+                    clock,
                     when,
                     after,
                     effects,
                     facts,
+                    location,
                 },
             );
         }
+    }
+
+    fn read_clock_trigger(
+        &mut self,
+        _file: &SourceFile,
+        _pointer: &str,
+        on: &Mapping,
+    ) -> Option<ClockTrigger> {
+        let clock_map = field(on, "clock")?.as_mapping()?;
+        let day = u64_field(clock_map, "day").unwrap_or(0) as u32;
+        let time_str = string(clock_map, "time")?;
+        let time_minutes = parse_clock(time_str)?;
+        let day_minutes = day.saturating_mul(24 * 60);
+        let absolute_minutes = day_minutes.saturating_add(time_minutes);
+        let due_elapsed = absolute_minutes.saturating_sub(self.initial_minutes);
+        Some(ClockTrigger { due_elapsed })
     }
 
     fn read_ends(&mut self, file: &SourceFile, section: &str, values: &[Value], legacy: bool) {
@@ -2081,8 +2110,8 @@ impl Model {
 
     fn precompute_elapsed_equivalence_horizon(&mut self) {
         // Absolute clock values can affect the model only while an authored
-        // predicate or terminal threshold can still change truth value. One
-        // minute beyond the latest boundary, elapsed values are observationally
+        // predicate, clock trigger, or terminal threshold can still change truth value.
+        // One minute beyond the latest boundary, elapsed values are observationally
         // equivalent except for delayed work, which search_state_key preserves
         // as time remaining.
         let predicate_thresholds = self
@@ -2096,8 +2125,15 @@ impl Model {
                 | Predicate::TimeBefore(value) => Some(*value),
                 _ => None,
             });
+        let clock_trigger_thresholds = self.triggers.values().filter_map(|trigger| {
+            trigger
+                .clock
+                .as_ref()
+                .map(|c| self.initial_minutes.saturating_add(c.due_elapsed))
+        });
         let latest = predicate_thresholds
             .chain(self.ends.iter().filter_map(|end| end.at_or_after))
+            .chain(clock_trigger_thresholds)
             .max();
         self.elapsed_equivalence_horizon = latest.map_or(0, |threshold| {
             threshold
@@ -3598,7 +3634,25 @@ impl Model {
                 if self.unsupported_triggers.contains(&trigger.item.id) {
                     continue;
                 }
-                if trigger.on.is_none()
+                if let Some(clock) = &trigger.clock {
+                    if state.elapsed >= clock.due_elapsed
+                        && !state.completed.contains(&trigger.item.id)
+                        && !state
+                            .pending
+                            .iter()
+                            .any(|pending| pending.trigger == trigger.item.id)
+                    {
+                        if predicates_hold(&trigger.when, state, self.initial_minutes) {
+                            state.pending.push(Pending {
+                                due: clock.due_elapsed,
+                                trigger: trigger.item.id.clone(),
+                            });
+                            state.pending.sort();
+                        } else if trigger.once {
+                            state.completed.insert(trigger.item.id.clone());
+                        }
+                    }
+                } else if trigger.on.is_none()
                     && !state.completed.contains(&trigger.item.id)
                     && !state
                         .pending
@@ -3729,15 +3783,34 @@ impl Model {
                 .unwrap_or(0);
             let mut chain = vec![end.item.id.clone()];
             chain.extend(self.missing_chain(id, states, &mut BTreeSet::new()));
-            (
-                "playability.missing_requirement",
-                format!(
-                    "no supported action can establish required `{id}`; blocked chain: {}",
-                    chain.join(" -> ")
-                ),
-                chain,
-                format!("{}/requires/{requirement_index}", end.item.pointer),
-            )
+            // Check if the chain includes a clock trigger
+            let clock_trigger_id = chain.iter().find(|trigger_id| {
+                self.triggers
+                    .get(*trigger_id)
+                    .map(|t| t.clock.is_some())
+                    .unwrap_or(false)
+            });
+            if let Some(trigger_id) = clock_trigger_id {
+                (
+                    "playability.route_time_blocked",
+                    format!(
+                        "clock trigger `{trigger_id}` blocks the only path to this outcome; blocked chain: {}",
+                        chain.join(" -> ")
+                    ),
+                    chain.clone(),
+                    format!("{}/requires/{requirement_index}", end.item.pointer),
+                )
+            } else {
+                (
+                    "playability.missing_requirement",
+                    format!(
+                        "no supported action can establish required `{id}`; blocked chain: {}",
+                        chain.join(" -> ")
+                    ),
+                    chain,
+                    format!("{}/requires/{requirement_index}", end.item.pointer),
+                )
+            }
         } else if end.minimum_points > states.iter().map(|state| state.score).max().unwrap_or(0) {
             (
                 "playability.insufficient_score",
@@ -3804,6 +3877,13 @@ impl Model {
                     _ => None,
                 })
                 .or_else(|| fact.on.as_ref().map(|on| on.command.clone()))
+                .or_else(|| {
+                    // If this fact is owned by a clock trigger, trace to that trigger
+                    self.triggers
+                        .iter()
+                        .find(|(_, trigger)| trigger.facts.contains(&id.to_string()))
+                        .map(|(trigger_id, _)| trigger_id.clone())
+                })
         } else if let Some(trigger) = self.triggers.get(id) {
             trigger.on.as_ref().map(|on| on.command.clone())
         } else if let Some(step) = self.solve_steps.iter().find(|step| {
@@ -3846,8 +3926,11 @@ fn complete_trigger(
 ) {
     state.completed.insert(trigger.item.id.clone());
     unlocks.insert(trigger.item.id.clone());
+    let is_clock = trigger.clock.is_some();
     for fact in &trigger.facts {
-        acquire_fact(state, fact, unlocks, auto_facts);
+        if !is_clock || trigger.location.as_ref() == Some(&state.location) {
+            acquire_fact(state, fact, unlocks, auto_facts);
+        }
     }
     for effect in &trigger.effects {
         apply_effect(state, effect, unlocks, auto_facts);
@@ -3989,11 +4072,13 @@ mod elapsed_equivalence_tests {
             TriggerRule {
                 item: item("trigger.at"),
                 on: None,
+                clock: None,
                 when: vec![Predicate::TimeEqual(75), Predicate::TimeBefore(78)],
                 after: 0,
                 effects: Vec::new(),
                 facts: Vec::new(),
                 once: true,
+                location: None,
             },
         );
         model.ends.push(EndRule {
@@ -5080,6 +5165,238 @@ flags:
             end.status,
             PlayabilityStatus::Proved,
             "a non-portable entity must not let the cross-room trigger fire: {end:#?}"
+        );
+    }
+
+    #[test]
+    fn clock_trigger_opens_route_at_scheduled_time() {
+        let mut model = Model {
+            entries: vec!["setting.start".to_string(), "setting.end".to_string()],
+            initial_minutes: 9 * 60,
+            routes: vec![
+                Route {
+                    id: "route.locked".to_string(),
+                    from: "setting.start".to_string(),
+                    to: "setting.locked".to_string(),
+                    minutes: 60,
+                    bidirectional: false,
+                    requirements: vec!["flag.locked_open".to_string()],
+                },
+                Route {
+                    id: "route.end".to_string(),
+                    from: "setting.locked".to_string(),
+                    to: "setting.end".to_string(),
+                    minutes: 1,
+                    bidirectional: false,
+                    requirements: vec![],
+                },
+                Route {
+                    id: "route.wait".to_string(),
+                    from: "setting.start".to_string(),
+                    to: "setting.start".to_string(),
+                    minutes: 120,
+                    bidirectional: false,
+                    requirements: vec![],
+                },
+            ],
+            ..Model::default()
+        };
+        let item = |id: &str| LocatedItem {
+            id: id.to_string(),
+            path: "triggers.yaml".to_string(),
+            pointer: "/triggers/0".to_string(),
+            range: None,
+            map: Mapping::new(),
+            owner: None,
+        };
+        model.triggers.insert(
+            "trigger.unlock".to_string(),
+            TriggerRule {
+                item: item("trigger.unlock"),
+                on: None,
+                clock: Some(ClockTrigger { due_elapsed: 60 }),
+                when: vec![],
+                after: 0,
+                effects: vec![Effect::SetFlag("flag.locked_open".to_string())],
+                facts: vec![],
+                once: true,
+                location: Some("setting.start".to_string()),
+            },
+        );
+        model.ends.push(EndRule {
+            item: item("end.distant"),
+            outcome: "won".to_string(),
+            requirements: vec![],
+            minimum_points: 0,
+            at_or_after: None,
+            solution_condition: false,
+        });
+        model.precompute_elapsed_equivalence_horizon();
+        let analysis = model.search(true, true);
+        let end = analysis
+            .terminal_paths
+            .iter()
+            .find(|e| e.id == "end.distant")
+            .expect("end.distant");
+        assert_eq!(
+            end.status,
+            PlayabilityStatus::Proved,
+            "clock trigger should unlock the route after elapsed time: {end:#?}"
+        );
+    }
+
+    #[test]
+    fn clock_trigger_fact_learned_only_at_location() {
+        let mut model = Model {
+            entries: vec!["setting.start".to_string()],
+            initial_minutes: 9 * 60,
+            ..Model::default()
+        };
+        let item = |id: &str| LocatedItem {
+            id: id.to_string(),
+            path: "triggers.yaml".to_string(),
+            pointer: "/triggers/0".to_string(),
+            range: None,
+            map: Mapping::new(),
+            owner: None,
+        };
+        model.triggers.insert(
+            "trigger.event".to_string(),
+            TriggerRule {
+                item: item("trigger.event"),
+                on: None,
+                clock: Some(ClockTrigger {
+                    due_elapsed: 12 * 60,
+                }),
+                when: vec![],
+                after: 0,
+                effects: vec![],
+                facts: vec!["fact.news".to_string()],
+                once: true,
+                location: Some("setting.elsewhere".to_string()),
+            },
+        );
+        let mut fact_item = item("fact.news");
+        fact_item.owner = Some("trigger.event".to_string());
+        model.facts.insert(
+            "fact.news".to_string(),
+            FactRule {
+                item: fact_item,
+                on: None,
+                when: vec![],
+                opening: false,
+                about: vec![],
+                statement: "News".to_string(),
+            },
+        );
+        model.ends.push(EndRule {
+            item: item("end.knows"),
+            outcome: "won".to_string(),
+            requirements: vec!["fact.news".to_string()],
+            minimum_points: 0,
+            at_or_after: None,
+            solution_condition: false,
+        });
+        model.precompute_elapsed_equivalence_horizon();
+        let analysis = model.search(true, true);
+        let end = analysis
+            .terminal_paths
+            .iter()
+            .find(|e| e.id == "end.knows")
+            .expect("end.knows");
+        assert_ne!(
+            end.status,
+            PlayabilityStatus::Proved,
+            "fact owned by clock trigger at unreachable location should block the end: {end:#?}"
+        );
+        let blocker = end
+            .blocker
+            .as_ref()
+            .expect("a blocked end carries a blocker");
+        assert_eq!(
+            blocker.code, "playability.route_time_blocked",
+            "clock-trigger-blocked facts should report as route_time_blocked: {blocker:#?}"
+        );
+        assert!(
+            blocker.message.contains("trigger.event"),
+            "the blocker message should name the blocking clock trigger: {blocker:#?}"
+        );
+    }
+
+    #[test]
+    fn clock_trigger_when_predicate_consumed_on_one_branch() {
+        let mut model = Model {
+            entries: vec!["setting.start".to_string()],
+            initial_minutes: 9 * 60,
+            routes: vec![
+                Route {
+                    id: "route.wait".to_string(),
+                    from: "setting.start".to_string(),
+                    to: "setting.start".to_string(),
+                    minutes: 120,
+                    bidirectional: false,
+                    requirements: vec![],
+                },
+                Route {
+                    id: "route.act".to_string(),
+                    from: "setting.start".to_string(),
+                    to: "setting.act".to_string(),
+                    minutes: 1,
+                    bidirectional: false,
+                    requirements: vec![],
+                },
+                Route {
+                    id: "route.aftermath".to_string(),
+                    from: "setting.act".to_string(),
+                    to: "setting.aftermath".to_string(),
+                    minutes: 0,
+                    bidirectional: false,
+                    requirements: vec![],
+                },
+            ],
+            ..Model::default()
+        };
+        let item = |id: &str| LocatedItem {
+            id: id.to_string(),
+            path: "triggers.yaml".to_string(),
+            pointer: "/triggers/0".to_string(),
+            range: None,
+            map: Mapping::new(),
+            owner: None,
+        };
+        model.triggers.insert(
+            "trigger.conditional".to_string(),
+            TriggerRule {
+                item: item("trigger.conditional"),
+                on: None,
+                clock: Some(ClockTrigger { due_elapsed: 60 }),
+                when: vec![Predicate::At("setting.start".to_string())],
+                after: 0,
+                effects: vec![Effect::SetFlag("flag.fired".to_string())],
+                facts: vec![],
+                once: true,
+                location: Some("setting.start".to_string()),
+            },
+        );
+        model.ends.push(EndRule {
+            item: item("end.fired"),
+            outcome: "won".to_string(),
+            requirements: vec!["flag.fired".to_string()],
+            minimum_points: 0,
+            at_or_after: None,
+            solution_condition: false,
+        });
+        model.precompute_elapsed_equivalence_horizon();
+        let analysis = model.search(true, true);
+        let fired_end = analysis
+            .terminal_paths
+            .iter()
+            .find(|e| e.id == "end.fired")
+            .expect("end.fired");
+        assert_eq!(
+            fired_end.status,
+            PlayabilityStatus::Proved,
+            "trigger should fire if player waits at start: {fired_end:#?}"
         );
     }
 }
