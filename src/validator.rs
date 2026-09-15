@@ -552,6 +552,12 @@ impl<'a> Validator<'a> {
             .is_some_and(|version| version.major == 3 && version.minor >= 10)
     }
 
+    fn is_format_3_11_or_later(&self) -> bool {
+        self.format_version
+            .as_ref()
+            .is_some_and(|version| version.major == 3 && version.minor >= 11)
+    }
+
     fn uses_step_solution_ruleset(&self) -> bool {
         self.ruleset.as_ref().is_some_and(|ruleset| {
             ruleset.id == STANDARD_MYSTERY_RULESET_ID
@@ -3204,6 +3210,8 @@ impl<'a> Validator<'a> {
                 "on",
                 "when",
                 "after",
+                "narrative",
+                "speaker",
                 "author_notes",
             ],
         );
@@ -8737,7 +8745,9 @@ impl<'a> Validator<'a> {
             return;
         };
         for key in on.keys().filter_map(Value::as_str) {
-            if !matches!(key, "command" | "parameters" | "actor") {
+            let known_field = matches!(key, "command" | "parameters" | "actor")
+                || (key == "clock" && item.kind == Kind::Trigger);
+            if !known_field {
                 self.push(
                     Severity::Error,
                     "action_match.unknown_field",
@@ -8747,6 +8757,12 @@ impl<'a> Validator<'a> {
                     None,
                     Some(item.id.clone()),
                 );
+            }
+        }
+        if item.kind == Kind::Trigger {
+            if let Some(clock) = on.get(Value::String("clock".to_string())) {
+                self.validate_clock_action_match(item, on, clock, &pointer);
+                return;
             }
         }
         let command_id = string_field(on, "command").filter(|id| !id.trim().is_empty());
@@ -9030,6 +9046,289 @@ impl<'a> Validator<'a> {
                 None,
                 Some(item.id.clone()),
             );
+        }
+    }
+
+    /// A clock trigger matches the shared clock instead of a player command
+    /// (ADR-019, Format 3.11). The `on.clock` shape is validated here, and
+    /// everything that only makes sense for a command match (`command`,
+    /// `parameters`, `actor`) is rejected as exclusive with it.
+    fn validate_clock_action_match(
+        &mut self,
+        item: &Item,
+        on: &Mapping,
+        clock: &Value,
+        pointer: &str,
+    ) {
+        if !self.is_format_3_11_or_later() {
+            self.push(
+                Severity::Error,
+                "trigger.clock_format_incompatible",
+                "`on.clock` requires story format 3.11.0 or later".to_string(),
+                &item.path,
+                Some(format!("{pointer}/clock")),
+                None,
+                Some(item.id.clone()),
+            );
+        }
+        for field in ["command", "parameters", "actor"] {
+            if on.contains_key(Value::String(field.to_string())) {
+                self.push(
+                    Severity::Error,
+                    "trigger.clock_exclusive_field",
+                    format!(
+                        "`on.clock` and `on.{field}` are mutually exclusive; a clock trigger matches the clock, not a command"
+                    ),
+                    &item.path,
+                    Some(format!("{pointer}/{}", escape_pointer(field))),
+                    None,
+                    Some(item.id.clone()),
+                );
+            }
+        }
+        let clock_pointer = format!("{pointer}/clock");
+        let Some(clock) = clock.as_mapping() else {
+            self.push(
+                Severity::Error,
+                "trigger.clock_type",
+                "`on.clock` must be a mapping with optional `day` and a quoted `time`".to_string(),
+                &item.path,
+                Some(clock_pointer),
+                None,
+                Some(item.id.clone()),
+            );
+            return;
+        };
+        for key in clock.keys().filter_map(Value::as_str) {
+            if !matches!(key, "day" | "time") {
+                self.push(
+                    Severity::Error,
+                    "trigger.clock_field",
+                    format!("`{key}` is not valid in `on.clock`; use `day` and `time`"),
+                    &item.path,
+                    Some(format!("{clock_pointer}/{}", escape_pointer(key))),
+                    None,
+                    Some(item.id.clone()),
+                );
+            }
+        }
+        if let Some(day) = clock.get(Value::String("day".to_string())) {
+            if !day.as_i64().is_some_and(|day| day >= 0) {
+                self.push(
+                    Severity::Error,
+                    "trigger.clock_day",
+                    "`on.clock.day` must be a non-negative integer; it defaults to the case's initial day".to_string(),
+                    &item.path,
+                    Some(format!("{clock_pointer}/day")),
+                    None,
+                    Some(item.id.clone()),
+                );
+            }
+        }
+        if !string_field(clock, "time").is_some_and(valid_time) {
+            self.push(
+                Severity::Error,
+                "trigger.clock_time",
+                "`on.clock` requires a quoted 24-hour HH:MM `time`".to_string(),
+                &item.path,
+                Some(format!("{clock_pointer}/time")),
+                None,
+                Some(item.id.clone()),
+            );
+        }
+    }
+
+    /// Trigger-level requirements that apply only to clock triggers (ADR-019):
+    /// `once: true`, a witnessed `location`, optional witnessed `narrative`
+    /// and `speaker`, the one-shot `when` consumption warning, and the
+    /// rejection of actor predicates and effect-level `after` delays.
+    fn validate_clock_trigger(&mut self, trigger: &Item) {
+        match trigger.mapping.get(Value::String("once".to_string())) {
+            Some(Value::Bool(true)) => {}
+            Some(_) => self.push(
+                Severity::Error,
+                "trigger.clock_once_required",
+                "a clock trigger must declare `once: true` because it is evaluated exactly once, when first due".to_string(),
+                &trigger.path,
+                Some(format!("{}/once", trigger.pointer)),
+                None,
+                Some(trigger.id.clone()),
+            ),
+            None => self.push(
+                Severity::Error,
+                "trigger.clock_once_required",
+                "`once: true` is required on a clock trigger because it is evaluated exactly once, when first due".to_string(),
+                &trigger.path,
+                Some(format!("{}/once", trigger.pointer)),
+                None,
+                Some(trigger.id.clone()),
+            ),
+        }
+        match trigger.mapping.get(Value::String("location".to_string())) {
+            Some(Value::String(id)) if !id.trim().is_empty() => {
+                match self.definitions.get(id.as_str()) {
+                    Some(definition) if definition.kind == Kind::Setting => {}
+                    Some(_) => self.push(
+                        Severity::Error,
+                        "reference.wrong_type",
+                        format!("`{id}` must refer to a setting"),
+                        &trigger.path,
+                        Some(format!("{}/location", trigger.pointer)),
+                        locate_scalar(&trigger.source, id),
+                        Some(id.clone()),
+                    ),
+                    None => self.push(
+                        Severity::Error,
+                        "reference.unknown",
+                        format!("reference `{id}` is not defined"),
+                        &trigger.path,
+                        Some(format!("{}/location", trigger.pointer)),
+                        locate_scalar(&trigger.source, id),
+                        Some(id.clone()),
+                    ),
+                }
+            }
+            _ => self.push(
+                Severity::Error,
+                "trigger.clock_location_required",
+                "a clock trigger must declare `location` naming the setting where the event happens".to_string(),
+                &trigger.path,
+                Some(format!("{}/location", trigger.pointer)),
+                None,
+                Some(trigger.id.clone()),
+            ),
+        }
+        let narrative = trigger
+            .mapping
+            .get(Value::String("narrative".to_string()))
+            .and_then(Value::as_str)
+            .filter(|narrative| !narrative.trim().is_empty());
+        if trigger
+            .mapping
+            .contains_key(Value::String("narrative".to_string()))
+            && narrative.is_none()
+        {
+            self.push(
+                Severity::Error,
+                "trigger.clock_narrative",
+                "clock trigger `narrative` must be a non-empty string".to_string(),
+                &trigger.path,
+                Some(format!("{}/narrative", trigger.pointer)),
+                None,
+                Some(trigger.id.clone()),
+            );
+        }
+        if let Some(speaker) = trigger.mapping.get(Value::String("speaker".to_string())) {
+            if narrative.is_none() {
+                self.push(
+                    Severity::Error,
+                    "trigger.clock_speaker_without_narrative",
+                    "clock trigger `speaker` requires `narrative`; the sentence is dialogue the speaker delivers to the witnesses".to_string(),
+                    &trigger.path,
+                    Some(format!("{}/speaker", trigger.pointer)),
+                    None,
+                    Some(trigger.id.clone()),
+                );
+            }
+            let Some(id) = speaker.as_str().filter(|id| !id.trim().is_empty()) else {
+                self.push(
+                    Severity::Error,
+                    "trigger.clock_speaker",
+                    "clock trigger `speaker` must be an authored character ID".to_string(),
+                    &trigger.path,
+                    Some(format!("{}/speaker", trigger.pointer)),
+                    None,
+                    Some(trigger.id.clone()),
+                );
+                return;
+            };
+            match self.definitions.get(id) {
+                Some(definition) if definition.kind == Kind::Character => {}
+                Some(_) => self.push(
+                    Severity::Error,
+                    "reference.wrong_type",
+                    format!("`{id}` must refer to a character"),
+                    &trigger.path,
+                    Some(format!("{}/speaker", trigger.pointer)),
+                    locate_scalar(&trigger.source, id),
+                    Some(id.to_string()),
+                ),
+                None => self.push(
+                    Severity::Error,
+                    "reference.unknown",
+                    format!("reference `{id}` is not defined"),
+                    &trigger.path,
+                    Some(format!("{}/speaker", trigger.pointer)),
+                    locate_scalar(&trigger.source, id),
+                    Some(id.to_string()),
+                ),
+            }
+        }
+        if let Some(when) = trigger.mapping.get(Value::String("when".to_string())) {
+            self.push(
+                Severity::Warning,
+                "trigger.clock_when_consumed",
+                "a clock trigger is evaluated exactly once, when first due; if its `when` predicates fail at that moment the trigger is consumed and never fires".to_string(),
+                &trigger.path,
+                Some(format!("{}/when", trigger.pointer)),
+                None,
+                Some(trigger.id.clone()),
+            );
+            if let Some(predicates) = when
+                .as_mapping()
+                .and_then(|when| when.get(Value::String("all".to_string())))
+                .and_then(Value::as_sequence)
+            {
+                for (index, predicate) in predicates.iter().enumerate() {
+                    let kind = predicate
+                        .as_mapping()
+                        .filter(|predicate| predicate.len() == 1)
+                        .and_then(|predicate| predicate.keys().next().cloned())
+                        .and_then(|key| key.as_str().map(str::to_string));
+                    if let Some(kind) = kind {
+                        if matches!(kind.as_str(), "at" | "knows") {
+                            self.push(
+                                Severity::Error,
+                                "trigger.clock_actor_predicate",
+                                format!(
+                                    "the `{kind}` predicate requires an acting player, which a clock trigger does not have"
+                                ),
+                                &trigger.path,
+                                Some(format!(
+                                    "{}/when/all/{}/{}",
+                                    trigger.pointer,
+                                    index,
+                                    escape_pointer(&kind)
+                                )),
+                                None,
+                                Some(trigger.id.clone()),
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(effects) = trigger
+            .mapping
+            .get(Value::String("effects".to_string()))
+            .and_then(Value::as_sequence)
+        {
+            for (index, effect) in effects.iter().enumerate() {
+                if effect
+                    .as_mapping()
+                    .is_some_and(|effect| effect.contains_key(Value::String("after".to_string())))
+                {
+                    self.push(
+                        Severity::Error,
+                        "trigger.clock_effect_after",
+                        "a clock trigger already has a due time; its effects must not carry an `after` delay".to_string(),
+                        &trigger.path,
+                        Some(format!("{}/effects/{index}/after", trigger.pointer)),
+                        None,
+                        Some(trigger.id.clone()),
+                    );
+                }
+            }
         }
     }
 
@@ -9340,6 +9639,11 @@ impl<'a> Validator<'a> {
                 .map(str::to_string)
                 .collect::<BTreeSet<_>>();
             for trigger in triggers {
+                let is_clock_trigger = trigger
+                    .mapping
+                    .get(Value::String("on".to_string()))
+                    .and_then(Value::as_mapping)
+                    .is_some_and(|on| on.contains_key(Value::String("clock".to_string())));
                 for field in [
                     "command",
                     "parameters",
@@ -9348,6 +9652,13 @@ impl<'a> Validator<'a> {
                     "any_of",
                     "all_of",
                 ] {
+                    // A clock trigger owns its trigger-level `location`: it
+                    // names the setting where the event happens and its
+                    // witnesses gather (ADR-019). It is not a legacy match
+                    // gate there.
+                    if is_clock_trigger && field == "location" {
+                        continue;
+                    }
                     if trigger
                         .mapping
                         .contains_key(Value::String(field.to_string()))
@@ -9366,6 +9677,9 @@ impl<'a> Validator<'a> {
                     }
                 }
                 self.validate_action_match(trigger, None, true, commands);
+                if is_clock_trigger {
+                    self.validate_clock_trigger(trigger);
+                }
                 self.validate_persistent_when(
                     &trigger.mapping,
                     &trigger.path,
@@ -9415,8 +9729,18 @@ impl<'a> Validator<'a> {
                     .get(Value::String("facts".to_string()))
                     .and_then(Value::as_sequence)
                     .is_some_and(|facts| !facts.is_empty());
+                // A clock trigger's witnessed `narrative` is itself an
+                // observable result (ADR-019); a narration-only clock
+                // trigger still does something the players see.
+                let has_narrative = is_clock_trigger
+                    && trigger
+                        .mapping
+                        .get(Value::String("narrative".to_string()))
+                        .and_then(Value::as_str)
+                        .is_some_and(|narrative| !narrative.trim().is_empty());
                 if !has_effect
                     && !has_result
+                    && !has_narrative
                     && !referenced_completions.contains(trigger.id.as_str())
                 {
                     self.push(

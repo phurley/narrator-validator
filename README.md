@@ -158,12 +158,23 @@ annotations. Inputs:
 ## Story format versions
 
 Every story declares a quoted semantic version at `case.format_version`.
-This validator authors format `3.7.0`. Format 3 minor and patch releases remain
+This validator authors format `3.11.0`. Format 3 minor and patch releases remain
 structurally compatible within the major format, while capabilities added by a
 minor release must be explicitly negotiated through `case.features`. The
 format-1 validation path remains for legacy repositories, while format-2
 repositories stop with focused migration
 guidance before the strict format-3 schema runs.
+
+Format 3.11 lets a trigger match the shared clock instead of a player
+command: `on.clock` is `{day?, time}` with a whole-minute quoted `time` and a
+`day` defaulting to the case's initial day. A clock trigger is evaluated
+exactly once, when first due, must declare `once: true` and a witnessed
+`location`, may carry player-safe `narrative` and an optional `speaker`, and
+reuses the existing effect and nested-fact vocabulary. A failed `when`
+predicate consumes a clock trigger permanently — the validator warns on the
+consumption rule and rejects actor-bound predicates. Duplicate `(day, time)`
+pairs are allowed; authored order is the tiebreak. Standard mystery ruleset 9
+is retained. See [Story Format 3.11](docs/story-format-3.11.md).
 
 Format 3.8 adds an optional `case.map`: a presentational floor plan with a
 narratable, reference-aware `preamble` and an ordered list of variants, each
@@ -215,7 +226,8 @@ privacy decisions are recorded in
 [Story Format 3.5](docs/story-format-3.5.md),
 [Story Format 3.6](docs/story-format-3.6.md),
 [Story Format 3.7](docs/story-format-3.7.md),
-[Story Format 3.8](docs/story-format-3.8.md), and
+[Story Format 3.8](docs/story-format-3.8.md),
+[Story Format 3.11](docs/story-format-3.11.md), and
 [ADR 0001](docs/adr/0001-story-format-3.1-character-presence-and-command-candidates.md).
 The [ADR index](docs/adr/README.md) is the discovery point for architecture
 decisions shared by validator consumers.

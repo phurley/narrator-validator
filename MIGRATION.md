@@ -1,3 +1,20 @@
+## Format 3.11 clock triggers
+
+Set `case.format_version: "3.11.0"`. Standard mystery ruleset 9 is retained;
+no ruleset version is published for this change. A trigger may now match the
+shared clock instead of a command: `on.clock` is `{day?, time}` where `time`
+is a quoted whole-minute `HH:MM` and `day` defaults to the case's initial day.
+A clock trigger must declare `once: true` — it is evaluated exactly once, when
+first due, and a failed `when` predicate consumes it permanently (the
+validator warns on clock-trigger `when` predicates). It must declare
+`location` naming the setting where the event happens and whose players
+witness it; optional `narrative` and `speaker` deliver player-safe prose or
+speaker dialogue to those witnesses; effects reuse the existing operation
+vocabulary but reject `after:` delays; facts follow the existing nested-fact
+rules. `on.clock` is exclusive with `on.command`, `on.parameters` and
+`on.actor`; duplicate `(day, time)` pairs are allowed and authored order is
+the tiebreak. See [Story Format 3.11](docs/story-format-3.11.md).
+
 ## Format 3.10 / ruleset 9
 
 Select `case.format_version: "3.10.0"` and standard mystery ruleset `9.0.0`.
