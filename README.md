@@ -757,10 +757,8 @@ characters:
         reveals: [fact.mara_claimed_generator_alibi]
 ```
 
-`voice_id` may be omitted. When present, it selects the character's
-ElevenLabs voice for generated dialogue and must be a 1–128 character ID made
-only from ASCII letters, numbers, `-`, or `_`. It is delivery metadata and is
-not exposed as player-safe story content.
+`voice_id` is deprecated and ignored. It previously selected the character's
+ElevenLabs voice for generated dialogue but is no longer used; narration now uses a single narrator voice (see ADR-020). Authors should remove it from their stories.
 
 `portrayal` may be omitted. When present, it must be a non-empty mapping with
 only `demeanor` and/or `speech_style`, and each present value must be a

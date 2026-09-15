@@ -2919,16 +2919,18 @@ fn accepts_player_safe_portrayal_and_ordered_testimony_for_all_characters() {
 }
 
 #[test]
-fn character_voice_id_is_optional_and_validates_elevenlabs_identifier_shape() {
+fn character_voice_id_is_deprecated_with_a_warning() {
     let valid = report(format_3_story_with_character_fields(
         "    voice_id: JBFqnCBsd6RMkjVDRZzb\n",
     ));
     assert!(
-        !valid
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "character.voice_id"),
-        "unexpected voice diagnostic: {:#?}",
+        valid.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "character.voice_id_deprecated"
+                && diagnostic.pointer.as_deref() == Some("/characters/1/voice_id")
+                && diagnostic.subject_id.as_deref() == Some("character.culprit")
+                && diagnostic.severity == crate::Severity::Warning
+        }),
+        "expected character.voice_id_deprecated warning: {:#?}",
         valid.diagnostics
     );
 
@@ -2937,20 +2939,22 @@ fn character_voice_id_is_optional_and_validates_elevenlabs_identifier_shape() {
             "    voice_id: {invalid}\n"
         )));
         assert!(report.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "character.voice_id"
+            diagnostic.code == "character.voice_id_deprecated"
                 && diagnostic.pointer.as_deref() == Some("/characters/1/voice_id")
                 && diagnostic.subject_id.as_deref() == Some("character.culprit")
+                && diagnostic.severity == crate::Severity::Warning
         }));
     }
 
-    let too_long = "v".repeat(129);
-    let report = report(format_3_story_with_character_fields(&format!(
-        "    voice_id: {too_long}\n"
-    )));
-    assert!(report
-        .diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.code == "character.voice_id"));
+    let no_voice_id = report(VALID_FORMAT_3_STORY);
+    assert!(
+        !no_voice_id
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "character.voice_id_deprecated"),
+        "unexpected voice_id_deprecated diagnostic when voice_id is absent: {:#?}",
+        no_voice_id.diagnostics
+    );
 }
 
 #[test]
