@@ -87,7 +87,16 @@ run rustflags bash scripts/check-reproducible-rustflags.sh
 run release-tag bash scripts/test-check-release-tag.sh
 run fmt       "${CARGO[@]}" fmt --check
 run clippy    "${CARGO[@]}" clippy --all-targets --all-features -- -D warnings
-run test      "${CARGO[@]}" test --all-features
+# Prefer cargo-nextest when installed (per-test processes, timeouts; see
+# .config/nextest.toml); plain cargo test otherwise. nextest does not run
+# doctests, so they get their own step in that branch to keep coverage
+# identical to `cargo test --all-features`.
+if "${CARGO[@]}" nextest --version >/dev/null 2>&1; then
+  run test      "${CARGO[@]}" nextest run --all-features
+  run doctest   "${CARGO[@]}" test --doc --all-features
+else
+  run test      "${CARGO[@]}" test --all-features
+fi
 
 if [ "$QUICK" -eq 0 ]; then
   run wasm-check  "${CARGO[@]}" check --release --target wasm32-unknown-unknown --features wasm --lib
