@@ -7440,3 +7440,288 @@ fn adjacent_unlock_paths_are_inconclusive_until_the_reducer_is_modeled() {
         "{full:#?}"
     );
 }
+
+const FORMAT_3_11_CLOCK_STORY: &str = include_str!("fixtures/format-3.11-clock-story.yaml");
+
+fn format_3_11_clock_story() -> String {
+    FORMAT_3_11_CLOCK_STORY.to_string()
+}
+
+#[test]
+fn format_3_11_clock_story_validates_clean() {
+    let result = report(format_3_11_clock_story());
+    assert!(result.valid, "{:#?}", result.diagnostics);
+    assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+    assert_eq!(result.format_version.as_deref(), Some("3.11.0"));
+}
+
+#[test]
+fn clock_triggers_require_format_3_11() {
+    // Format 3.10 carries every other rule over unchanged, so the gate error
+    // must name the field and the required version and be the only complaint.
+    let result = report(format_3_11_clock_story().replace("3.11.0", "3.10.0"));
+    assert!(!result.valid, "{:#?}", result.diagnostics);
+    let gate = result
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "trigger.clock_format_incompatible")
+        .expect("format gate error");
+    assert!(
+        gate.message.contains("`on.clock`") && gate.message.contains("3.11.0"),
+        "{gate:#?}"
+    );
+    assert_eq!(gate.pointer.as_deref(), Some("/triggers/0/on/clock"));
+}
+
+#[test]
+fn clock_triggers_are_exclusive_with_command_matches() {
+    for added in [
+        "\n      command: command.solve",
+        "\n      parameters:\n        target: entity.knife",
+        "\n      actor: character.culprit",
+    ] {
+        let result = report(format_3_11_clock_story().replace(
+            "    on:\n      clock:\n        day: 0\n        time: \"21:30\"",
+            &format!("    on:\n      clock:\n        day: 0\n        time: \"21:30\"{added}"),
+        ));
+        assert!(
+            result
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code == "trigger.clock_exclusive_field"),
+            "{added}: {:#?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
+fn clock_triggers_require_once_true() {
+    let missing = report(format_3_11_clock_story().replace("    once: true\n", ""));
+    assert!(
+        missing
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "trigger.clock_once_required"),
+        "{:#?}",
+        missing.diagnostics
+    );
+    let false_once = report(format_3_11_clock_story().replace("once: true", "once: false"));
+    assert!(
+        false_once
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "trigger.clock_once_required"),
+        "{:#?}",
+        false_once.diagnostics
+    );
+}
+
+#[test]
+fn clock_triggers_require_a_declared_setting_location() {
+    let missing = report(format_3_11_clock_story().replace("    location: setting.study\n", ""));
+    assert!(
+        missing
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "trigger.clock_location_required"),
+        "{:#?}",
+        missing.diagnostics
+    );
+    let unknown = report(format_3_11_clock_story().replace(
+        "    once: true\n    location: setting.study",
+        "    once: true\n    location: setting.parlor",
+    ));
+    assert!(unknown
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "reference.unknown"));
+    let wrong_type = report(format_3_11_clock_story().replace(
+        "    once: true\n    location: setting.study",
+        "    once: true\n    location: entity.knife",
+    ));
+    assert!(wrong_type
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "reference.wrong_type"));
+}
+
+#[test]
+fn clock_trigger_narrative_must_be_a_non_empty_string() {
+    let blank = report(format_3_11_clock_story().replace(
+        "    narrative: The culprit gathers their coat and slips out of the study.",
+        "    narrative: \" \"",
+    ));
+    assert!(
+        blank
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "trigger.clock_narrative"),
+        "{:#?}",
+        blank.diagnostics
+    );
+}
+
+#[test]
+fn clock_trigger_speaker_requires_narrative_and_a_declared_character() {
+    let without_narrative = report(format_3_11_clock_story().replace(
+        "    narrative: The culprit gathers their coat and slips out of the study.\n",
+        "",
+    ));
+    assert!(
+        without_narrative
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "trigger.clock_speaker_without_narrative"),
+        "{:#?}",
+        without_narrative.diagnostics
+    );
+    let unknown = report(format_3_11_clock_story().replace(
+        "    speaker: character.culprit",
+        "    speaker: character.nobody",
+    ));
+    assert!(unknown
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "reference.unknown"));
+    let wrong_type = format_3_11_clock_story().replace(
+        "    speaker: character.culprit",
+        "    speaker: entity.knife",
+    );
+    let wrong_type = report(wrong_type);
+    assert!(wrong_type
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "reference.wrong_type"));
+}
+
+#[test]
+fn clock_trigger_effects_reject_after_delays() {
+    let result = report(format_3_11_clock_story().replace(
+        "      - operation: move\n        subjects: [character.culprit]\n        setting: setting.foyer",
+        "      - operation: move\n        subjects: [character.culprit]\n        setting: setting.foyer\n        after: 10m",
+    ));
+    let delayed = result
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "trigger.clock_effect_after")
+        .expect("`after` rejection");
+    assert_eq!(
+        delayed.pointer.as_deref(),
+        Some("/triggers/0/effects/0/after")
+    );
+}
+
+#[test]
+fn clock_trigger_when_predicates_warn_and_actor_predicates_fail() {
+    // `at` names the acting player's location; a clock trigger has no actor.
+    let at_predicate = report(format_3_11_clock_story().replace(
+        "    once: true\n    location: setting.study",
+        "    once: true\n    location: setting.study\n    when:\n      all:\n        - at: setting.study",
+    ));
+    assert!(
+        at_predicate
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code == "trigger.clock_when_consumed"
+                    && diagnostic.severity == Severity::Warning
+            ),
+        "{:#?}",
+        at_predicate.diagnostics
+    );
+    assert!(
+        at_predicate
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code == "trigger.clock_actor_predicate"
+                    && diagnostic.severity == Severity::Error
+            ),
+        "{:#?}",
+        at_predicate.diagnostics
+    );
+    // `knows` is equally actor-bound.
+    let knows_predicate = report(format_3_11_clock_story().replace(
+        "    once: true\n    location: setting.study",
+        "    once: true\n    location: setting.study\n    when:\n      all:\n        - knows: fact.culprit_left_study",
+    ));
+    assert!(knows_predicate
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "trigger.clock_actor_predicate"));
+    // A world-state predicate is accepted, with only the consumption warning.
+    let flag_predicate = report(format_3_11_clock_story().replace(
+        "    once: true\n    location: setting.study",
+        "    once: true\n    location: setting.study\n    when:\n      all:\n        - flag: flag.culprit_named",
+    ));
+    assert!(
+        flag_predicate.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "trigger.clock_when_consumed"
+                && diagnostic.severity == Severity::Warning
+        }),
+        "{:#?}",
+        flag_predicate.diagnostics
+    );
+    assert!(flag_predicate.valid, "{:#?}", flag_predicate.diagnostics);
+    assert!(
+        flag_predicate.diagnostics.len() == 1,
+        "{:#?}",
+        flag_predicate.diagnostics
+    );
+}
+
+#[test]
+fn clock_trigger_day_and_time_shapes_are_validated() {
+    let negative_day =
+        report(format_3_11_clock_story().replace("        day: 0", "        day: -1"));
+    assert!(
+        negative_day
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "trigger.clock_day"),
+        "{:#?}",
+        negative_day.diagnostics
+    );
+    let bad_time = report(
+        format_3_11_clock_story().replace("        time: \"21:30\"", "        time: \"24:30\""),
+    );
+    assert!(bad_time
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "trigger.clock_time"));
+    let missing_time = report(format_3_11_clock_story().replace("        time: \"21:30\"\n", ""));
+    assert!(missing_time
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "trigger.clock_time"));
+    let unknown_field = report(format_3_11_clock_story().replace(
+        "      clock:\n        day: 0",
+        "      clock:\n        minute: 30\n        day: 0",
+    ));
+    assert!(unknown_field
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "trigger.clock_field"));
+    let scalar = report(format_3_11_clock_story().replace(
+        "      clock:\n        day: 0\n        time: \"21:30\"",
+        "      clock: \"21:30\"",
+    ));
+    assert!(scalar
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "trigger.clock_type"));
+}
+
+#[test]
+fn clock_triggers_may_share_a_due_time_and_default_the_day() {
+    // Duplicate `(day, time)` pairs are allowed; authored order is the
+    // documented tiebreak. The second trigger also omits `day`, which
+    // defaults to the case's initial day, and carries narration only.
+    let doubled = report(format_3_11_clock_story().replace(
+        "cards:\n",
+        "  - id: trigger.study_chime\n    name: The clock chimes half past nine\n    on:\n      clock:\n        time: \"21:30\"\n    once: true\n    location: setting.study\n    narrative: The study clock chimes half past nine.\ncards:\n",
+    ));
+    assert!(doubled.valid, "{:#?}", doubled.diagnostics);
+    assert!(doubled.diagnostics.is_empty(), "{:#?}", doubled.diagnostics);
+}

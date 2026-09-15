@@ -1,0 +1,117 @@
+# Format 3.11 clock-trigger example (ADR-019, narrator-validator#124).
+# A single clock trigger fires at a whole-minute due time, narrates the event
+# to the witnesses gathered at its `location`, moves the culprit, and reveals
+# a nested result fact following the existing nested-fact rules.
+case:
+  id: case.example
+  format_version: "3.11.0"
+  features: [reference_text_v1]
+  ruleset:
+    id: ruleset.standard_mystery
+    version: "9.0.0"
+  players:
+    min: 1
+    max: 4
+  initial_time: "21:00"
+  entry_settings: [setting.foyer]
+  exit_settings: [setting.foyer]
+solution:
+  max_attempts: 3
+  session_timeout_minutes: 30
+  steps:
+    - id: step.name_culprit
+      prompt: Who killed [[character.victim.description]]?
+      time_cost_minutes: 5
+      rows:
+        - match: n_of_m
+          n: 1
+          cards: [character.culprit]
+      on_success:
+        effects:
+          - operation: set_flag
+            flag: flag.culprit_named
+            value: true
+        points: 10
+      on_failure:
+        points: -5
+        notes: An innocent name is spoken aloud, and the real culprit relaxes.
+end_states:
+  - id: end.full_solution
+    name: Solved the case
+    outcome: won
+    resolution: full
+    requires: [flag.culprit_named]
+    text: You answer every question correctly.
+settings:
+  - id: setting.world
+    type: island
+    navigable: false
+    description: The world containing the playable rooms.
+  - id: setting.foyer
+    type: room
+    description: The entry foyer.
+    parent: setting.world
+  - id: setting.study
+    type: room
+    description: The study where the mystery occurred.
+    parent: setting.world
+routes:
+  - id: route.foyer_study
+    from: setting.foyer
+    to: setting.study
+    bidirectional: true
+    travel_minutes: 1
+characters:
+  - id: character.victim
+    description: The victim at the center of the mystery.
+  - id: character.culprit
+    description: A suspect with a carefully guarded secret.
+entities:
+  - id: entity.knife
+    description: A knife found in the study.
+    initial:
+      container: setting.study
+events:
+  - id: event.murder
+    day: 0
+    time: "21:18"
+    duration_minutes: 0
+    location: setting.study
+    participants: [character.victim, character.culprit]
+deductions: []
+flags:
+  - id: flag.culprit_named
+    name: Culprit named
+    description: Whether the culprit has been correctly named.
+    initial_state: false
+triggers:
+  - id: trigger.culprit_leaves_study
+    name: The culprit leaves the study
+    on:
+      clock:
+        day: 0
+        time: "21:30"
+    once: true
+    location: setting.study
+    narrative: The culprit gathers their coat and slips out of the study.
+    speaker: character.culprit
+    effects:
+      - operation: move
+        subjects: [character.culprit]
+        setting: setting.foyer
+    facts:
+      - id: fact.culprit_left_study
+        statement: The culprit left the study at half past nine.
+cards:
+  - tag_id: 0
+    subject: setting.foyer
+  - tag_id: 1
+    subject: setting.study
+  - tag_id: 2
+    subject: character.victim
+  - tag_id: 3
+    subject: character.culprit
+  - tag_id: 4
+    subject: entity.knife
+  - tag_id: 5
+    subject: command.solve
