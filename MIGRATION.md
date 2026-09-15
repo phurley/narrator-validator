@@ -1,3 +1,23 @@
+## Format 3.10 / ruleset 9
+
+Select `case.format_version: "3.10.0"` and standard mystery ruleset `9.0.0`.
+Rulesets 1–8 remain immutable. The new `adjacent` candidate source produces
+settings connected by a directly authored outgoing route (or the reverse of a
+bidirectional route), ignoring its gate. It never exposes nonadjacent settings.
+
+Move accepts a required `destination` setting and optional single carried entity
+`item`. Use's optional target also includes adjacent settings. Author a Use trigger
+binding the key to the destination, requiring the source location and held key,
+and setting the route's unlocking flag. Use works with either card ordering.
+Move with that item applies the same Use trigger effects atomically and traverses
+only if the direct route is then passable. Failure commits no effects; success
+charges one route cost. Ordinary Move still requires a passable route. Candidate
+options do not guess unlocking items from secret trigger predicates.
+
+The static playability analysis conservatively excludes adjacent commands from
+command witnesses and reports unsupported/inconclusive where needed. It still
+models ordinary gated route traversal; it does not prove item-assisted movement.
+
 # Format 3.9 subject command overrides
 
 Set `case.format_version: "3.9.0"` to author optional per-subject

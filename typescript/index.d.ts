@@ -210,7 +210,7 @@ export interface RulesetCommandParameter {
   min: number
   max: number
   candidates?: {
-    from: Array<'all' | 'current_location' | 'inventory' | 'reachable' | 'known' | 'established'>
+    from: Array<'all' | 'current_location' | 'inventory' | 'reachable' | 'adjacent' | 'known' | 'established'>
     capabilities?: Array<'portable'>
   }
 }
@@ -232,7 +232,7 @@ export interface RulesetAnswerCard {
 
 export interface StandardMysteryRuleset {
   id: 'ruleset.standard_mystery'
-  version: '1.0.0' | '2.0.0' | '3.0.0' | '4.0.0' | '5.0.0' | '6.0.0' | '7.0.0' | '8.0.0'
+  version: '1.0.0' | '2.0.0' | '3.0.0' | '4.0.0' | '5.0.0' | '6.0.0' | '7.0.0' | '8.0.0' | '9.0.0'
   commands: RulesetCommand[]
   command_capabilities: Array<{
     command_id: string

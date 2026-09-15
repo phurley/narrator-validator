@@ -321,7 +321,9 @@ material with no runtime projection.
 
 ## Versioned mystery ruleset
 
-The latest catalog is `ruleset.standard_mystery@8.0.0` (Format 3.7 or later).
+The latest catalog is `ruleset.standard_mystery@9.0.0` (Format 3.10 or later).
+It adds an optional carried item to Move and adjacent-room targets to Use;
+see [migration notes](MIGRATION.md#format-310--ruleset-9) for the atomic unlocking contract.
 It adds inventory to Open and Search target candidates, retaining current-room
 candidates and every other command rule from 7.0.0. Search remains broad and
 may find nothing; authored triggers still control their discovery effects.

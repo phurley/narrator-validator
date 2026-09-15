@@ -2035,7 +2035,7 @@ fn rejects_unknown_and_incompatible_rulesets_with_version_guidance() {
 
     let incompatible = report(
         with_standard_ruleset(VALID_FORMAT_3_STORY)
-            .replace("version: \"1.0.0\"", "version: \"9.0.0\""),
+            .replace("version: \"1.0.0\"", "version: \"10.0.0\""),
     );
     let diagnostic = incompatible
         .diagnostics
@@ -2044,7 +2044,7 @@ fn rejects_unknown_and_incompatible_rulesets_with_version_guidance() {
         .expect("incompatible ruleset diagnostic");
     assert!(diagnostic
         .message
-        .contains("1.0.0, 2.0.0, 3.0.0, 4.0.0, 5.0.0, 6.0.0, 7.0.0, or 8.0.0"));
+        .contains("1.0.0, 2.0.0, 3.0.0, 4.0.0, 5.0.0, 6.0.0, 7.0.0, 8.0.0, or 9.0.0"));
 }
 
 #[test]
@@ -7324,4 +7324,119 @@ fn command_overrides_custom_commands_use_first_parameter_for_all_subject_kinds()
             denied.diagnostics
         );
     }
+}
+
+#[test]
+fn ruleset_9_requires_format_3_10_and_keeps_step_solution() {
+    let story = format_3_7_step_story()
+        .replace("3.7.0", "3.10.0")
+        .replace("7.0.0", "9.0.0");
+    let current = report(story.clone());
+    assert!(current.valid, "{:#?}", current.diagnostics);
+    let old = report(story.replace("3.10.0", "3.9.0"));
+    assert!(old
+        .diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.code == "ruleset.format_incompatible"));
+}
+
+#[test]
+fn adjacent_source_is_setting_only_and_format_gated() {
+    for (version, kind, expected) in [
+        ("3.10.0", "setting", None),
+        (
+            "3.9.0",
+            "setting",
+            Some("command.candidates_format_incompatible"),
+        ),
+        (
+            "3.10.0",
+            "entity",
+            Some("command.candidates_source_incompatible"),
+        ),
+        (
+            "3.10.0",
+            "character",
+            Some("command.candidates_source_incompatible"),
+        ),
+    ] {
+        let source = VALID_FORMAT_3_STORY.replace("3.0.0", version).replace(
+            "      - name: target\n        types: [entity]\n        min: 1\n        max: 1",
+            &format!("      - name: target\n        types: [{kind}]\n        min: 1\n        max: 1\n        candidates: {{from: [adjacent]}}"),
+        );
+        let result = report(source);
+        if let Some(code) = expected {
+            assert!(
+                result.diagnostics.iter().any(|d| d.code == code),
+                "{:#?}",
+                result.diagnostics
+            );
+        } else {
+            assert!(
+                !result
+                    .diagnostics
+                    .iter()
+                    .any(|d| d.code.starts_with("command.candidates")),
+                "{:#?}",
+                result.diagnostics
+            );
+        }
+    }
+}
+
+#[test]
+fn move_item_signature_requires_optional_single_entity_in_new_format() {
+    for (version, kind, min, max, valid) in [
+        ("3.10.0", "entity", 0, 1, true),
+        ("3.9.0", "entity", 0, 1, false),
+        ("3.10.0", "entity", 1, 1, false),
+        ("3.10.0", "entity", 0, 2, false),
+        ("3.10.0", "setting", 0, 1, false),
+    ] {
+        let mut root: Value = serde_yaml::from_str(VALID_FORMAT_3_STORY).unwrap();
+        root["case"]["format_version"] = Value::String(version.into());
+        root["commands"].as_sequence_mut().unwrap().push(serde_yaml::from_str(&format!(
+            "id: command.move\nname: Move\ndescription: Move.\ndefault_cost_minutes: 0\nparameters:\n  - {{name: destination, types: [setting], min: 1, max: 1}}\n  - {{name: item, types: [{kind}], min: {min}, max: {max}, candidates: {{from: [inventory]}}}}"
+        )).unwrap());
+        let result = report(serde_yaml::to_string(&root).unwrap());
+        assert_eq!(
+            !result
+                .diagnostics
+                .iter()
+                .any(|d| d.code == "command.runtime_signature"),
+            valid,
+            "{:#?}",
+            result.diagnostics
+        );
+    }
+}
+
+#[test]
+fn adjacent_unlock_paths_are_inconclusive_until_the_reducer_is_modeled() {
+    let source = format_3_7_step_story()
+        .replace("3.7.0", "3.10.0")
+        .replace("version: \"7.0.0\"", "version: \"9.0.0\"")
+        .replace("    travel_minutes: 1", "    travel_minutes: 1\n    requires: [flag.unlocked]")
+        .replace("flags:\n", "flags:\n  - id: flag.unlocked\n    name: Unlocked\n    description: The key unlocks the route.\n    initial_state: false\n")
+        .replace("cards:\n", "triggers:\n  - id: trigger.unlock\n    name: Unlock\n    on:\n      command: command.use\n      parameters:\n        item: entity.knife\n        target: setting.study\n    effects:\n      - operation: set_flag\n        flag: flag.unlocked\n        value: true\ncards:\n");
+    let result = report(source);
+    assert!(result.valid, "{:#?}", result.diagnostics);
+    let analysis = result.playability.unwrap();
+    let full = analysis
+        .terminal_paths
+        .iter()
+        .find(|path| path.id == "end.full_solution")
+        .unwrap();
+    assert_eq!(
+        full.status,
+        narrator_validator::PlayabilityStatus::Inconclusive,
+        "{full:#?}"
+    );
+    assert!(full.lower_bound.is_none());
+    assert!(
+        full.blocker
+            .as_ref()
+            .is_some_and(|blocker| blocker.code == "playability.unsupported_adjacent_command"),
+        "{full:#?}"
+    );
 }

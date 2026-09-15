@@ -80,3 +80,9 @@ jobs:
           node scripts/check-wasm-parity.mjs
           tests/fixtures/format-3.3-solve-card-sets pkg
           "$RUNNER_TEMP/native-report.json"
+      - name: Upload verified canonical browser package
+        uses: actions/upload-artifact@v4
+        with:
+          name: validator-web-package
+          path: pkg/
+          if-no-files-found: error

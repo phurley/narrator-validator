@@ -14,7 +14,8 @@ pub const STANDARD_MYSTERY_RULESET_VERSION_6: &str = "6.0.0";
 pub const STANDARD_MYSTERY_RULESET_VERSION_7: &str = "7.0.0";
 pub const STANDARD_MYSTERY_RULESET_VERSION_8: &str = "8.0.0";
 /// Latest standard mystery ruleset authored by this validator release.
-pub const STANDARD_MYSTERY_RULESET_VERSION: &str = STANDARD_MYSTERY_RULESET_VERSION_8;
+pub const STANDARD_MYSTERY_RULESET_VERSION_9: &str = "9.0.0";
+pub const STANDARD_MYSTERY_RULESET_VERSION: &str = STANDARD_MYSTERY_RULESET_VERSION_9;
 
 /// tagStandard41h12 IDs 2000 through 2112 inclusive, immediately below the
 /// scanner-control reservation at 2113/2114, are permanently reserved for
@@ -57,10 +58,10 @@ pub struct RulesetCommandCapability {
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RulesetError {
-    #[error("unknown ruleset `{id}`; supported rulesets: ruleset.standard_mystery@1.0.0, @2.0.0, @3.0.0, @4.0.0, @5.0.0, @6.0.0, @7.0.0, and @8.0.0")]
+    #[error("unknown ruleset `{id}`; supported rulesets: ruleset.standard_mystery@1.0.0, @2.0.0, @3.0.0, @4.0.0, @5.0.0, @6.0.0, @7.0.0, @8.0.0, and @9.0.0")]
     Unknown { id: String },
     #[error(
-        "ruleset `{id}` does not support version `{version}`; use version 1.0.0, 2.0.0, 3.0.0, 4.0.0, 5.0.0, 6.0.0, 7.0.0, or 8.0.0"
+        "ruleset `{id}` does not support version `{version}`; use version 1.0.0, 2.0.0, 3.0.0, 4.0.0, 5.0.0, 6.0.0, 7.0.0, 8.0.0, or 9.0.0"
     )]
     IncompatibleVersion { id: String, version: String },
 }
@@ -113,6 +114,11 @@ pub fn resolve_ruleset(reference: &RulesetReference) -> Result<ResolvedRuleset, 
         ),
         STANDARD_MYSTERY_RULESET_VERSION_8 => (
             standard_mystery_commands_8_0_yaml(),
+            RECONCILIATION_COMMAND_CAPABILITIES,
+            Some(STANDARD_MYSTERY_ANSWERS_7_0_YAML),
+        ),
+        STANDARD_MYSTERY_RULESET_VERSION_9 => (
+            standard_mystery_commands_9_0_yaml(),
             RECONCILIATION_COMMAND_CAPABILITIES,
             Some(STANDARD_MYSTERY_ANSWERS_7_0_YAML),
         ),
@@ -702,6 +708,27 @@ fn standard_mystery_commands_8_0_yaml() -> &'static str {
         .as_str()
 }
 
+// Append-only catalog: only Move and Use gain adjacent-room operands.
+fn standard_mystery_commands_9_0_yaml() -> &'static str {
+    static CATALOG: OnceLock<String> = OnceLock::new();
+    CATALOG.get_or_init(|| {
+        let mut catalog: serde_yaml::Value = serde_yaml::from_str(standard_mystery_commands_8_0_yaml()).unwrap();
+        for command in catalog["commands"].as_sequence_mut().unwrap() {
+            match command["id"].as_str().unwrap() {
+                "command.move" => {
+                    command["parameters"][0]["candidates"]["from"] = serde_yaml::from_str("[reachable, adjacent]").unwrap();
+                    command["parameters"].as_sequence_mut().unwrap().push(serde_yaml::from_str(
+                        "{name: item, description: The carried entity used to unlock the destination., types: [entity], min: 0, max: 1, candidates: {from: [inventory]}}"
+                    ).unwrap());
+                }
+                "command.use" => command["parameters"][1]["candidates"]["from"] = serde_yaml::from_str("[current_location, inventory, adjacent]").unwrap(),
+                _ => {}
+            }
+        }
+        serde_yaml::to_string(&catalog).unwrap()
+    }).as_str()
+}
+
 // This is the immutable 7.0.0 answer-deck catalog: 29 cards (10 motive, 8
 // time, 11 method), verbatim from docs/answer-deck-vocabulary.md, the
 // authoritative source. `tag_id`s are assigned descending from 2112 and
@@ -1260,7 +1287,7 @@ mod tests {
     fn unknown_version_error_names_8_0_0() {
         let error = resolve_ruleset(&RulesetReference {
             id: STANDARD_MYSTERY_RULESET_ID.to_string(),
-            version: "9.0.0".to_string(),
+            version: "10.0.0".to_string(),
         })
         .expect_err("unpublished version must error");
         assert!(matches!(error, RulesetError::IncompatibleVersion { .. }));
@@ -1276,11 +1303,11 @@ mod tests {
     }
 
     #[test]
-    fn ruleset_version_constant_points_at_8_0_0() {
-        assert_eq!(STANDARD_MYSTERY_RULESET_VERSION, "8.0.0");
+    fn ruleset_version_constant_points_at_9_0_0() {
+        assert_eq!(STANDARD_MYSTERY_RULESET_VERSION, "9.0.0");
         assert_eq!(
             STANDARD_MYSTERY_RULESET_VERSION,
-            STANDARD_MYSTERY_RULESET_VERSION_8
+            STANDARD_MYSTERY_RULESET_VERSION_9
         );
     }
 
@@ -1392,5 +1419,39 @@ mod tests {
         assert_eq!(seen_tags.len(), 29);
         assert_eq!(*seen_tags.iter().min().unwrap(), 2084);
         assert_eq!(*seen_tags.iter().max().unwrap(), 2112);
+    }
+    #[test]
+    fn catalog_9_changes_only_move_and_use() {
+        let old = resolve_ruleset(&RulesetReference {
+            id: STANDARD_MYSTERY_RULESET_ID.into(),
+            version: "8.0.0".into(),
+        })
+        .unwrap();
+        let new = resolve_ruleset(&RulesetReference {
+            id: STANDARD_MYSTERY_RULESET_ID.into(),
+            version: "9.0.0".into(),
+        })
+        .unwrap();
+        assert_eq!(old.answers_yaml, new.answers_yaml);
+        assert_eq!(old.command_capabilities, new.command_capabilities);
+        let old: serde_yaml::Value = serde_yaml::from_str(old.commands_yaml).unwrap();
+        let mut expected = old.clone();
+        for command in expected["commands"].as_sequence_mut().unwrap() {
+            match command["id"].as_str().unwrap() {
+                "command.move" => {
+                    command["parameters"][0]["candidates"]["from"] =
+                        serde_yaml::from_str("[reachable, adjacent]").unwrap();
+                    command["parameters"].as_sequence_mut().unwrap().push(serde_yaml::from_str("{name: item, description: The carried entity used to unlock the destination., types: [entity], min: 0, max: 1, candidates: {from: [inventory]}}").unwrap());
+                }
+                "command.use" => {
+                    command["parameters"][1]["candidates"]["from"] =
+                        serde_yaml::from_str("[current_location, inventory, adjacent]").unwrap()
+                }
+                _ => {}
+            }
+        }
+        let actual: serde_yaml::Value = serde_yaml::from_str(new.commands_yaml).unwrap();
+        assert_eq!(actual, expected);
+        assert_ne!(actual, old);
     }
 }
