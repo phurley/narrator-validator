@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Fail when a commit changes the crate version without an exact release tag.
+# A merge may integrate an already-tagged direct parent without changing its tree.
 set -euo pipefail
 
 repo="${1:-.}"
@@ -59,9 +60,23 @@ EOF
 fi
 
 if [[ "$tag_commit" != "$commit_sha" ]]; then
+  # Preserve the immutable tested release commit when GitHub integrates it with
+  # a merge commit. Only a direct parent of an actual merge qualifies, and every
+  # tracked byte must match; matching versions or an arbitrary ancestor do not.
+  read -r -a commit_and_parents <<< "$(git_in_repo rev-list --parents -n 1 "$commit_sha")"
+  if (( ${#commit_and_parents[@]} > 2 )); then
+    for merge_parent in "${commit_and_parents[@]:1}"; do
+      if [[ "$merge_parent" == "$tag_commit" ]] &&
+         [[ "$(git_in_repo rev-parse "$commit_sha^{tree}")" == "$(git_in_repo rev-parse "$tag_commit^{tree}")" ]]; then
+        echo "OK: $commit_sha integrates exact release $tag at direct parent $tag_commit with an identical tree"
+        exit 0
+      fi
+    done
+  fi
   cat >&2 <<EOF
 FAIL: Cargo.toml changed from $parent_version to $version at $commit_sha,
-but $tag points at $tag_commit instead of the version-bump commit.
+but $tag points at $tag_commit instead of the version-bump commit or an
+identical-tree direct parent of this merge.
 
 Release tags are immutable. Correct the version on main and create a new exact
 release tag at its version-bump commit; do not move or force-push $tag.
