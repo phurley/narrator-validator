@@ -5309,7 +5309,10 @@ flags:
             PlayabilityStatus::Proved,
             "fact owned by clock trigger at unreachable location should block the end: {end:#?}"
         );
-        let blocker = end.blocker.as_ref().expect("a blocked end carries a blocker");
+        let blocker = end
+            .blocker
+            .as_ref()
+            .expect("a blocked end carries a blocker");
         assert_eq!(
             blocker.code, "playability.route_time_blocked",
             "clock-trigger-blocked facts should report as route_time_blocked: {blocker:#?}"
