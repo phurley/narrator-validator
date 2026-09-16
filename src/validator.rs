@@ -5,18 +5,18 @@ use serde::Deserialize;
 use serde_yaml::{Mapping, Value};
 
 use crate::{
-    parse_reference_text, reference_kind, resolve_ruleset, scanner_control_role_for_tag_id,
-    story_test::validate_story_test_script, story_test_directory, Diagnostic, DisclosureClass,
-    Position, ReferenceProvenance, ReferenceTextSegment, RelatedLocation, ResolvedReferenceText,
-    RulesetReference, Severity, SourceFile, SourceRange, ValidationReport, ANSWER_DECK_TAG_ID_MAX,
-    ANSWER_DECK_TAG_ID_MIN, CONSUMER_FIELDS, MAX_SOLUTION_ANSWER_CARDS, MAX_SOLUTION_QUESTIONS,
-    MIN_SOLUTION_ANSWER_CARDS, MIN_SOLUTION_QUESTIONS, REFERENCE_TEXT_FEATURE,
-    STANDARD_MYSTERY_RULESET_ID, STANDARD_MYSTERY_RULESET_VERSION_2,
-    STANDARD_MYSTERY_RULESET_VERSION_3, STANDARD_MYSTERY_RULESET_VERSION_4,
-    STANDARD_MYSTERY_RULESET_VERSION_5, STANDARD_MYSTERY_RULESET_VERSION_6,
-    STANDARD_MYSTERY_RULESET_VERSION_7, STANDARD_MYSTERY_RULESET_VERSION_8,
-    STANDARD_MYSTERY_RULESET_VERSION_9, STORY_FORMAT_VERSION, SUPPORTED_FEATURES,
-    VALIDATOR_VERSION,
+    is_story_test_path, parse_reference_text, reference_kind, resolve_ruleset,
+    scanner_control_role_for_tag_id, story_test::validate_story_test_script, story_test_directory,
+    Diagnostic, DisclosureClass, Position, ReferenceProvenance, ReferenceTextSegment,
+    RelatedLocation, ResolvedReferenceText, RulesetReference, Severity, SourceFile, SourceRange,
+    ValidationReport, ANSWER_DECK_TAG_ID_MAX, ANSWER_DECK_TAG_ID_MIN, CONSUMER_FIELDS,
+    MAX_SOLUTION_ANSWER_CARDS, MAX_SOLUTION_QUESTIONS, MIN_SOLUTION_ANSWER_CARDS,
+    MIN_SOLUTION_QUESTIONS, REFERENCE_TEXT_FEATURE, STANDARD_MYSTERY_RULESET_ID,
+    STANDARD_MYSTERY_RULESET_VERSION_2, STANDARD_MYSTERY_RULESET_VERSION_3,
+    STANDARD_MYSTERY_RULESET_VERSION_4, STANDARD_MYSTERY_RULESET_VERSION_5,
+    STANDARD_MYSTERY_RULESET_VERSION_6, STANDARD_MYSTERY_RULESET_VERSION_7,
+    STANDARD_MYSTERY_RULESET_VERSION_8, STANDARD_MYSTERY_RULESET_VERSION_9, STORY_FORMAT_VERSION,
+    SUPPORTED_FEATURES, VALIDATOR_VERSION,
 };
 
 const MAX_REPOSITORY_FILES: usize = 512;
@@ -5238,7 +5238,7 @@ impl<'a> Validator<'a> {
         }
 
         for file in self.files {
-            if !file.path.starts_with("scripts/") {
+            if !is_story_test_path(&file.path) {
                 continue;
             }
             for problem in validate_story_test_script(&file.source) {

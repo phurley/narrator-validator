@@ -60,9 +60,50 @@ pub fn end_state_contract_metadata_json() -> String {
 /// Root directory for ADR-021 story tests: `scripts/<end_state id>/*.json`.
 pub const STORY_TEST_ROOT: &str = "scripts";
 
-/// The directory an end state's ADR-021 story tests live under. A story
-/// test for `end_state_id` is any file whose path starts with
-/// `story_test_directory(end_state_id)` and ends in `.json`.
+/// Whether `path` names an ADR-021 story test script.
+///
+/// Story tests live exactly one directory below [`STORY_TEST_ROOT`]. JSON
+/// files elsewhere under that root are story-owned support data, and
+/// `<name>.meta.json` files are optional story-test sidecars.
+pub fn is_story_test_path(path: &str) -> bool {
+    let mut segments = path.split('/');
+    let (Some(root), Some(end_state), Some(name), None) = (
+        segments.next(),
+        segments.next(),
+        segments.next(),
+        segments.next(),
+    ) else {
+        return false;
+    };
+
+    root == STORY_TEST_ROOT
+        && !end_state.is_empty()
+        && !name.is_empty()
+        && name.ends_with(".json")
+        && !name.ends_with(".meta.json")
+}
+
+/// The directory an end state's ADR-021 story tests live under.
 pub fn story_test_directory(end_state_id: &str) -> String {
     format!("{STORY_TEST_ROOT}/{end_state_id}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_story_test_path;
+
+    #[test]
+    fn story_test_paths_have_exactly_an_end_state_and_json_name() {
+        assert!(is_story_test_path("scripts/end.full_solution/a.json"));
+
+        for path in [
+            "scripts/shared-deck.json",
+            "scripts/end.full_solution/a.meta.json",
+            "scripts/end.full_solution/deep/a.json",
+            "other/end.full_solution/a.json",
+            "scripts//a.json",
+        ] {
+            assert!(!is_story_test_path(path), "{path}");
+        }
+    }
 }

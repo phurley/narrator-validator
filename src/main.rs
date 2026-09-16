@@ -6,8 +6,8 @@ use std::process::ExitCode;
 use serde_yaml::{Mapping, Value};
 
 use narrator_validator::{
-    merge_layers, validate, Diagnostic, PlayabilityReport, PlayabilityStatus, Severity, SourceFile,
-    ValidationReport, VALIDATOR_VERSION,
+    is_story_test_path, merge_layers, validate, Diagnostic, PlayabilityReport, PlayabilityStatus,
+    Severity, SourceFile, ValidationReport, VALIDATOR_VERSION,
 };
 
 #[derive(Clone, Copy)]
@@ -270,7 +270,7 @@ fn is_story_file(relative: &Path) -> bool {
         Some("svg") => relative
             .parent()
             .is_some_and(|parent| parent == Path::new("maps")),
-        Some("json") => relative.starts_with("scripts"),
+        Some("json") => is_story_test_path(&relative.to_string_lossy().replace('\\', "/")),
         _ => false,
     }
 }
