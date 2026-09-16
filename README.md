@@ -306,7 +306,9 @@ off and a per-step `expect` assertion, versioned with the story under
 of only in a nightly cross-repository gate. The validator treats only that
 exact two-segment path below `scripts/` as a story test: JSON at the `scripts/`
 root or in deeper directories is support data, and an optional
-`scripts/<end_state id>/<name>.meta.json` sidecar is not a story test.
+`scripts/<end_state id>/<name>.meta.json` sidecar is not a story test. Validator
+1.21.1 corrected this scope after 1.21.0 treated those support files as invalid
+story tests ([narrator-validator#145](https://github.com/phurley/narrator-validator/issues/145)).
 
 - `story_test.missing` (warning) — an authored end state has no
   `scripts/<end_state id>/*.json` file in the validated file set. The
