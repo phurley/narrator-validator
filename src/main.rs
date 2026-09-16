@@ -260,7 +260,8 @@ fn read_sources(root: &Path) -> Result<Vec<SourceFile>, String> {
 }
 
 /// Story YAML anywhere in the repository, plus Format 3.8 map SVGs, which
-/// live only in `maps/`. Both are UTF-8 text, so `SourceFile` needs no
+/// live only in `maps/`, and ADR-021 story test scripts, which live only
+/// under `scripts/`. All three are UTF-8 text, so `SourceFile` needs no
 /// binary channel; a raster map would, which is why SVG is the only image
 /// format the story contract admits.
 fn is_story_file(relative: &Path) -> bool {
@@ -269,6 +270,7 @@ fn is_story_file(relative: &Path) -> bool {
         Some("svg") => relative
             .parent()
             .is_some_and(|parent| parent == Path::new("maps")),
+        Some("json") => relative.starts_with("scripts"),
         _ => false,
     }
 }

@@ -56,3 +56,13 @@ pub fn end_state_contract_metadata_json() -> String {
     serde_json::to_string(&end_state_contract_metadata())
         .expect("static end-state contract metadata serializes")
 }
+
+/// Root directory for ADR-021 story tests: `scripts/<end_state id>/*.json`.
+pub const STORY_TEST_ROOT: &str = "scripts";
+
+/// The directory an end state's ADR-021 story tests live under. A story
+/// test for `end_state_id` is any file whose path starts with
+/// `story_test_directory(end_state_id)` and ends in `.json`.
+pub fn story_test_directory(end_state_id: &str) -> String {
+    format!("{STORY_TEST_ROOT}/{end_state_id}")
+}

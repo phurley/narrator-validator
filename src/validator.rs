@@ -6,16 +6,17 @@ use serde_yaml::{Mapping, Value};
 
 use crate::{
     parse_reference_text, reference_kind, resolve_ruleset, scanner_control_role_for_tag_id,
-    Diagnostic, DisclosureClass, Position, ReferenceProvenance, ReferenceTextSegment,
-    RelatedLocation, ResolvedReferenceText, RulesetReference, Severity, SourceFile, SourceRange,
-    ValidationReport, ANSWER_DECK_TAG_ID_MAX, ANSWER_DECK_TAG_ID_MIN, CONSUMER_FIELDS,
-    MAX_SOLUTION_ANSWER_CARDS, MAX_SOLUTION_QUESTIONS, MIN_SOLUTION_ANSWER_CARDS,
-    MIN_SOLUTION_QUESTIONS, REFERENCE_TEXT_FEATURE, STANDARD_MYSTERY_RULESET_ID,
-    STANDARD_MYSTERY_RULESET_VERSION_2, STANDARD_MYSTERY_RULESET_VERSION_3,
-    STANDARD_MYSTERY_RULESET_VERSION_4, STANDARD_MYSTERY_RULESET_VERSION_5,
-    STANDARD_MYSTERY_RULESET_VERSION_6, STANDARD_MYSTERY_RULESET_VERSION_7,
-    STANDARD_MYSTERY_RULESET_VERSION_8, STANDARD_MYSTERY_RULESET_VERSION_9, STORY_FORMAT_VERSION,
-    SUPPORTED_FEATURES, VALIDATOR_VERSION,
+    story_test::validate_story_test_script, story_test_directory, Diagnostic, DisclosureClass,
+    Position, ReferenceProvenance, ReferenceTextSegment, RelatedLocation, ResolvedReferenceText,
+    RulesetReference, Severity, SourceFile, SourceRange, ValidationReport, ANSWER_DECK_TAG_ID_MAX,
+    ANSWER_DECK_TAG_ID_MIN, CONSUMER_FIELDS, MAX_SOLUTION_ANSWER_CARDS, MAX_SOLUTION_QUESTIONS,
+    MIN_SOLUTION_ANSWER_CARDS, MIN_SOLUTION_QUESTIONS, REFERENCE_TEXT_FEATURE,
+    STANDARD_MYSTERY_RULESET_ID, STANDARD_MYSTERY_RULESET_VERSION_2,
+    STANDARD_MYSTERY_RULESET_VERSION_3, STANDARD_MYSTERY_RULESET_VERSION_4,
+    STANDARD_MYSTERY_RULESET_VERSION_5, STANDARD_MYSTERY_RULESET_VERSION_6,
+    STANDARD_MYSTERY_RULESET_VERSION_7, STANDARD_MYSTERY_RULESET_VERSION_8,
+    STANDARD_MYSTERY_RULESET_VERSION_9, STORY_FORMAT_VERSION, SUPPORTED_FEATURES,
+    VALIDATOR_VERSION,
 };
 
 const MAX_REPOSITORY_FILES: usize = 512;
@@ -701,6 +702,7 @@ impl<'a> Validator<'a> {
         self.validate_solution();
         self.validate_win_states(&win_states);
         self.validate_end_states(&end_states);
+        self.validate_story_tests(&end_states, &win_states);
         self.validate_references();
         self.validate_duplicate_lists();
         self.validate_deck();
@@ -5204,6 +5206,51 @@ impl<'a> Validator<'a> {
                     });
                     break;
                 }
+            }
+        }
+    }
+
+    /// ADR-021: every authored end state needs at least one story test, and
+    /// every story test script under `scripts/` must have the shape a
+    /// story-test runner can execute. Runs regardless of format version or
+    /// ruleset -- ADR-021 story tests are not gated by either.
+    fn validate_story_tests(&mut self, end_states: &[Item], win_states: &[Item]) {
+        for end_state in end_states.iter().chain(win_states) {
+            let prefix = format!("{}/", story_test_directory(&end_state.id));
+            let has_story_test = self
+                .files
+                .iter()
+                .any(|file| file.path.starts_with(&prefix) && file.path.ends_with(".json"));
+            if !has_story_test {
+                self.push(
+                    Severity::Warning,
+                    "story_test.missing",
+                    format!(
+                        "end state `{}` has no story test under `{prefix}*.json` (ADR-021); a missing story test only fails at edit time here, not in a nightly gate",
+                        end_state.id
+                    ),
+                    &end_state.path,
+                    Some(end_state.pointer.clone()),
+                    None,
+                    Some(end_state.id.clone()),
+                );
+            }
+        }
+
+        for file in self.files {
+            if !file.path.starts_with("scripts/") {
+                continue;
+            }
+            for problem in validate_story_test_script(&file.source) {
+                self.push(
+                    Severity::Error,
+                    "story_test.invalid",
+                    problem.message,
+                    &file.path,
+                    Some(problem.pointer),
+                    None,
+                    None,
+                );
             }
         }
     }

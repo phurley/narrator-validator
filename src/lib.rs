@@ -11,6 +11,7 @@ mod reference_text;
 mod ruleset;
 mod scanner_control;
 mod solution;
+mod story_test;
 mod svg;
 mod validator;
 
@@ -18,8 +19,8 @@ pub use diagnostic::{
     Diagnostic, Position, RelatedLocation, Severity, SourceFile, SourceRange, ValidationReport,
 };
 pub use end_state::{
-    end_state_contract_metadata, end_state_contract_metadata_json, EndStateContractMetadata,
-    OutcomeResolution, END_STATE_STORY_FORMAT_VERSION,
+    end_state_contract_metadata, end_state_contract_metadata_json, story_test_directory,
+    EndStateContractMetadata, OutcomeResolution, END_STATE_STORY_FORMAT_VERSION, STORY_TEST_ROOT,
 };
 pub use layers::merge_layers;
 pub use playability::{
