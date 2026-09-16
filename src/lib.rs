@@ -19,8 +19,9 @@ pub use diagnostic::{
     Diagnostic, Position, RelatedLocation, Severity, SourceFile, SourceRange, ValidationReport,
 };
 pub use end_state::{
-    end_state_contract_metadata, end_state_contract_metadata_json, story_test_directory,
-    EndStateContractMetadata, OutcomeResolution, END_STATE_STORY_FORMAT_VERSION, STORY_TEST_ROOT,
+    end_state_contract_metadata, end_state_contract_metadata_json, is_story_test_path,
+    story_test_directory, EndStateContractMetadata, OutcomeResolution,
+    END_STATE_STORY_FORMAT_VERSION, STORY_TEST_ROOT,
 };
 pub use layers::merge_layers;
 pub use playability::{

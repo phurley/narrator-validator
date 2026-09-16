@@ -515,3 +515,14 @@ const invalidStoryTest = withMalformedStoryTest.diagnostics.find(
 )
 assert.ok(invalidStoryTest, JSON.stringify(withMalformedStoryTest.diagnostics))
 assert.equal(invalidStoryTest.path, 'scripts/end.full_solution/broken.json')
+
+const withNonStoryJson = await validateRepository([
+  ...clockStoryFiles,
+  { path: 'scripts/shared-deck.json', source: JSON.stringify({ support: true }) },
+  { path: 'scripts/end.full_solution/a.meta.json', source: JSON.stringify({ support: true }) },
+  { path: 'scripts/end.full_solution/deep/a.json', source: JSON.stringify({ support: true }) },
+])
+assert.ok(
+  !withNonStoryJson.diagnostics.some((d) => d.code === 'story_test.invalid'),
+  JSON.stringify(withNonStoryJson.diagnostics),
+)

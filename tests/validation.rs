@@ -7578,6 +7578,31 @@ fn story_test_invalid_names_the_malformed_script_file() {
 }
 
 #[test]
+fn story_test_validation_ignores_support_data_sidecars_and_deep_json() {
+    let mut files = story_files(format_3_11_clock_story());
+    for path in [
+        "scripts/shared-deck.json",
+        "scripts/end.full_solution/a.meta.json",
+        "scripts/end.full_solution/deep/a.json",
+    ] {
+        files.push(SourceFile {
+            path: path.to_string(),
+            source: r#"{"support": true}"#.to_string(),
+        });
+    }
+
+    let report = validate(&files);
+    assert!(
+        !report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "story_test.invalid"),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
 fn story_test_invalid_rejects_end_state_on_a_non_final_step() {
     let mut files = story_files(format_3_11_clock_story());
     files.push(SourceFile {

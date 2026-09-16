@@ -303,12 +303,16 @@ off and a per-step `expect` assertion, versioned with the story under
 `scripts/<end_state id>/<name>.json`
 ([ADR-021](https://github.com/phurley/narrator-system/blob/main/ADR-021-one-play-path-and-one-simulation-report.md)
 "Story tests"). This catches a missing regression test at edit time instead
-of only in a nightly cross-repository gate.
+of only in a nightly cross-repository gate. The validator treats only that
+exact two-segment path below `scripts/` as a story test: JSON at the `scripts/`
+root or in deeper directories is support data, and an optional
+`scripts/<end_state id>/<name>.meta.json` sidecar is not a story test.
 
 - `story_test.missing` (warning) — an authored end state has no
   `scripts/<end_state id>/*.json` file in the validated file set. The
   diagnostic's pointer names the end state.
-- `story_test.invalid` (error) — a file under `scripts/` is not a JSON array
+- `story_test.invalid` (error) — a `scripts/<end_state id>/<name>.json` story
+  test (excluding `<name>.meta.json` sidecars) is not a JSON array
   of step objects, each with a string `actor` and exactly one of
   `action`/`solve`, and an optional `expect` block built only from the known
   assertion fields (`verdict`, `location`, `flags`, `clock_minutes`,
