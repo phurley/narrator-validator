@@ -1,4 +1,10 @@
 //! Immutable, versioned command catalogs supplied by Narrator.
+//!
+//! Not every validator rule is ruleset-scoped. `story_test.missing` and
+//! `story_test.invalid` ([`crate::story_test`], ADR-021 "Story tests") run
+//! for every authored end state regardless of which ruleset version (or
+//! none) a story selects: story-test coverage is a property of the story's
+//! own `scripts/` directory, not of the command catalog a ruleset publishes.
 
 use std::sync::OnceLock;
 
