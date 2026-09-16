@@ -295,6 +295,33 @@ current score snapshot. See the [Format 3.4 contract](docs/story-format-3.4.md)
 for legal outcome/tier pairs, deterministic shadowing diagnostics, and the
 behavior-preserving `win_states` transition.
 
+## ADR-021 story tests
+
+Independent of format or ruleset version, the validator requires at least
+one story test per authored end state: a script-driven game with narration
+off and a per-step `expect` assertion, versioned with the story under
+`scripts/<end_state id>/<name>.json`
+([ADR-021](https://github.com/phurley/narrator-system/blob/main/ADR-021-one-play-path-and-one-simulation-report.md)
+"Story tests"). This catches a missing regression test at edit time instead
+of only in a nightly cross-repository gate.
+
+- `story_test.missing` (warning) — an authored end state has no
+  `scripts/<end_state id>/*.json` file in the validated file set. The
+  diagnostic's pointer names the end state.
+- `story_test.invalid` (error) — a file under `scripts/` is not a JSON array
+  of step objects, each with a string `actor` and exactly one of
+  `action`/`solve`, and an optional `expect` block built only from the known
+  assertion fields (`verdict`, `location`, `flags`, `clock_minutes`,
+  `notebook`, `fired_triggers`, `end_state`), with `end_state` legal only on
+  the last step. The validator checks this shape only; it never resolves an
+  id an `expect` block names (a room, flag, fact, trigger, or end state)
+  against the story's own content, since that requires the compiled engine
+  state only the backend builds.
+
+`scripts/*.json` participates in the validated file set the same way
+`maps/*.svg` does: the CLI walks it alongside every `.yaml`/`.yml` file, and
+the WASM package validates whatever `SourceFile` array its caller submits.
+
 ## Format 3.7 multi-step Solve
 
 Format 3.7 replaces Format 3.3's single-commit `solution.questions` with

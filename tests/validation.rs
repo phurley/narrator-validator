@@ -16,6 +16,21 @@ fn report(source: impl Into<String>) -> narrator_validator::ValidationReport {
     validate(&story_files(source.into()))
 }
 
+/// Most fixtures in this file predate ADR-021 story tests and carry no
+/// `scripts/<end_state>/*.json`, so every authored end state now earns a
+/// `story_test.missing` warning (covered directly by the story-test-specific
+/// tests below). Filter that expected warning out before asserting a
+/// fixture is otherwise clean, so this file does not have to grow a
+/// `scripts/` fixture for every end state in every unrelated test.
+fn diagnostics_ignoring_missing_story_tests(
+    diagnostics: &[narrator_validator::Diagnostic],
+) -> Vec<&narrator_validator::Diagnostic> {
+    diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code != "story_test.missing")
+        .collect()
+}
+
 #[test]
 fn playability_report_proves_reachable_path_and_explains_action_and_time_blocks() {
     let root = std::path::Path::new("tests/fixtures/playability-analysis");
@@ -1172,10 +1187,10 @@ fn standard_ruleset_4_0_is_the_format_3_4_manual_notebook_catalog() {
         .replacen("version: \"3.0.0\"", "version: \"4.0.0\"", 1);
     let valid_report = report(source);
     assert!(valid_report.valid, "{:#?}", valid_report.diagnostics);
-    assert!(valid_report
-        .diagnostics
-        .iter()
-        .all(|diagnostic| { diagnostic.code == "win_states.legacy_compatibility" }));
+    assert!(valid_report.diagnostics.iter().all(|diagnostic| {
+        diagnostic.code == "win_states.legacy_compatibility"
+            || diagnostic.code == "story_test.missing"
+    }));
     assert_eq!(valid_report.playability.unwrap().notebook_policies.len(), 4);
 
     let incompatible =
@@ -1295,7 +1310,11 @@ fn format_3_5_command_costs_story() -> String {
 fn command_cost_override_validates_end_to_end() {
     let report = report(format_3_5_command_costs_story());
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert!(report.diagnostics.is_empty(), "{:#?}", report.diagnostics);
+    assert!(
+        diagnostics_ignoring_missing_story_tests(&report.diagnostics).is_empty(),
+        "{:#?}",
+        report.diagnostics
+    );
     assert_eq!(report.format_version.as_deref(), Some("3.5.0"));
 }
 
@@ -1436,7 +1455,11 @@ fn format_3_6_players_story() -> String {
 fn players_description_and_personas_validate_end_to_end() {
     let report = report(format_3_6_players_story());
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert!(report.diagnostics.is_empty(), "{:#?}", report.diagnostics);
+    assert!(
+        diagnostics_ignoring_missing_story_tests(&report.diagnostics).is_empty(),
+        "{:#?}",
+        report.diagnostics
+    );
     assert_eq!(report.format_version.as_deref(), Some("3.6.0"));
 }
 
@@ -1714,7 +1737,11 @@ fn persona_gated_fact_required_by_solution_reports_a_clear_playability_diagnosti
 fn format_3_3_authored_questions_are_private_exact_card_sets() {
     let report = report(format_3_3_question_story());
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert!(report.diagnostics.is_empty(), "{:#?}", report.diagnostics);
+    assert!(
+        diagnostics_ignoring_missing_story_tests(&report.diagnostics).is_empty(),
+        "{:#?}",
+        report.diagnostics
+    );
     let prompt = report
         .reference_text
         .iter()
@@ -2455,7 +2482,11 @@ fn generic_win_states_allow_a_non_murder_story_and_preserve_authored_precedence(
 fn format_3_4_end_states_express_full_partial_deadline_and_condition_outcomes() {
     let report = report(format_3_4_end_state_story());
     assert!(report.valid, "{:#?}", report.diagnostics);
-    assert!(report.diagnostics.is_empty(), "{:#?}", report.diagnostics);
+    assert!(
+        diagnostics_ignoring_missing_story_tests(&report.diagnostics).is_empty(),
+        "{:#?}",
+        report.diagnostics
+    );
     assert_eq!(report.format_version.as_deref(), Some("3.4.0"));
 }
 
@@ -6431,7 +6462,7 @@ fn format_3_7_step_story_validates_clean() {
     let report = report(format_3_7_step_story());
     assert!(report.valid, "{:#?}", report.diagnostics);
     assert_eq!(report.format_version.as_deref(), Some("3.7.0"));
-    assert!(report.diagnostics.is_empty());
+    assert!(diagnostics_ignoring_missing_story_tests(&report.diagnostics).is_empty());
 }
 
 #[test]
@@ -6705,7 +6736,7 @@ fn format_3_8_map_story_validates_clean() {
     let report = map_report(format_3_8_map_story());
     assert!(report.valid, "{:#?}", report.diagnostics);
     assert_eq!(report.format_version.as_deref(), Some("3.8.0"));
-    assert!(report.diagnostics.is_empty());
+    assert!(diagnostics_ignoring_missing_story_tests(&report.diagnostics).is_empty());
     // A map is presentational: adding one must not change what the bounded
     // search proves about the same story without it.
     let with_map = report.playability.expect("format 3 playability report");
@@ -7483,8 +7514,90 @@ fn format_3_11_clock_story() -> String {
 fn format_3_11_clock_story_validates_clean() {
     let result = report(format_3_11_clock_story());
     assert!(result.valid, "{:#?}", result.diagnostics);
-    assert!(result.diagnostics.is_empty(), "{:#?}", result.diagnostics);
+    assert!(
+        diagnostics_ignoring_missing_story_tests(&result.diagnostics).is_empty(),
+        "{:#?}",
+        result.diagnostics
+    );
     assert_eq!(result.format_version.as_deref(), Some("3.11.0"));
+}
+
+#[test]
+fn story_test_missing_warns_per_authored_end_state_with_the_end_states_pointer() {
+    let report = report(format_3_11_clock_story());
+    let diagnostic = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "story_test.missing")
+        .expect("missing story test warning");
+    assert_eq!(diagnostic.severity, Severity::Warning);
+    assert_eq!(diagnostic.path, "end_states.yaml");
+    assert_eq!(diagnostic.pointer.as_deref(), Some("/end_states/0"));
+    assert_eq!(diagnostic.subject_id.as_deref(), Some("end.full_solution"));
+    assert!(
+        report.valid,
+        "a missing story test is a warning, not an error: {:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn story_test_present_for_every_end_state_silences_the_missing_warning() {
+    let mut files = story_files(format_3_11_clock_story());
+    files.push(SourceFile {
+        path: "scripts/end.full_solution/happy_path.json".to_string(),
+        source: r#"[{"actor": "player.1", "action": [[]], "expect": "accepted"}]"#.to_string(),
+    });
+    let report = validate(&files);
+    assert!(
+        !report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "story_test.missing"),
+        "{:#?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn story_test_invalid_names_the_malformed_script_file() {
+    let mut files = story_files(format_3_11_clock_story());
+    files.push(SourceFile {
+        path: "scripts/end.full_solution/broken.json".to_string(),
+        source: "not json".to_string(),
+    });
+    let report = validate(&files);
+    assert!(!report.valid);
+    let diagnostic = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code == "story_test.invalid")
+        .expect("invalid story test diagnostic");
+    assert_eq!(diagnostic.severity, Severity::Error);
+    assert_eq!(diagnostic.path, "scripts/end.full_solution/broken.json");
+}
+
+#[test]
+fn story_test_invalid_rejects_end_state_on_a_non_final_step() {
+    let mut files = story_files(format_3_11_clock_story());
+    files.push(SourceFile {
+        path: "scripts/end.full_solution/premature_end_state.json".to_string(),
+        source: r#"[
+            {"actor": "player.1", "action": [[]], "expect": {"end_state": "end.full_solution"}},
+            {"actor": "player.1", "action": [[]]}
+        ]"#
+        .to_string(),
+    });
+    let report = validate(&files);
+    let diagnostic = report
+        .diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.code == "story_test.invalid"
+                && diagnostic.path == "scripts/end.full_solution/premature_end_state.json"
+        })
+        .expect("invalid story test diagnostic");
+    assert_eq!(diagnostic.pointer.as_deref(), Some("/0/expect/end_state"));
 }
 
 #[test]
@@ -7697,7 +7810,7 @@ fn clock_trigger_when_predicates_warn_and_actor_predicates_fail() {
     );
     assert!(flag_predicate.valid, "{:#?}", flag_predicate.diagnostics);
     assert!(
-        flag_predicate.diagnostics.len() == 1,
+        diagnostics_ignoring_missing_story_tests(&flag_predicate.diagnostics).len() == 1,
         "{:#?}",
         flag_predicate.diagnostics
     );
@@ -7755,5 +7868,9 @@ fn clock_triggers_may_share_a_due_time_and_default_the_day() {
         "  - id: trigger.study_chime\n    name: The clock chimes half past nine\n    on:\n      clock:\n        time: \"21:30\"\n    once: true\n    location: setting.study\n    narrative: The study clock chimes half past nine.\ncards:\n",
     ));
     assert!(doubled.valid, "{:#?}", doubled.diagnostics);
-    assert!(doubled.diagnostics.is_empty(), "{:#?}", doubled.diagnostics);
+    assert!(
+        diagnostics_ignoring_missing_story_tests(&doubled.diagnostics).is_empty(),
+        "{:#?}",
+        doubled.diagnostics
+    );
 }

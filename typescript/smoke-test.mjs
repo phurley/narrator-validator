@@ -463,3 +463,55 @@ const newReport = await validateRepository(newFiles)
 assert.equal(newReport.valid, true, JSON.stringify(newReport.diagnostics))
 const oldReport = await validateRepository(newFiles.map(file => ({...file, source: file.source.replace('3.10.0', '3.9.0')})))
 assert.ok(oldReport.diagnostics.some(d => d.code === 'ruleset.format_incompatible'))
+
+// ADR-021 story tests: `story_test.missing`/`story_test.invalid`. Same
+// fixture and cases as the Rust `story_test_*` tests in tests/validation.rs.
+const clockStorySource = await readFile(
+  new URL('../tests/fixtures/format-3.11-clock-story.yaml', import.meta.url),
+  'utf8',
+)
+const clockStoryFiles = (() => {
+  const paths = { case: 'case', solution: 'case', settings: 'settings', routes: 'settings', cards: 'deck' }
+  const documents = new Map()
+  for (const section of clockStorySource.trimStart().split(/(?=^[a-z_]+:)/m)) {
+    const match = section.match(/^([a-z_]+):/)
+    if (!match) continue
+    const path = `${paths[match[1]] ?? match[1]}.yaml`
+    documents.set(path, (documents.get(path) ?? '') + section)
+  }
+  return [...documents].map(([path, source]) => ({ path, source }))
+})()
+
+const clockStoryReport = await validateRepository(clockStoryFiles)
+assert.equal(clockStoryReport.valid, true, JSON.stringify(clockStoryReport.diagnostics))
+const missingStoryTest = clockStoryReport.diagnostics.find(
+  (d) => d.code === 'story_test.missing',
+)
+assert.ok(missingStoryTest, JSON.stringify(clockStoryReport.diagnostics))
+assert.equal(missingStoryTest.pointer, '/end_states/0')
+assert.equal(missingStoryTest.subject_id, 'end.full_solution')
+
+const withStoryTest = await validateRepository([
+  ...clockStoryFiles,
+  {
+    path: 'scripts/end.full_solution/happy_path.json',
+    source: JSON.stringify([
+      { actor: 'player.1', action: [[]], expect: 'accepted' },
+    ]),
+  },
+])
+assert.ok(
+  !withStoryTest.diagnostics.some((d) => d.code === 'story_test.missing'),
+  JSON.stringify(withStoryTest.diagnostics),
+)
+
+const withMalformedStoryTest = await validateRepository([
+  ...clockStoryFiles,
+  { path: 'scripts/end.full_solution/broken.json', source: 'not json' },
+])
+assert.equal(withMalformedStoryTest.valid, false)
+const invalidStoryTest = withMalformedStoryTest.diagnostics.find(
+  (d) => d.code === 'story_test.invalid',
+)
+assert.ok(invalidStoryTest, JSON.stringify(withMalformedStoryTest.diagnostics))
+assert.equal(invalidStoryTest.path, 'scripts/end.full_solution/broken.json')
